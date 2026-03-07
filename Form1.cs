@@ -107,12 +107,16 @@ namespace WTFnetApp
         public class PingOverlay : Form
     {
         private Label pingLabel;
+        private Label modeLabel;
+
+        private string lastText = "";
+        private string lastMode = "";
 
         public PingOverlay()
         {
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
-            Size = new Size(130, 42);
+            Size = new Size(130, 48);
 
             TopMost = true;
             ShowInTaskbar = false;
@@ -122,7 +126,8 @@ namespace WTFnetApp
 
             pingLabel = new Label
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
+                Height = 24,
                 TextAlign = ContentAlignment.MiddleCenter,
                 Font = new Font("Consolas", 13, FontStyle.Bold),
                 ForeColor = Color.Lime,
@@ -130,6 +135,17 @@ namespace WTFnetApp
                 Text = "-- ms"
             };
 
+            modeLabel = new Label
+            {
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Consolas", 9, FontStyle.Bold),
+                ForeColor = Color.White,
+                BackColor = Color.Transparent,
+                Text = ""
+            };
+
+            Controls.Add(modeLabel);
             Controls.Add(pingLabel);
 
             PositionTopRight();
@@ -144,15 +160,21 @@ namespace WTFnetApp
             Location = new Point(screen.Right - Width - 12, screen.Top + 12);
         }
 
-        public void UpdatePing(string text)
+        public void UpdatePing(string text, string mode)
         {
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => UpdatePing(text)));
+                BeginInvoke(new Action(() => UpdatePing(text, mode)));
                 return;
             }
+            if (text == lastText && mode == lastMode)
+                return;
+
+            lastText = text;
+            lastMode = mode;
 
             pingLabel.Text = text;
+            modeLabel.Text = mode;
 
             if (int.TryParse(text.Replace(" ms", ""), out int ping))
             {
@@ -186,7 +208,7 @@ namespace WTFnetApp
     public partial class Form1 : Form
     {
         // =========================
-        // ?? UI COMPONENTS
+        // UI COMPONENTS
         // =========================
         private LteProTool lteTool = new LteProTool(); 
         private LteDashboardForm lteProDashboard;
@@ -195,26 +217,29 @@ namespace WTFnetApp
         private ContextMenuStrip trayMenu;
         private DashboardForm dashboard;
 
-        private ToolStripMenuItem speedifyMenuItem;
         private ToolStripMenuItem soundsMenuItem;
         private ToolStripMenuItem simulationMenu;
+
+        private ToolStripMenuItem speedifyOffItem;
+        private ToolStripMenuItem speedifySpeedItem;
+        private ToolStripMenuItem speedifySmartItem;
 
         private bool lteDetailedMode = false;
 
         // =========================
-        // ?? UI STATE
+        // UI STATE
         // =========================
         enum NetState { Good, Warning, Critical }
         private NetState currentNetState = NetState.Good;
         private bool overlayVisible = true;
 
         // =========================
-        // ?? CORE LOOP
+        // CORE LOOP
         // =========================
         private bool isRunning = false;
 
         // =========================
-        // ?? NETWORK DATA
+        // NETWORK DATA
         // =========================
         private List<int> pings = new List<int>();
         private List<int> timeouts = new List<int>();
@@ -224,19 +249,19 @@ namespace WTFnetApp
         private int currentPing = 0;
 
         // =========================
-        // ?? DETECTION MEMORY
+        // DETECTION MEMORY
         // =========================
         private double preSpikePressure = 0;
         private int badStreak = 0;
         private int goodStreak = 0;
 
         // =========================
-        // ?? BASELINE LEARNING
+        // BASELINE LEARNING
         // =========================
         private Dictionary<int, List<int>> hourlyHistory = new Dictionary<int, List<int>>();
 
         // =========================
-        // ?? TRAFFIC MONITOR
+        // TRAFFIC MONITOR
         // =========================
         private long lastBytesSent = 0;
         private long lastBytesReceived = 0;
@@ -248,10 +273,22 @@ namespace WTFnetApp
         private int heavyTrafficStreak = 0;
 
         // =========================
-        // ?? SPEEDIFY CONTROL
+        // SPEEDIFY CONTROL
         // =========================
+        enum SpeedifyPolicy
+        {
+            Off,
+            SpeedOnly,
+            Smart
+        }
+
+        private SpeedifyPolicy speedifyPolicy = SpeedifyPolicy.Off;
+        
         private string speedifyMode = "speed";
+        private DateTime lastSpeedifyStateCheck = DateTime.MinValue;
+        private int speedifyStateIntervalSec = 6;
         private bool speedifyEnabled = false;
+        
         private DateTime lastCliCall = DateTime.MinValue;
         private int cliCooldownMs = 1200;
 
@@ -272,7 +309,7 @@ namespace WTFnetApp
         private DateTime stableSince = DateTime.MinValue;
 
         // =========================
-        // ?? REDUNDANT TRACKING
+        // REDUNDANT TRACKING
         // =========================
         private DateTime redundantStart = DateTime.MinValue;
         private double totalRedundantSeconds = 0;
@@ -282,21 +319,21 @@ namespace WTFnetApp
         private DateTime redundantCheckStart = DateTime.MinValue;
 
         // =========================
-        // ?? RECONNECT
+        // RECONNECT
         // =========================
         private DateTime lastReconnect = DateTime.MinValue;
         private int reconnectCooldownSec = 20;
         private bool reconnecting = false;
 
         // =========================
-        // ?? CONNECTION CACHE
+        // CONNECTION CACHE
         // =========================
         private bool hasMultiConnection = false;
         private DateTime lastConnectionCheck = DateTime.MinValue;
         private int connectionCheckIntervalSec = 5;
 
         // =========================
-        // ?? SYSTEM STATE
+        // SYSTEM STATE
         // =========================
         private bool isGameRunning = false;
         private bool isLauncherRunning = false;
@@ -305,11 +342,12 @@ namespace WTFnetApp
         private UdpClient natClient;
         private CancellationTokenSource natToken;
         private bool natKeepAliveRunning = false;
+        private int natSendFailures = 0;
         private DateTime lastGameSeen = DateTime.MinValue;
         private int natGraceSeconds = 15;
 
         // =========================
-        // ?? DEBUG / SIMULATION
+        // DEBUG / SIMULATION
         // =========================
         private bool debugMode = false;
         private bool testMode = false;
@@ -324,7 +362,7 @@ namespace WTFnetApp
         private bool playSounds = true;
 
         // =========================
-        // ?? DEBUG INFO
+        // DEBUG INFO
         // =========================
         private string lastDecisionReason = string.Empty;
         private string lastBlockReason = string.Empty;
@@ -338,12 +376,12 @@ namespace WTFnetApp
         private DateTime lastBlockLog = DateTime.MinValue;
 
         // =========================
-        // ?? SYNC
+        // SYNC
         // =========================
         private readonly SemaphoreSlim speedifyLock = new SemaphoreSlim(1, 1);
 
         // =========================
-        // ?? DATA TRACKING
+        // DATA TRACKING
         // =========================
         private List<double> dailyUsageMb = new List<double>();
         private DateTime lastDay = DateTime.Now.Date;
@@ -366,7 +404,7 @@ namespace WTFnetApp
         {
             InitializeComponent();
 
-            // ?? hide main window (no white box)
+            // hide main window
             Opacity = 0;
             ShowInTaskbar = false;
             WindowState = FormWindowState.Minimized;
@@ -374,12 +412,34 @@ namespace WTFnetApp
             overlay = new PingOverlay();
             overlay.Show();
 
-            // your tray + timer code continues...
-
-            // ?? TRAY MENU
+            // TRAY MENU
             trayMenu = new ContextMenuStrip();
             trayMenu.Items.Add("Open Dashboard", null, (s, e) => ToggleDashboard());
-            trayMenu.Items.Add("LTEProTool", null, (s, e) => ToggleLteProDashboard());
+
+            var speedifyMenu = new ToolStripMenuItem("Speedify");
+
+            speedifyOffItem = new ToolStripMenuItem("OFF", null, async (s, e) => await SetSpeedifyOff());
+            speedifyOffItem.CheckOnClick = false;
+
+            speedifySpeedItem = new ToolStripMenuItem("SPEED ONLY", null, async (s, e) => await SetSpeedifySpeedOnly());
+            speedifySpeedItem.CheckOnClick = false;
+
+            speedifySmartItem = new ToolStripMenuItem("SMART GAMING", null, async (s, e) => await SetSpeedifySmart());
+            speedifySmartItem.CheckOnClick = false;
+
+            speedifyMenu.DropDownItems.Add(speedifyOffItem);
+            speedifyMenu.DropDownItems.Add(speedifySpeedItem);
+            speedifyMenu.DropDownItems.Add(speedifySmartItem);
+
+            trayMenu.Items.Add(speedifyMenu);
+
+            UpdateSpeedifyMenuChecks();
+
+            soundsMenuItem = new ToolStripMenuItem("Toggle Sounds", null, (s, e) => ToggleSounds());
+            soundsMenuItem.CheckOnClick = false;
+            soundsMenuItem.Checked = playSounds;
+            trayMenu.Items.Add(soundsMenuItem);
+
             trayMenu.Items.Add("Toggle Debug Mode (F6)", null, (s, e) =>
             {
                 debugMode = !debugMode;
@@ -399,15 +459,8 @@ namespace WTFnetApp
             simulationMenu.DropDownItems.Add("Simulate Game", null, (s, e) => simulateGame = !simulateGame);
             trayMenu.Items.Add(simulationMenu);
 
-            speedifyMenuItem = new ToolStripMenuItem("Toggle Speedify", null, (s, e) => ToggleSpeedify());
-            speedifyMenuItem.CheckOnClick = false;
-            trayMenu.Items.Add(speedifyMenuItem);
+            trayMenu.Items.Add("LTEProTool", null, (s, e) => ToggleLteProDashboard());
 
-            soundsMenuItem = new ToolStripMenuItem("Toggle Sounds", null, (s, e) => ToggleSounds());
-            soundsMenuItem.CheckOnClick = false;
-            soundsMenuItem.Checked = playSounds;
-
-            trayMenu.Items.Add(soundsMenuItem);
             trayMenu.Items.Add("Exit", null, (s, e) =>
             {
                 trayIcon.Visible = false;
@@ -432,7 +485,19 @@ namespace WTFnetApp
             {
                 if (e.KeyCode == Keys.F6) debugMode = !debugMode;
                 if (e.KeyCode == Keys.F8) ToggleOverlay();
-                if (e.KeyCode == Keys.F9) ToggleSpeedify();
+                if (e.KeyCode == Keys.F9)
+                {
+                    if (speedifyPolicy == SpeedifyPolicy.Smart)
+                    {
+                        _ = SetSpeedifySpeedOnly();
+                        Log("speedify", "HOTKEY → SPEED ONLY");
+                    }
+                    else
+                    {
+                        _ = SetSpeedifySmart();
+                        Log("speedify", "HOTKEY → SMART");
+                    }
+                }
                 if (e.KeyCode == Keys.F10) testMode = !testMode;
                 if (e.KeyCode == Keys.F11) forceRedundant = true;
                 if (e.KeyCode == Keys.F12) forceSpeed = true;
@@ -444,7 +509,7 @@ namespace WTFnetApp
             base.SetVisibleCore(false);
         }
         // =========================
-        // ?? SPEEDIFY HELPERS
+        // SPEEDIFY HELPERS
         // =========================
 
         void PlaySwitchSound(string mode)
@@ -484,7 +549,7 @@ namespace WTFnetApp
                 return;
             }
 
-            // ?? handle OFF properly (no "mode off")
+            // handle OFF properly (no "mode off")
             if (newMode != "off")
             {
                 await RunSpeedify($"mode {newMode}");
@@ -559,8 +624,6 @@ namespace WTFnetApp
 
                 await SetSpeedifyMode("off", "manual toggle off");
             }
-
-            speedifyMenuItem.Checked = speedifyEnabled;
         }
 
         async void SoftReconnect()
@@ -601,8 +664,10 @@ namespace WTFnetApp
 
                     proc.WaitForExit();
 
-                    hasMultiConnection =
-                        output.Split('\n').Count(l => l.Contains("Connected")) > 1;
+                    var connected = output.Split('\n')
+                        .Count(l => l.TrimStart().StartsWith("Connected ", StringComparison.OrdinalIgnoreCase));
+
+                    hasMultiConnection = connected > 1;
                 }
             }
             catch
@@ -611,6 +676,50 @@ namespace WTFnetApp
             }
 
             return hasMultiConnection;
+        }
+        async Task VerifySpeedifyState()
+        {
+            if (!speedifyEnabled)
+                return;
+
+            if ((DateTime.Now - lastSpeedifyStateCheck).TotalSeconds < speedifyStateIntervalSec)
+                return;
+
+            lastSpeedifyStateCheck = DateTime.Now;
+
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = @"C:\Program Files (x86)\Speedify\speedify_cli.exe",
+                    Arguments = "show status",
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    if (proc == null)
+                        return;
+                    
+                    string output = await proc.StandardOutput.ReadToEndAsync();
+                    proc.WaitForExit();
+
+                    string o = output.ToLowerInvariant();
+
+                    if (o.Contains("disconnected"))
+                        speedifyMode = "off";
+                    else if (o.Contains("redundant"))
+                        speedifyMode = "redundant";
+                    else
+                        speedifyMode = "speed";
+                }
+            }
+            catch
+            {
+                Log("errors", "Speedify state read failed");
+            }
         }
 
         void ToggleNatKeepAlive()
@@ -650,16 +759,72 @@ namespace WTFnetApp
                 lastDay = DateTime.Now.Date;
             }
         }
-
+        
         double GetMonthlyEstimate()
         {
             if (dailyUsageMb.Count == 0) return 0;
 
             return dailyUsageMb.Average() * 30;
         }
+
+        async Task SetSpeedifyOff()
+        {
+            speedifyPolicy = SpeedifyPolicy.Off;
+
+            await RunSpeedify("disconnect");
+
+            speedifyEnabled = false;
+            speedifyMode = "off";
+
+            Log("speedify", "POLICY OFF");
+            
+            UpdateSpeedifyMenuChecks();
+        }
+
+        async Task SetSpeedifySpeedOnly()
+        {
+            speedifyPolicy = SpeedifyPolicy.SpeedOnly;
+
+            if (!speedifyEnabled)
+            {
+                await RunSpeedify("connect");
+                speedifyEnabled = true;
+            }
+
+            await SetSpeedifyMode("speed", "speed-only mode");
+
+            Log("speedify", "POLICY SPEED ONLY");
+
+            UpdateSpeedifyMenuChecks();
+        }
+
+        async Task SetSpeedifySmart()
+        {
+            speedifyPolicy = SpeedifyPolicy.Smart;
+
+            if (!speedifyEnabled)
+            {
+                await RunSpeedify("connect");
+                speedifyEnabled = true;
+            }
+
+            await SetSpeedifyMode("speed", "smart start");
+
+            Log("speedify", "POLICY SMART");
+
+            UpdateSpeedifyMenuChecks();
+        }
+
         // =========================
-        // ?? UI HELPERS
+        // UI HELPERS
         // =========================
+
+        void UpdateSpeedifyMenuChecks()
+        {
+            speedifyOffItem.Checked = speedifyPolicy == SpeedifyPolicy.Off;
+            speedifySpeedItem.Checked = speedifyPolicy == SpeedifyPolicy.SpeedOnly;
+            speedifySmartItem.Checked = speedifyPolicy == SpeedifyPolicy.Smart;
+        }
 
         void ToggleSounds()
         {
@@ -755,7 +920,7 @@ namespace WTFnetApp
                 var now = DateTime.Now;
                 double seconds = (now - lastTrafficCheck).TotalSeconds;
 
-                if (seconds > 0.5) // ?? prevents spikes from tiny intervals
+                if (seconds > 0.5) // prevents spikes from tiny intervals
                 {
                     long delta =
                         (totalSent - lastBytesSent) +
@@ -769,7 +934,7 @@ namespace WTFnetApp
                 lastTrafficCheck = now;
 
                 // =========================
-                // ?? STREAK LOGIC (smoothed)
+                // STREAK LOGIC (smoothed)
                 // =========================
                 if (bytesPerSecond > 800_000)
                     heavyTrafficStreak++;
@@ -778,7 +943,6 @@ namespace WTFnetApp
             }
             catch
             {
-                // optional debug
                 if (debugMode)
                     Log("errors", "Traffic read failed");
             }
@@ -799,9 +963,11 @@ namespace WTFnetApp
                 await Task.Delay(1000);
             }
         }
+
         // =========================
-        // ?? MAIN LOOP
+        // MAIN LOOP
         // =========================
+        
         async Task Timer_Tick(object sender, EventArgs e)
         {
             if (isRunning) return;
@@ -810,6 +976,8 @@ namespace WTFnetApp
             try
             {
                 UpdateTraffic();
+
+                await VerifySpeedifyState();
 
                 var results = new List<int>();
                 int fail = 0;
@@ -905,7 +1073,7 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // 📡 LTE PRO TOOL
+                // LTE PRO TOOL
                 // =========================
 
                 var lte = lteTool.Evaluate(
@@ -1014,14 +1182,14 @@ namespace WTFnetApp
                 };
 
                 // =========================
-                // ?? PRESSURE SYSTEM (IMPROVED)
+                // PRESSURE SYSTEM (IMPROVED)
                 // =========================
 
                 // spikes = strong signal
                 if (micro) preSpikePressure += 0.4;
                 if (hardSpike) preSpikePressure += 1.8;
 
-                // ?? constant bad ping = slow pressure
+                // constant bad ping = slow pressure
                 if (uncomfortablePing) preSpikePressure += 0.25;
 
                 // decay (stability clears pressure)
@@ -1033,7 +1201,7 @@ namespace WTFnetApp
                 badStreak = Math.Min(badStreak, 10);
 
                 // =========================
-                // ?? STREAK LOGIC
+                // STREAK LOGIC
                 // =========================
                 if (hardSpike || predicted)
                 {
@@ -1047,7 +1215,7 @@ namespace WTFnetApp
                 }
                 else if (uncomfortablePing)
                 {
-                    // ?? NEW: slow accumulation for constant lag
+                    // NEW: slow accumulation for constant lag
                     badStreak += 1;
                     goodStreak = 0;
                 }
@@ -1072,7 +1240,7 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // ?? DEBUG REASON BUILD
+                // DEBUG REASON BUILD
                 // =========================
                 string decisionReason = "";
 
@@ -1086,14 +1254,14 @@ namespace WTFnetApp
                 lastDecisionReason = decisionReason + " | " + context;
 
                 // =========================
-                // ?? ENTER CONDITION (UPDATED)
+                // ENTER CONDITION (UPDATED)
                 // =========================
                 bool shouldEnterRedundant =
-                    score.Total > 3.5 ||   // ?? smart scoring
-                    sustainedBad;          // ?? constant bad ping override
+                    score.Total > 3.5 ||   // smart scoring
+                    sustainedBad;          // constant bad ping override
 
                 // =========================
-                // ?? FLAGS
+                // FLAGS
                 // =========================
                 bool unrealisticTraffic = heavyTrafficStreak >= 4 && avg < 80;
                 bool hardDownload = bytesPerSecond > 2_500_000;
@@ -1139,13 +1307,13 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // ?? ALLOW LOGIC
+                // ALLOW LOGIC
                 // =========================
                 bool allowRedundant;
 
                 if (debugMode)
                 {
-                    // ?? SIMULATION MODE (override real world)
+                    // SIMULATION MODE (override real world)
                     allowRedundant =
                         simulateSpeedify &&
                         simulateMultiConnection &&
@@ -1153,14 +1321,15 @@ namespace WTFnetApp
                 }
                 else
                 {
-                    // ?? REAL MODE
+                    // REAL MODE
                     allowRedundant =
                         speedifyEnabled &&
+                        speedifyPolicy == SpeedifyPolicy.Smart &&
                         multiConnection &&
                         (isGameRunning || testMode);
                 }
 
-                // ?? traffic still blocks in both modes
+                // traffic still blocks in both modes
                 if (hardDownload || unrealisticTraffic)
                     allowRedundant = false;
 
@@ -1233,7 +1402,7 @@ namespace WTFnetApp
 
               
                 // =========================
-                // ?? TEST MODE
+                // TEST MODE
                 // =========================
                 if (testMode)
                 {
@@ -1251,7 +1420,7 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // ?? EXIT LOGIC (HIGHEST PRIORITY)
+                // EXIT LOGIC (HIGHEST PRIORITY)
                 // =========================
                 if (speedifyMode == "redundant")
                 {
@@ -1328,7 +1497,7 @@ namespace WTFnetApp
                         return;
                     }
 
-                    // ?? ANTI-STICK HARD EXIT
+                    // ANTI-STICK HARD EXIT
                     if (stable &&
                         goodStreak >= 4 &&
                         canSwitch)
@@ -1344,7 +1513,7 @@ namespace WTFnetApp
                     }
                 }
                 // =========================
-                // ?? ENTER LOGIC
+                // ENTER LOGIC
                 // =========================
                 if (allowRedundant &&
                     speedifyMode != "redundant" &&
@@ -1365,7 +1534,7 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // ?? FALLBACK SAFETY
+                // FALLBACK SAFETY
                 // =========================
                 if (!allowRedundant &&
                     speedifyMode == "redundant" &&
@@ -1383,7 +1552,7 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // ?? DATA CALC
+                // DATA CALC
                 // =========================
                 double currentSeconds = totalRedundantSeconds;
 
@@ -1398,15 +1567,20 @@ namespace WTFnetApp
                 double monthlyEstimate = GetMonthlyEstimate();
 
                 // =========================
-                // ?? UI
+                // UI
                 // =========================
                 if (overlay != null)
                 {
-                    overlay.UpdatePing($"{recentAvg} ms");
+                    string overlayMode =
+                        speedifyMode == "redundant" ? "RED" :
+                        speedifyMode == "speed" ? "SPD" :
+                        "OFF";
+
+                    overlay.UpdatePing($"{recentAvg} ms", overlayMode);
                 }
 
                 // =========================
-                // ?? DASHBOARD
+                // DASHBOARD
                 // =========================
                 if (dashboard != null && dashboard.Visible)
                 {
@@ -1414,11 +1588,18 @@ namespace WTFnetApp
                     remaining = Math.Max(0, remaining);
 
                     string modeVisual =
-                        speedifyMode == "redundant" ? "?? REDUNDANT" :
-                        speedifyMode == "speed" ? "?? SPEED" :
-                        "? OFF";
+                        speedifyMode == "redundant" ? "REDUNDANT" :
+                        speedifyMode == "speed" ? "SPEED" :
+                        "OFF";
+
+                    string policyText =
+                        speedifyPolicy == SpeedifyPolicy.Off ? "OFF" :
+                        speedifyPolicy == SpeedifyPolicy.SpeedOnly ? "SPEED ONLY" :
+                        "SMART";
 
                     dashboard.info.Text =
+                        $"POLICY: {policyText}\n" +
+
                         $"PING: {avg} ms\n" +
                         $"REC: {recentAvg} ms\n" +
                         $"MAX: {maxPing} ms\n" +
@@ -1458,7 +1639,7 @@ namespace WTFnetApp
                 }
 
                 // =========================
-                // ?? FINAL LOG
+                // FINAL LOG
                 // =========================
                 var log = new NetLog
                 {
@@ -1488,7 +1669,7 @@ namespace WTFnetApp
                     Debug = debugMode
                 };
 
-                // ?? SMART LOGGING
+                // SMART LOGGING
                 bool important =
                         hardSpike ||
                         predicted ||
@@ -1533,7 +1714,7 @@ namespace WTFnetApp
 
             try
             {
-                natClient = new UdpClient(0);
+                natClient = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
 
                 Log("nat", "keepalive started");
 
@@ -1555,12 +1736,29 @@ namespace WTFnetApp
                     {
                         await natClient.SendAsync(data, data.Length, endpoints[endpointIndex]);
 
-                        // rotate endpoint
+                        natSendFailures = 0;
+
                         endpointIndex++;
                         if (endpointIndex >= endpoints.Length)
                             endpointIndex = 0;
                     }
-                    catch { }
+                    catch
+                    {
+                        natSendFailures++;
+
+                        Log("nat", $"send failure {natSendFailures}");
+
+                        if (natSendFailures >= 5)
+                        {
+                            Log("nat", "socket unhealthy, restarting keepalive");
+
+                            StopNatKeepAlive();
+                            await Task.Delay(500);
+
+                            _ = StartNatKeepAlive();
+                            return;
+                        }
+                    }
 
                     await Task.Delay(10000, natToken.Token);
                 }
