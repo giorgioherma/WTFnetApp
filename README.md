@@ -43,9 +43,9 @@ The application continuously measures:
 
 Ping targets used:
 
-8.8.8.8
-1.1.1.1
-9.9.9.9
+- 8.8.8.8
+- 1.1.1.1
+- 9.9.9.9
 
 ---
 
