@@ -104,8 +104,7 @@ namespace WTFnetApp
 
         }
     }
-
-    public class PingOverlay : Form
+        public class PingOverlay : Form
     {
         private Label pingLabel;
 
@@ -113,16 +112,19 @@ namespace WTFnetApp
         {
             FormBorderStyle = FormBorderStyle.None;
             StartPosition = FormStartPosition.Manual;
-            Size = new Size(120, 40);
+            Size = new Size(130, 42);
+
             TopMost = true;
+            ShowInTaskbar = false;
+
             BackColor = Color.Black;
-            Opacity = 0.75;
+            Opacity = 0.85;
 
             pingLabel = new Label
             {
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter,
-                Font = new Font("Consolas", 12, FontStyle.Bold),
+                Font = new Font("Consolas", 13, FontStyle.Bold),
                 ForeColor = Color.Lime,
                 BackColor = Color.Transparent,
                 Text = "-- ms"
@@ -130,22 +132,55 @@ namespace WTFnetApp
 
             Controls.Add(pingLabel);
 
-            // position near top-right of primary screen
+            PositionTopRight();
+
+            // reposition if resolution or monitor changes
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => PositionTopRight();
+        }
+
+        private void PositionTopRight()
+        {
             var screen = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(screen.Right - Width - 10, screen.Top + 10);
+            Location = new Point(screen.Right - Width - 12, screen.Top + 12);
         }
 
         public void UpdatePing(string text)
         {
             if (InvokeRequired)
             {
-                Invoke(new Action(() => pingLabel.Text = text));
+                BeginInvoke(new Action(() => UpdatePing(text)));
+                return;
             }
-            else
+
+            pingLabel.Text = text;
+
+            if (int.TryParse(text.Replace(" ms", ""), out int ping))
             {
-                pingLabel.Text = text;
+                if (ping < 50)
+                    pingLabel.ForeColor = Color.LimeGreen;
+                else if (ping < 90)
+                    pingLabel.ForeColor = Color.Orange;
+                else
+                    pingLabel.ForeColor = Color.Red;
             }
         }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                const int WS_EX_TRANSPARENT = 0x20;
+                const int WS_EX_LAYERED = 0x80000;
+                const int WS_EX_TOOLWINDOW = 0x80;
+                const int WS_EX_NOACTIVATE = 0x8000000;
+
+                var cp = base.CreateParams;
+                cp.ExStyle |= WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+                return cp;
+            }
+        }
+
+        protected override bool ShowWithoutActivation => true;
     }
 
     public partial class Form1 : Form
@@ -849,7 +884,6 @@ namespace WTFnetApp
                     ? avg
                     : (int)hourlyHistory[hour].Average();
 
-                double mean = valid.Average();
                 int jitter = (int)valid
                         .Skip(1)
                         .Select((p, i) => Math.Abs(p - valid[i]))
