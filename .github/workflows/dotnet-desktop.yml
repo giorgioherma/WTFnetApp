@@ -19,7 +19,7 @@ jobs:
       uses: microsoft/setup-msbuild@v2
 
     - name: Restore NuGet packages
-      run: nuget restore WTFnetApp.sln
+      run: nuget restore WTFnetApp.slnx
 
     - name: Build solution
-      run: msbuild WTFnetApp.sln /p:Configuration=Release
+      run: msbuild WTFnetApp.slnx /p:Configuration=Release
