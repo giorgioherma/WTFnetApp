@@ -2,7 +2,7 @@ name: Build WTFnetApp
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "main" ]
 
 jobs:
   build:
