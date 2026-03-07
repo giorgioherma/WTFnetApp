@@ -43,11 +43,9 @@ The application continuously measures:
 
 Ping targets used:
 
-```
 8.8.8.8
 1.1.1.1
 9.9.9.9
-```
 
 ---
 
@@ -91,11 +89,9 @@ A small overlay displays real-time ping while gaming.
 
 Color indicators:
 
-```
 Green  < 50 ms
 Orange < 90 ms
 Red    > 90 ms
-```
 
 This allows latency spikes to be seen immediately during gameplay.
 
@@ -119,13 +115,11 @@ The built-in LTE diagnostic system estimates connection stability and provides a
 
 Quality states:
 
-```
 LOCKED
 STABLE
 PLAYABLE
 WEAK
 BAD
-```
 
 ---
 
@@ -133,28 +127,20 @@ BAD
 
 Operating system:
 
-```
 Windows 10
 Windows 11
-```
 
 Runtime:
 
-```
 .NET Framework 4.8
-```
 
 Optional software:
 
-```
 Speedify
-```
 
 Expected Speedify CLI path:
 
-```
 C:\Program Files (x86)\Speedify\speedify_cli.exe
-```
 
 ---
 
@@ -162,13 +148,11 @@ C:\Program Files (x86)\Speedify\speedify_cli.exe
 
 Main components:
 
-```
 Form1.cs              Core monitoring and decision logic
 PingOverlay.cs        On-screen ping overlay
 LteProTool.cs         LTE network quality analysis
 LteDashboardForm.cs   LTE diagnostic dashboard
 Program.cs            Application entry point
-```
 
 ---
 
@@ -178,14 +162,12 @@ Network metrics and system decisions are written to log files for diagnostics.
 
 Typical log categories include:
 
-```
 metrics
 decisions
 speedify
 nat
 errors
 trace
-```
 
 ---
 
