@@ -723,7 +723,6 @@ namespace WTFnetApp
         }
 
         void ToggleNatKeepAlive()
-        {
             if (natKeepAliveRunning)
             {
                 StopNatKeepAlive();
@@ -1018,7 +1017,6 @@ namespace WTFnetApp
 
                 if (results.Count > 0)
                 {
-                    results.Sort();
                     pings.Add(results[results.Count / 2]);
                     timeouts.Add(fail > 0 ? 1 : 0);
                 }
