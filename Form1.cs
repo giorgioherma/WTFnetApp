@@ -104,13 +104,14 @@ namespace WTFnetApp
 
         }
     }
-        public class PingOverlay : Form
+    public class PingOverlay : Form
     {
         private Label pingLabel;
         private Label modeLabel;
 
         private string lastText = "";
         private string lastMode = "";
+        private int lastNatState = -1;
 
         public PingOverlay()
         {
@@ -121,8 +122,8 @@ namespace WTFnetApp
             TopMost = true;
             ShowInTaskbar = false;
 
-            BackColor = Color.Black;
-            Opacity = 0.85;
+            BackColor = Color.FromArgb(35, 35, 35);
+            Opacity = 0.92;
 
             pingLabel = new Label
             {
@@ -148,33 +149,54 @@ namespace WTFnetApp
             Controls.Add(modeLabel);
             Controls.Add(pingLabel);
 
-            PositionTopRight();
+            PositionTopLeft();
 
             // reposition if resolution or monitor changes
-            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => PositionTopRight();
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => PositionTopLeft();
         }
 
         private void PositionTopRight()
         {
             var screen = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(screen.Right - Width - 12, screen.Top + 12);
+            Location = new Point(screen.Left - Width - 12, screen.Top + 12);
+        }
+        private void PositionTopLeft()
+        {
+            var screen = Screen.PrimaryScreen.WorkingArea;
+            Location = new Point(screen.Left - Width - 12, screen.Top + 12);
         }
 
-        public void UpdatePing(string text, string mode)
+        public void UpdatePing(string text, string mode, int natState)
         {
             if (InvokeRequired)
             {
-                BeginInvoke(new Action(() => UpdatePing(text, mode)));
+                BeginInvoke(new Action(() => UpdatePing(text, mode, natState)));
                 return;
             }
-            if (text == lastText && mode == lastMode)
+            if (text == lastText && mode == lastMode && natState == lastNatState)
                 return;
 
             lastText = text;
             lastMode = mode;
+            lastNatState = natState;
 
             pingLabel.Text = text;
             modeLabel.Text = mode;
+
+            switch (natState)
+            {
+                case 0:
+                    modeLabel.ForeColor = Color.Red;
+                    break;
+
+                case 1:
+                    modeLabel.ForeColor = Color.Gold;
+                    break;
+
+                default:
+                    modeLabel.ForeColor = Color.LimeGreen;
+                    break;
+            }
 
             if (int.TryParse(text.Replace(" ms", ""), out int ping))
             {
@@ -210,7 +232,7 @@ namespace WTFnetApp
         // =========================
         // UI COMPONENTS
         // =========================
-        private LteProTool lteTool = new LteProTool(); 
+        private LteProTool lteTool = new LteProTool();
         private LteDashboardForm lteProDashboard;
         private PingOverlay overlay;
         private NotifyIcon trayIcon;
@@ -243,9 +265,12 @@ namespace WTFnetApp
         // =========================
         private List<int> pings = new List<int>();
         private List<int> timeouts = new List<int>();
+
+        int lastPing = -1;
+        DateTime lastOverlayUpdate = DateTime.MinValue;
         private int window = 60;
 
-        private string[] targets = { "8.8.8.8", "1.1.1.1","9.9.9.9" };
+        private string[] targets = { "8.8.8.8", "1.1.1.1", "9.9.9.9" };
         private int currentPing = 0;
 
         // =========================
@@ -283,12 +308,12 @@ namespace WTFnetApp
         }
 
         private SpeedifyPolicy speedifyPolicy = SpeedifyPolicy.Off;
-        
+
         private string speedifyMode = "speed";
         private DateTime lastSpeedifyStateCheck = DateTime.MinValue;
         private int speedifyStateIntervalSec = 6;
         private bool speedifyEnabled = false;
-        
+
         private DateTime lastCliCall = DateTime.MinValue;
         private int cliCooldownMs = 1200;
 
@@ -333,28 +358,17 @@ namespace WTFnetApp
         private int connectionCheckIntervalSec = 5;
 
         // =========================
-        // SYSTEM STATE
+        // NAT KEEP ALIVE
         // =========================
-        private bool isGameRunning = false;
-        private bool isLauncherRunning = false;
-        private DateTime lastGameCheck = DateTime.MinValue;
-        private int gameCheckIntervalSec = 6;
-        private UdpClient natClient;
-        private CancellationTokenSource natToken;
-        private bool natKeepAliveRunning = false;
-        private int natSendFailures = 0;
-        private DateTime lastGameSeen = DateTime.MinValue;
-        private int natGraceSeconds = 15;
+        private NatKeepAlive nat;
 
         // =========================
         // DEBUG / SIMULATION
         // =========================
         private bool debugMode = false;
-        private bool testMode = false;
 
         private bool simulateSpeedify = false;
         private bool simulateMultiConnection = false;
-        private bool simulateGame = false;
 
         private bool forceRedundant = false;
         private bool forceSpeed = false;
@@ -404,7 +418,10 @@ namespace WTFnetApp
         {
             InitializeComponent();
 
-            // hide main window
+            nat = new NatKeepAlive();
+            _ = nat.StartNatKeepAlive();
+
+        // hide main window
             Opacity = 0;
             ShowInTaskbar = false;
             WindowState = FormWindowState.Minimized;
@@ -456,7 +473,6 @@ namespace WTFnetApp
 
             simulationMenu.DropDownItems.Add("Simulate Speedify", null, (s, e) => simulateSpeedify = !simulateSpeedify);
             simulationMenu.DropDownItems.Add("Simulate Multi Connection", null, (s, e) => simulateMultiConnection = !simulateMultiConnection);
-            simulationMenu.DropDownItems.Add("Simulate Game", null, (s, e) => simulateGame = !simulateGame);
             trayMenu.Items.Add(simulationMenu);
 
             trayMenu.Items.Add("LTEProTool", null, (s, e) => ToggleLteProDashboard());
@@ -498,7 +514,6 @@ namespace WTFnetApp
                         Log("speedify", "HOTKEY → SMART");
                     }
                 }
-                if (e.KeyCode == Keys.F10) testMode = !testMode;
                 if (e.KeyCode == Keys.F11) forceRedundant = true;
                 if (e.KeyCode == Keys.F12) forceSpeed = true;
             };
@@ -702,7 +717,7 @@ namespace WTFnetApp
                 {
                     if (proc == null)
                         return;
-                    
+
                     string output = await proc.StandardOutput.ReadToEndAsync();
                     proc.WaitForExit();
 
@@ -722,26 +737,12 @@ namespace WTFnetApp
             }
         }
 
-        void ToggleNatKeepAlive()
-            if (natKeepAliveRunning)
-            {
-                StopNatKeepAlive();
-                Log("nat", "keepalive manually disabled");
-            }
-            else
-            {
-                _ = StartNatKeepAlive();
-                Log("nat", "keepalive manually enabled");
-            }
-        }
-
         void ToggleSimAll()
         {
-            bool state = !(simulateSpeedify && simulateMultiConnection && simulateGame);
+            bool state = !(simulateSpeedify && simulateMultiConnection);
 
             simulateSpeedify = state;
             simulateMultiConnection = state;
-            simulateGame = state;
 
             Log("simulation", $"SIM ALL {(state ? "ON" : "OFF")}");
         }
@@ -758,7 +759,7 @@ namespace WTFnetApp
                 lastDay = DateTime.Now.Date;
             }
         }
-        
+
         double GetMonthlyEstimate()
         {
             if (dailyUsageMb.Count == 0) return 0;
@@ -776,7 +777,7 @@ namespace WTFnetApp
             speedifyMode = "off";
 
             Log("speedify", "POLICY OFF");
-            
+
             UpdateSpeedifyMenuChecks();
         }
 
@@ -966,7 +967,7 @@ namespace WTFnetApp
         // =========================
         // MAIN LOOP
         // =========================
-        
+
         async Task Timer_Tick(object sender, EventArgs e)
         {
             if (isRunning) return;
@@ -978,54 +979,38 @@ namespace WTFnetApp
 
                 await VerifySpeedifyState();
 
-                var results = new List<int>();
-                int fail = 0;
+                string target = targets[currentPing];
+                currentPing = (currentPing + 1) % targets.Length;
 
-                var pingTasks = targets.Select(async t =>
+                int? result = null;
+
+                try
                 {
-                    try
+                    using (var ping = new Ping())
                     {
-                        using (var ping = new Ping())
-                        {
-                            var r = await ping.SendPingAsync(t, 500);
+                        var r = await ping.SendPingAsync(target, 500);
 
-                            if (r.Status == IPStatus.Success)
-                                return (int?)r.RoundtripTime;
-                        }
-                    }
-                    catch
-                    {
-                    }
-
-                    return null;
-                });
-
-                var pingResults = await Task.WhenAll(pingTasks);
-
-                foreach (var r in pingResults)
-                {
-                    if (r.HasValue)
-                    {
-                        results.Add(r.Value);
-                        currentPing = r.Value;
-                    }
-                    else
-                    {
-                        fail++;
+                        if (r.Status == IPStatus.Success)
+                            result = (int)r.RoundtripTime;
                     }
                 }
-
-                if (results.Count > 0)
+                catch
                 {
-                    pings.Add(results[results.Count / 2]);
-                    timeouts.Add(fail > 0 ? 1 : 0);
+                }
+                if (result.HasValue)
+                {
+                    lastPing = result.Value;
+
+                    pings.Add(result.Value);
+                    timeouts.Add(0);
                 }
                 else
                 {
+                    lastPing = -1;
+
                     pings.Add(0);
                     timeouts.Add(1);
                 }
-
                 if (pings.Count > window)
                 {
                     pings.RemoveAt(0);
@@ -1275,38 +1260,10 @@ namespace WTFnetApp
                 else
                     multiConnection = HasMultipleConnections();
 
-                if (debugMode)
-                {
-                    if (simulateGame)
-                        isGameRunning = true;
-                    else
-                        DetectGameRunning();
-                }
-                else
-                {
-                    DetectGameRunning();
-                }
-
-                // NAT keepalive control
-                if (isGameRunning || isLauncherRunning)
-                {
-                    lastGameSeen = DateTime.Now;
-
-                    if (!natKeepAliveRunning)
-                        _ = StartNatKeepAlive();
-                }
-                else
-                {
-                    if (natKeepAliveRunning &&
-                        (DateTime.Now - lastGameSeen).TotalSeconds > natGraceSeconds)
-                    {
-                        StopNatKeepAlive();
-                    }
-                }
-
                 // =========================
                 // ALLOW LOGIC
                 // =========================
+
                 bool allowRedundant;
 
                 if (debugMode)
@@ -1314,8 +1271,7 @@ namespace WTFnetApp
                     // SIMULATION MODE (override real world)
                     allowRedundant =
                         simulateSpeedify &&
-                        simulateMultiConnection &&
-                        (simulateGame || testMode);
+                        simulateMultiConnection;
                 }
                 else
                 {
@@ -1323,8 +1279,8 @@ namespace WTFnetApp
                     allowRedundant =
                         speedifyEnabled &&
                         speedifyPolicy == SpeedifyPolicy.Smart &&
-                        multiConnection &&
-                        (isGameRunning || testMode);
+                        multiConnection;
+
                 }
 
                 // traffic still blocks in both modes
@@ -1377,13 +1333,11 @@ namespace WTFnetApp
                 {
                     if (!simulateSpeedify) blockReason += "SimSpeedOff ";
                     if (!simulateMultiConnection) blockReason += "SimNoMulti ";
-                    if (!simulateGame && !testMode) blockReason += "SimNoGame ";
                 }
                 else
                 {
                     if (!speedifyEnabled) blockReason += "SpeedifyOff ";
                     if (!multiConnection) blockReason += "NoMulti ";
-                    if (!isGameRunning && !testMode) blockReason += "NoGame ";
                 }
 
                 if (hardDownload) blockReason += "Download ";
@@ -1398,28 +1352,10 @@ namespace WTFnetApp
                     Log("decisions", $"BLOCKED REDUNDANT | {blockReason} | {context}");
                 }
 
-              
-                // =========================
-                // TEST MODE
-                // =========================
-                if (testMode)
-                {
-                    if (forceRedundant)
-                    {
-                        await SetSpeedifyMode("redundant", "TEST FORCE");
-                        forceRedundant = false;
-                    }
-
-                    if (forceSpeed)
-                    {
-                        await SetSpeedifyMode("speed", "TEST FORCE");
-                        forceSpeed = false;
-                    }
-                }
-
                 // =========================
                 // EXIT LOGIC (HIGHEST PRIORITY)
                 // =========================
+
                 if (speedifyMode == "redundant")
                 {
                     double redundantMinutes =
@@ -1567,6 +1503,17 @@ namespace WTFnetApp
                 // =========================
                 // UI
                 // =========================
+                double natAge = (DateTime.Now - nat.LastNatRecreate).TotalSeconds;
+
+                int natState;
+
+                if (natAge < 15)
+                    natState = 0;
+                else if (natAge < 60)
+                    natState = 1;
+                else
+                    natState = 2;
+
                 if (overlay != null)
                 {
                     string overlayMode =
@@ -1574,9 +1521,18 @@ namespace WTFnetApp
                         speedifyMode == "speed" ? "SPD" :
                         "OFF";
 
-                    overlay.UpdatePing($"{recentAvg} ms", overlayMode);
-                }
+                    string natText =
+                        natState == 0 ? "NAT!" :
+                        natState == 1 ? "NAT~" :
+                        "NAT";
 
+                    if ((DateTime.Now - lastOverlayUpdate).TotalMilliseconds >= 250)
+                    {
+                        lastOverlayUpdate = DateTime.Now;
+
+                        overlay.UpdatePing($"{lastPing} ms", $"{overlayMode} {natText}", natState);
+                    }
+                }
                 // =========================
                 // DASHBOARD
                 // =========================
@@ -1623,7 +1579,6 @@ namespace WTFnetApp
                         $"DEBUG: {debugMode}\n" +
                         $"SIM SPD: {simulateSpeedify}\n" +
                         $"SIM MULTI: {simulateMultiConnection}\n" +
-                        $"SIM GAME: {simulateGame}\n\n" +
 
                         $"LAST DECISION RZN: {lastDecisionReason}\n" +
                         $"LAST BLOCK RZN: {lastBlockReason}\n\n" +
@@ -1635,7 +1590,6 @@ namespace WTFnetApp
                         $"DATA: {mbUsed:F1} MB\n" +
                         $"MONTH: {monthlyEstimate:F0} MB";
                 }
-
                 // =========================
                 // FINAL LOG
                 // =========================
@@ -1663,7 +1617,6 @@ namespace WTFnetApp
                     Decision = $"{lastDecisionReason} | SCORE:{score.Total:F2}",
                     Block = lastBlockReason,
 
-                    Test = testMode,
                     Debug = debugMode
                 };
 
@@ -1674,176 +1627,13 @@ namespace WTFnetApp
                         score.Total > 3.5 ||
                         speedifyMode == "redundant";
 
-
                 if (important || debugMode)
-                {
                     Log("decisions", log.ToString());
-                }
             }
             finally
             {
                 isRunning = false;
             }
-        }
-
-        // =========================
-        // NAT KEEPALIVE
-        // =========================
-        async Task StartNatKeepAlive()
-        {
-            if (natKeepAliveRunning || natClient != null)
-                return;
-
-            natKeepAliveRunning = true;
-            natToken = new CancellationTokenSource();
-
-            // endpoints used for rotating keepalive
-            var endpoints = new[]
-            {
-        new IPEndPoint(IPAddress.Parse("1.1.1.1"), 3074),
-        new IPEndPoint(IPAddress.Parse("8.8.8.8"), 3074),
-        new IPEndPoint(IPAddress.Parse("9.9.9.9"), 3074)
-    };
-
-            // allocate once
-            byte[] data = Encoding.ASCII.GetBytes("ping");
-
-            int endpointIndex = 0;
-
-            try
-            {
-                natClient = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
-
-                Log("nat", "keepalive started");
-
-                // warm-up burst (forces NAT mapping quickly)
-                for (int i = 0; i < 3; i++)
-                {
-                    try
-                    {
-                        await natClient.SendAsync(data, data.Length, endpoints[endpointIndex]);
-                    }
-                    catch { }
-
-                    await Task.Delay(200);
-                }
-
-                while (!natToken.Token.IsCancellationRequested)
-                {
-                    try
-                    {
-                        await natClient.SendAsync(data, data.Length, endpoints[endpointIndex]);
-
-                        natSendFailures = 0;
-
-                        endpointIndex++;
-                        if (endpointIndex >= endpoints.Length)
-                            endpointIndex = 0;
-                    }
-                    catch
-                    {
-                        natSendFailures++;
-
-                        Log("nat", $"send failure {natSendFailures}");
-
-                        if (natSendFailures >= 5)
-                        {
-                            Log("nat", "socket unhealthy, restarting keepalive");
-
-                            StopNatKeepAlive();
-                            await Task.Delay(500);
-
-                            _ = StartNatKeepAlive();
-                            return;
-                        }
-                    }
-
-                    await Task.Delay(10000, natToken.Token);
-                }
-            }
-            catch (TaskCanceledException)
-            {
-            }
-            finally
-            {
-                try
-                {
-                    natClient?.Close();
-                }
-                catch { }
-
-                natClient = null;
-                natKeepAliveRunning = false;
-
-                Log("nat", "keepalive stopped");
-            }
-        }
-
-        void StopNatKeepAlive()
-        {
-            if (!natKeepAliveRunning) return;
-
-            Log("nat", "stop requested");
-
-            natToken?.Cancel();
-        }
-
-        void DetectGameRunning()
-        {
-            if ((DateTime.Now - lastGameCheck).TotalSeconds < gameCheckIntervalSec)
-                return;
-
-            lastGameCheck = DateTime.Now;
-
-            try
-            {
-                isGameRunning = false;
-                isLauncherRunning = false;
-
-                string[] gameIndicators =
-                {
-            "dota2",
-            "csgo",
-            "leagueclient",
-            "rocketleague",
-            "warzone",
-            "cod"
-        };
-
-                string[] launcherIndicators =
-                {
-            "steam",
-            "epicgameslauncher",
-            "battle.net",
-            "battlenet",
-            "blizzard",
-            "riotclient",
-            "origin",
-            "ubisoft",
-            "goggalaxy"
-        };
-
-                var procs = Process.GetProcesses();
-
-                foreach (var p in procs)
-                {
-                    try
-                    {
-                        var name = p.ProcessName.ToLowerInvariant();
-
-                        if (gameIndicators.Any(i => name.Contains(i)))
-                            isGameRunning = true;
-
-                        if (launcherIndicators.Any(i => name.Contains(i)))
-                            isLauncherRunning = true;
-
-                        if (isGameRunning)
-                            break;
-                    }
-                    catch { }
-                }
-            }
-            catch { }
         }
     }
 }
