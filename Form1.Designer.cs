@@ -1,4 +1,5 @@
-﻿namespace WTFnetApp
+﻿#if false
+namespace WTFnetApp
 {
     partial class Form1
     {
@@ -38,3 +39,4 @@
     }
 }
 
+#endif
