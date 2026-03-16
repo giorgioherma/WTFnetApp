@@ -146,7 +146,7 @@ namespace WTFnetApp
             int listEnd = json.IndexOf(']', listStart + 1);
             if (listEnd < 0) return false;
 
-            int cursor = listStart;
+            int cursor = listStart + 1;
             while (cursor < listEnd)
             {
                 int objStart = json.IndexOf('{', cursor);
@@ -234,5 +234,5 @@ namespace WTFnetApp
             if (end < 0 || end > endBoundary) return string.Empty;
             return json.Substring(pos + 1, end - pos - 1);
         }
-    }
+   }
 }
