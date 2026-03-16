@@ -1,3 +1,5 @@
+using System;
+
 namespace WTFnetApp
 {
     public static class SpeedifyMetricsAdapter
@@ -16,9 +18,17 @@ namespace WTFnetApp
 
             foreach (var c in metrics.Connections)
             {
+                if (c == null)
+                    continue;
+
                 latSum += c.Latency;
                 jitSum += c.Jitter;
                 lossSum += (c.LossReceive + c.LossSend) / 2.0;
+
+                // convert Mbps → Bytes/sec
+                snapshot.ReceiveBytes += (long)(c.ReceiveMbps * 125000);
+                snapshot.SendBytes += (long)(c.SendMbps * 125000);
+
                 count++;
             }
 
@@ -27,7 +37,10 @@ namespace WTFnetApp
 
             snapshot.Recent = latSum / count;
             snapshot.Average = snapshot.Recent;
-            snapshot.Jitter = jitSum / count;
+
+            // clamp jitter to avoid extreme values
+            snapshot.Jitter = Math.Min(jitSum / count, 200);
+
             snapshot.PacketLoss = lossSum / count;
 
             if (metrics.Connections.Count >= 1)
