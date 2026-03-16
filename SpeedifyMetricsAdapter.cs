@@ -18,6 +18,9 @@ namespace WTFnetApp
 
             foreach (var c in metrics.Connections)
             {
+                latSum += c.Latency;
+                jitSum += c.Jitter;
+                lossSum += (c.LossReceive + c.LossSend) / 2.0;
                 if (c == null)
                     continue;
 

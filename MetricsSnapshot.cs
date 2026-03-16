@@ -41,6 +41,7 @@
 
         public double QueueDelay;      // Recent - DynamicBase
         public double QueueGrowth;     // queue slope
+        public double QueueAcceleration;
 
         // =========================
         // TREND ANALYSIS
@@ -82,6 +83,9 @@
         public double CombinedBandwidthMbps;
 
         public double RetransmissionRate;
+
+        public double CongestionScore;
+        public double HealthScore;
 
         public int ActiveConnections;
         public int FailoverCount;
