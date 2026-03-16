@@ -17,6 +17,7 @@ namespace WTFnetApp
         public double QueueGrowth;
         public double QueueAcceleration;
         public double CongestionScore;
+        public double LatencyDrift;
 
         public bool MultiConnection;
         public bool Connected;
@@ -284,6 +285,58 @@ namespace WTFnetApp
             int prev = (last - 1 + MAX_SAMPLES) % MAX_SAMPLES;
 
             return buffer[last].Latency - buffer[prev].Latency;
+        }
+
+
+        // =========================
+        // CYCLE DETECTION
+        // =========================
+
+        public int DetectQueueCycle()
+        {
+            if (count < 20)
+                return 0;
+
+            int maxPeriod = Math.Min(20, count / 2);
+            double bestScore = 0;
+            int bestPeriod = 0;
+
+            for (int period = 3; period <= maxPeriod; period++)
+            {
+                double score = 0;
+                int comparisons = 0;
+
+                for (int i = 0; i < count - period; i++)
+                {
+                    int idxA = (index - 1 - i + MAX_SAMPLES) % MAX_SAMPLES;
+                    int idxB = (index - 1 - i - period + MAX_SAMPLES) % MAX_SAMPLES;
+
+                    var a = buffer[idxA];
+                    var b = buffer[idxB];
+
+                    if (a == null || b == null)
+                        continue;
+
+                    double diff = Math.Abs(a.QueueDelay - b.QueueDelay);
+
+                    score += Math.Max(0, 10 - diff);
+                    comparisons++;
+                }
+
+                if (comparisons > 0)
+                    score /= comparisons;
+
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestPeriod = period;
+                }
+            }
+
+            if (bestScore > 6)
+                return bestPeriod;
+
+            return 0;
         }
 
         // =========================

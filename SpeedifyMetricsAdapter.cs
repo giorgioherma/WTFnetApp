@@ -40,6 +40,7 @@ namespace WTFnetApp
 
             snapshot.Recent = latSum / count;
             snapshot.Average = snapshot.Recent;
+            snapshot.Jitter = jitSum / count;
 
             // clamp jitter to avoid extreme values
             snapshot.Jitter = Math.Min(jitSum / count, 200);
