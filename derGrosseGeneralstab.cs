@@ -16,6 +16,7 @@ namespace WTFnetApp
 
         private SpeedifyTelemetryReader speedifyReader;
         private MetricsSnapshot lastSnapshot;
+        private NetworkMetricsEngine metricsEngine;
 
         private WtfFastPing fastPing;
 
@@ -43,6 +44,8 @@ namespace WTFnetApp
             // NAT keepalive
             nat = new NatKeepAlive();
             _ = nat.StartNatKeepAlive();
+
+            metricsEngine = new NetworkMetricsEngine();
 
             //Speedify telemetry
             speedifyReader = new SpeedifyTelemetryReader(OnSpeedifySnapshot);
@@ -148,7 +151,7 @@ namespace WTFnetApp
 
         public void OnSpeedifySnapshot(MetricsSnapshot snapshot)
         {
-            snapshot.QueueDelay = snapshot.Recent - snapshot.DynamicBase;
+            snapshot = metricsEngine.Process(snapshot);
             lastSnapshot = snapshot;
         }
 
