@@ -83,6 +83,7 @@
         public double CombinedBandwidthMbps;
 
         public double RetransmissionRate;
+        public double RetransmissionGrowth;
 
         public double CongestionScore;
         public double HealthScore;
