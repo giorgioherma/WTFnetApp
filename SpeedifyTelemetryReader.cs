@@ -41,7 +41,7 @@ namespace WTFnetApp
                 {
                     process = Process.Start(new ProcessStartInfo
                     {
-                        FileName = "speedify_cli",
+                        FileName = @"C:\Program Files\Speedify\speedify_cli.exe",
                         Arguments = "stats --json",
                         RedirectStandardOutput = true,
                         UseShellExecute = false,
