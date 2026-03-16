@@ -24,6 +24,10 @@
 
         public double PacketLoss;
         public double LossBurst;
+        public bool Congested;
+        public int Priority;
+        public long ReceiveBytes;
+        public long SendBytes;
 
         // =========================
         // BASELINE
@@ -50,5 +54,12 @@
         // =========================
 
         public double LatencyDelta;
+
+        // =========================
+        // ADAPTER DETAILS
+        // =========================
+
+        public double Adapter1Latency;
+        public double Adapter2Latency;
     }
 }
