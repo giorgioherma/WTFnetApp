@@ -9,6 +9,16 @@ namespace WTFnetApp
         private NetworkCongestionDetector detector = new NetworkCongestionDetector();
         private double previousQueueDelay;
         private double previousQueueGrowth;
+        private double previousRetransRate;
+
+        private double queueBaseline;
+        private double congestionMomentum;
+
+        private double latencyBaseline;
+        private double smoothedCongestionScore;
+
+        private double previousLatency;
+        private double latencySlopeBaseline;
 
         public MetricsSnapshot Process(MetricsSnapshot snapshot)
         {
