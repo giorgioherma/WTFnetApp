@@ -14,7 +14,6 @@ namespace WTFnetApp
             double latSum = 0;
             double jitSum = 0;
             double lossSum = 0;
-
             int count = 0;
 
             foreach (var c in metrics.Connections)
@@ -26,6 +25,7 @@ namespace WTFnetApp
                 jitSum += c.Jitter;
                 lossSum += (c.LossReceive + c.LossSend) / 2.0;
 
+                // convert Mbps → Bytes/sec
                 snapshot.ReceiveBytes += (long)(c.ReceiveMbps * 125000);
                 snapshot.SendBytes += (long)(c.SendMbps * 125000);
 
@@ -38,7 +38,9 @@ namespace WTFnetApp
             snapshot.Recent = latSum / count;
             snapshot.Average = snapshot.Recent;
 
+            // clamp jitter to avoid extreme values
             snapshot.Jitter = Math.Min(jitSum / count, 200);
+
             snapshot.PacketLoss = lossSum / count;
 
             if (metrics.Connections.Count >= 1)

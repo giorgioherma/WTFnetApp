@@ -61,5 +61,29 @@
 
         public double Adapter1Latency;
         public double Adapter2Latency;
+
+        // =========================
+        // SPEEDIFY EXTENSIONS
+        // =========================
+
+        public double LatencyMs;
+        public double BaseLatencyMs;
+        public double QueueDelayMs;
+
+        public double MosScore;
+
+        public bool IsCongested;
+        public bool IsDownloadCongested;
+        public bool IsUploadCongested;
+
+        public long ReceiveBytesPerSecond;
+        public long SendBytesPerSecond;
+
+        public double CombinedBandwidthMbps;
+
+        public double RetransmissionRate;
+
+        public int ActiveConnections;
+        public int FailoverCount;
     }
 }
