@@ -11,14 +11,15 @@ namespace WTFnetApp
         private bool running;
 
         private readonly Action<MetricsSnapshot> onSnapshot;
+        private readonly Stopwatch sampleTimer = Stopwatch.StartNew();
 
         // smoothing
         private double smoothJitter = 0;
         private double smoothLatency = 0;
+        private double previousLatency = 0;
 
         // baseline tracking
         private double dynamicBase = 0;
-        private int baseSamples = 0;
 
         public SpeedifyTelemetryReader(Action<MetricsSnapshot> handler)
         {
@@ -108,9 +109,29 @@ namespace WTFnetApp
 
         private MetricsSnapshot Parse(string json)
         {
-            double latency = ExtractValue(json, "latency");
-            double jitter = ExtractValue(json, "jitter");
-            double loss = ExtractValue(json, "packetLoss");
+            if (sampleTimer.ElapsedMilliseconds < 200)
+                return null;
+
+            if (!json.Contains("\"connections\""))
+                return null;
+
+            if (!TryExtractConnectionMetrics(
+                    json,
+                    out double latency,
+                    out double adapter1Latency,
+                    out double adapter2Latency,
+                    out bool congested,
+                    out int priority,
+                    out long rcvBytes,
+                    out long sndBytes))
+                return null;
+
+            sampleTimer.Restart();
+
+            double latencyDelta =
+                previousLatency > 0
+                ? Math.Abs(latency - previousLatency)
+                : 0;
 
             // =========================
             // SMOOTHING
@@ -122,25 +143,16 @@ namespace WTFnetApp
                 smoothLatency = smoothLatency * 0.75 + latency * 0.25;
 
             if (smoothJitter == 0)
-                smoothJitter = jitter;
+                smoothJitter = latencyDelta;
             else
-                smoothJitter = smoothJitter * 0.6 + jitter * 0.4;
+                smoothJitter = smoothJitter * 0.6 + latencyDelta * 0.4;
 
             // =========================
             // DYNAMIC BASELINE
             // =========================
 
-            if (latency > 0 && latency < 120)
-            {
-                dynamicBase =
-                    (dynamicBase * baseSamples + latency) /
-                    (baseSamples + 1);
-
-                baseSamples++;
-
-                if (baseSamples > 200)
-                    baseSamples = 200;
-            }
+            if (latency > 0 && (dynamicBase == 0 || latency < dynamicBase))
+                dynamicBase = latency;
 
             MetricsSnapshot snap = new MetricsSnapshot();
 
@@ -149,16 +161,133 @@ namespace WTFnetApp
             snap.Max = latency;
 
             snap.Jitter = smoothJitter;
-            snap.MicroJitter = jitter;
-            snap.PacketLoss = loss;
+            snap.MicroJitter = latencyDelta;
+            snap.PacketLoss = 0;
 
             snap.DynamicBase = dynamicBase;
+
+            snap.Adapter1Latency = adapter1Latency;
+            snap.Adapter2Latency = adapter2Latency;
+
+            snap.Congested = congested;
+            snap.Priority = priority;
+            snap.ReceiveBytes = rcvBytes;
+            snap.SendBytes = sndBytes;
 
             snap.Variance = 0;
             snap.LatencySlope = 0;
             snap.Trend = 0;
 
+            previousLatency = latency;
+
             return snap;
+        }
+
+        private bool TryExtractConnectionMetrics(
+            string json,
+            out double tunnelLatency,
+            out double adapter1Latency,
+            out double adapter2Latency,
+            out bool congested,
+            out int priority,
+            out long rcvBytes,
+            out long sndBytes)
+        {
+            tunnelLatency = 0;
+            adapter1Latency = 0;
+            adapter2Latency = 0;
+            congested = false;
+            priority = 0;
+            rcvBytes = 0;
+            sndBytes = 0;
+
+            int connectionsPos = json.IndexOf("\"connections\"");
+
+            if (connectionsPos < 0)
+                return false;
+
+            int listStart = json.IndexOf('[', connectionsPos);
+
+            if (listStart < 0)
+                return false;
+
+            int listEnd = json.IndexOf(']', listStart + 1);
+
+            if (listEnd < 0)
+                return false;
+
+            int cursor = listStart + 1;
+
+            while (cursor < listEnd)
+            {
+                int objStart = json.IndexOf('{', cursor);
+
+                if (objStart < 0 || objStart >= listEnd)
+                    break;
+
+                int objEnd = FindObjectEnd(json, objStart, listEnd);
+
+                if (objEnd < 0)
+                    break;
+
+                bool isConnected =
+                    ExtractBool(json, "connected", objStart, objEnd, true);
+
+                if (isConnected)
+                {
+                    double latency =
+                        ExtractValue(json, "jMs", objStart, objEnd);
+
+                    if (latency > 0)
+                    {
+                        if (tunnelLatency == 0 || latency < tunnelLatency)
+                            tunnelLatency = latency;
+
+                        if (adapter1Latency == 0)
+                            adapter1Latency = latency;
+                        else if (adapter2Latency == 0)
+                            adapter2Latency = latency;
+                    }
+
+                    if (!congested)
+                        congested =
+                            ExtractBool(json, "congested", objStart, objEnd, false);
+
+                    if (priority == 0)
+                        priority =
+                            (int)ExtractValue(json, "priority", objStart, objEnd);
+
+                    rcvBytes +=
+                        (long)ExtractValue(json, "rcvBytes", objStart, objEnd);
+
+                    sndBytes +=
+                        (long)ExtractValue(json, "sndBytes", objStart, objEnd);
+                }
+
+                cursor = objEnd + 1;
+            }
+
+            return tunnelLatency > 0;
+        }
+
+        private int FindObjectEnd(string json, int start, int boundary)
+        {
+            int depth = 0;
+
+            for (int i = start; i < boundary; i++)
+            {
+                if (json[i] == '{')
+                    depth++;
+                else if (json[i] == '}')
+                {
+                    depth--;
+
+                    if (depth == 0)
+                        return i;
+                }
+            }
+
+            return -1;
         }
 
         // =========================
@@ -167,24 +296,39 @@ namespace WTFnetApp
 
         private double ExtractValue(string json, string key)
         {
+            return ExtractValue(json, key, 0, json.Length - 1);
+        }
+
+        private double ExtractValue(string json, string key, int start, int endBoundary)
+        {
             try
             {
-                int pos = json.IndexOf("\"" + key + "\"");
+                int pos = json.IndexOf("\"" + key + "\"", start);
 
-                if (pos < 0)
+                if (pos < 0 || pos > endBoundary)
                     return 0;
 
                 pos = json.IndexOf(":", pos);
 
-                if (pos < 0)
+                if (pos < 0 || pos > endBoundary)
                     return 0;
 
                 pos++;
 
-                int end = json.IndexOfAny(new char[] { ',', '}' }, pos);
+                int end = pos;
 
-                if (end < 0)
-                    end = json.Length;
+                while (end <= endBoundary)
+                {
+                    char ch = json[end];
+
+                    if (ch == ',' || ch == '}')
+                        break;
+
+                    end++;
+                }
+
+                if (end > endBoundary)
+                    end = endBoundary + 1;
 
                 string value = json.Substring(pos, end - pos).Trim();
 
@@ -202,6 +346,46 @@ namespace WTFnetApp
             }
 
             return 0;
+        }
+
+        private bool ExtractBool(
+            string json,
+            string key,
+            int start,
+            int endBoundary,
+            bool defaultValue)
+        {
+            int pos = json.IndexOf("\"" + key + "\"", start);
+
+            if (pos < 0 || pos > endBoundary)
+                return defaultValue;
+
+            pos = json.IndexOf(':', pos);
+
+            if (pos < 0 || pos > endBoundary)
+                return defaultValue;
+
+            pos++;
+
+            while (pos <= endBoundary && char.IsWhiteSpace(json[pos]))
+                pos++;
+
+            if (pos + 3 <= endBoundary &&
+                json[pos] == 't' &&
+                json[pos + 1] == 'r' &&
+                json[pos + 2] == 'u' &&
+                json[pos + 3] == 'e')
+                return true;
+
+            if (pos + 4 <= endBoundary &&
+                json[pos] == 'f' &&
+                json[pos + 1] == 'a' &&
+                json[pos + 2] == 'l' &&
+                json[pos + 3] == 's' &&
+                json[pos + 4] == 'e')
+                return false;
+
+            return defaultValue;
         }
     }
 }
