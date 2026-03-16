@@ -13,6 +13,11 @@ namespace WTFnetApp
         public double Congestion;
         public double MosScore;
 
+        public double QueueDelay;
+        public double QueueGrowth;
+        public double QueueAcceleration;
+        public double CongestionScore;
+
         public bool MultiConnection;
         public bool Connected;
 

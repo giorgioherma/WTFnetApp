@@ -51,8 +51,10 @@
     <Compile Include="derGrosseGeneralstab.cs" />
     <Compile Include="Logger.cs" />
     <Compile Include="MetricsSnapshot.cs" />
+    <Compile Include="NetworkMetricsEngine.cs" />
     <Compile Include="NetworkCongestionDetector.cs" />
     <Compile Include="SpeedifyTelemetryReader.cs" />
+    <Compile Include="SpeedifyMetricsAdapter.cs" />
     <Compile Include="Tray.cs" />
     <Compile Include="UIOverlay.cs">
       <SubType>Form</SubType>
