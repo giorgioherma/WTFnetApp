@@ -107,7 +107,7 @@ namespace WTFnetApp
             if (latency > 0 && (dynamicBase == 0 || latency < dynamicBase)) dynamicBase = latency;
             previousLatency = latency;
 
-            return new MetricsSnapshot
+            var snapshot = new MetricsSnapshot
             {
                 Recent = latency,
                 Average = smoothLatency,
@@ -122,6 +122,55 @@ namespace WTFnetApp
                 ReceiveBytes = receiveBytes,
                 SendBytes = sendBytes
             };
+
+            int globalStart = 0;
+            int globalEnd = json.Length - 1;
+
+            if (TryExtractValue(json, "jtMs", globalStart, globalEnd, out double latencyMs))
+                snapshot.LatencyMs = latencyMs;
+            if (TryExtractValue(json, "ltMs", globalStart, globalEnd, out double baseLatencyMs))
+                snapshot.BaseLatencyMs = baseLatencyMs;
+            if (TryExtractValue(json, "mos", globalStart, globalEnd, out double mos))
+                snapshot.MosScore = mos;
+
+            if (TryExtractBool(json, "congested", globalStart, globalEnd, out bool isCongested))
+                snapshot.IsCongested = isCongested;
+            if (TryExtractBool(json, "downloadCongested", globalStart, globalEnd, out bool isDownloadCongested))
+                snapshot.IsDownloadCongested = isDownloadCongested;
+            if (TryExtractBool(json, "uploadCongested", globalStart, globalEnd, out bool isUploadCongested))
+                snapshot.IsUploadCongested = isUploadCongested;
+
+            if (TryExtractValue(json, "rcvBps", globalStart, globalEnd, out double rcvBps))
+                snapshot.ReceiveBytesPerSecond = (long)rcvBps;
+            if (TryExtractValue(json, "sndBps", globalStart, globalEnd, out double sndBps))
+                snapshot.SendBytesPerSecond = (long)sndBps;
+
+            if (TryExtractValue(json, "combined_mbps", globalStart, globalEnd, out double combinedMbps))
+                snapshot.CombinedBandwidthMbps = combinedMbps;
+
+            if (TryExtractValue(json, "num_connections", globalStart, globalEnd, out double activeConnections))
+                snapshot.ActiveConnections = (int)activeConnections;
+            if (TryExtractValue(json, "num_failovers", globalStart, globalEnd, out double failoverCount))
+                snapshot.FailoverCount = (int)failoverCount;
+
+            snapshot.QueueDelayMs = Math.Max(0, snapshot.LatencyMs - snapshot.BaseLatencyMs);
+
+            if (snapshot.PacketLoss <= 0 &&
+                TryExtractValue(json, "packets_in", globalStart, globalEnd, out double packetsIn) &&
+                TryExtractValue(json, "dropped_incoming", globalStart, globalEnd, out double droppedIncoming) &&
+                packetsIn > 0)
+            {
+                snapshot.PacketLoss = droppedIncoming / packetsIn;
+            }
+
+            if (TryExtractValue(json, "retrans_bytes", globalStart, globalEnd, out double retransBytes) &&
+                TryExtractValue(json, "bytes_sent", globalStart, globalEnd, out double bytesSent) &&
+                bytesSent > 0)
+            {
+                snapshot.RetransmissionRate = retransBytes / bytesSent;
+            }
+
+            return snapshot;
         }
 
         private bool TryExtractConnectionMetrics(string json,
@@ -187,35 +236,63 @@ namespace WTFnetApp
 
         private double ExtractValue(string json, string key, int start, int endBoundary)
         {
+            if (TryExtractValue(json, key, start, endBoundary, out double value))
+                return value;
+
+            return 0;
+        }
+
+        private bool TryExtractValue(string json, string key, int start, int endBoundary, out double value)
+        {
+            value = 0;
             int keyPos = json.IndexOf("\"" + key + "\"", start);
-            if (keyPos < 0 || keyPos > endBoundary) return 0;
+            if (keyPos < 0 || keyPos > endBoundary) return false;
 
             int colon = json.IndexOf(':', keyPos);
-            if (colon < 0 || colon > endBoundary) return 0;
+            if (colon < 0 || colon > endBoundary) return false;
 
             int pos = colon + 1, end = pos;
             while (end < json.Length && end <= endBoundary && json[end] != ',' && json[end] != '}') end++;
 
             string raw = json.Substring(pos, end - pos).Trim();
             return double.TryParse(raw, System.Globalization.NumberStyles.Any,
-                System.Globalization.CultureInfo.InvariantCulture, out double v) ? v : 0;
+                System.Globalization.CultureInfo.InvariantCulture, out value);
         }
 
         private bool ExtractBool(string json, string key, int start, int endBoundary, bool defaultValue)
         {
+            if (TryExtractBool(json, key, start, endBoundary, out bool value))
+                return value;
+
+            return defaultValue;
+        }
+
+        private bool TryExtractBool(string json, string key, int start, int endBoundary, out bool value)
+        {
+            value = false;
             int keyPos = json.IndexOf("\"" + key + "\"", start);
-            if (keyPos < 0 || keyPos > endBoundary) return defaultValue;
+            if (keyPos < 0 || keyPos > endBoundary) return false;
 
             int colon = json.IndexOf(':', keyPos);
-            if (colon < 0 || colon > endBoundary) return defaultValue;
+            if (colon < 0 || colon > endBoundary) return false;
 
             int pos = colon + 1;
             while (pos < json.Length && pos <= endBoundary && char.IsWhiteSpace(json[pos])) pos++;
-            if (pos >= json.Length || pos > endBoundary) return defaultValue;
+            if (pos >= json.Length || pos > endBoundary) return false;
 
-            if (pos + 3 <= endBoundary && json[pos] == 't') return true;
-            if (pos + 4 <= endBoundary && json[pos] == 'f') return false;
-            return defaultValue;
+            if (pos + 3 <= endBoundary && json[pos] == 't')
+            {
+                value = true;
+                return true;
+            }
+
+            if (pos + 4 <= endBoundary && json[pos] == 'f')
+            {
+                value = false;
+                return true;
+            }
+
+            return false;
         }
 
         private string ExtractString(string json, string key, int start, int endBoundary)
