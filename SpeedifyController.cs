@@ -14,6 +14,10 @@ namespace WTFnetApp
             double mitigationStrength = 1.0 * aggression;
             double cooldownSeconds = 3.0 * aggression;
 
+        private NetworkControlState lastApplied = NetworkControlState.Stable;
+
+        public void Apply(NetworkControlState state, MetricsSnapshot snapshot)
+        {
             if (state == lastApplied)
                 return;
 
@@ -32,6 +36,14 @@ namespace WTFnetApp
                     break;
                 case NetworkControlState.Panic:
                     Logger.Log("control", $"state=PANIC action=prioritize_lowest_latency cooldown={cooldownSeconds:F1}s");
+                case NetworkControlState.Stable:
+                    Logger.Log("control", "state=STABLE action=keep_fastest_primary");
+                    break;
+                case NetworkControlState.CongestionBuilding:
+                    Logger.Log("control", "state=BUILDING action=enable_multipath_bonding");
+                    break;
+                case NetworkControlState.LagSpike:
+                    Logger.Log("control", "state=LAG_SPIKE action=prioritize_lowest_latency");
                     break;
             }
         }

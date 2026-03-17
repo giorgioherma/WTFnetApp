@@ -116,6 +116,8 @@
         public string GamePhase;
         public string NetworkState;
         public double ServerScore;
+        public string PredictionConfidence;
+        public string DominantSignal;
         public double HealthScore;
 
         public int ActiveConnections;
