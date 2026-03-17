@@ -1,5 +1,3 @@
-using System;
-
 namespace WTFnetApp
 {
     public static class SpeedifyMetricsAdapter

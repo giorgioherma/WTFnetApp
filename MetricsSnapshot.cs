@@ -1,5 +1,15 @@
 ﻿namespace WTFnetApp
 {
+    public enum NetworkIssueSource
+    {
+        None,
+        LocalWifi,
+        LTE_Tower_Load,
+        ISP_Routing,
+        Server_Lag,
+        Unknown
+    }
+
     public class MetricsSnapshot
     {
         // =========================
@@ -49,6 +59,7 @@
 
         public double LatencySlope;
         public double Trend;
+        public double LatencyDrift;
 
         // =========================
         // BURST DETECTION
@@ -83,11 +94,14 @@
         public double CombinedBandwidthMbps;
 
         public double RetransmissionRate;
+        public double RetransmissionGrowth;
 
         public double CongestionScore;
         public double HealthScore;
 
         public int ActiveConnections;
         public int FailoverCount;
+
+        public NetworkIssueSource IssueSource;
     }
 }

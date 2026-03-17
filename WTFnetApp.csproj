@@ -53,7 +53,10 @@
     <Compile Include="MetricsSnapshot.cs" />
     <Compile Include="NetworkMetricsEngine.cs" />
     <Compile Include="NetworkCongestionDetector.cs" />
+    <Compile Include="NetworkController.cs" />
+    <Compile Include="NetworkAnalysisFrame.cs" />
     <Compile Include="SpeedifyTelemetryReader.cs" />
+    <Compile Include="SpeedifyServerTracker.cs" />
     <Compile Include="SpeedifyMetricsAdapter.cs" />
     <Compile Include="Tray.cs" />
     <Compile Include="UIOverlay.cs">
