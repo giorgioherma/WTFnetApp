@@ -16,6 +16,7 @@ namespace WTFnetApp
 
         private SpeedifyTelemetryReader speedifyReader;
         private MetricsSnapshot lastSnapshot;
+        private NetworkController networkController;
 
         private WtfFastPing fastPing;
 
@@ -44,6 +45,9 @@ namespace WTFnetApp
             nat = new NatKeepAlive();
             _ = nat.StartNatKeepAlive();
 
+            networkController = new NetworkController();
+            networkController.Start();
+
             //Speedify telemetry
             speedifyReader = new SpeedifyTelemetryReader(OnSpeedifySnapshot);
             speedifyReader.Start();
@@ -64,7 +68,7 @@ namespace WTFnetApp
 
             // UI refresh timer
             uiTimer = new System.Windows.Forms.Timer();
-            uiTimer.Interval = 500;
+            uiTimer.Interval = 250;
             uiTimer.Tick += UiTick;
             uiTimer.Start();
 
@@ -148,7 +152,7 @@ namespace WTFnetApp
 
         public void OnSpeedifySnapshot(MetricsSnapshot snapshot)
         {
-            snapshot.QueueDelay = snapshot.Recent - snapshot.DynamicBase;
+            snapshot = networkController.ProcessSnapshot(snapshot);
             lastSnapshot = snapshot;
         }
 
@@ -158,7 +162,7 @@ namespace WTFnetApp
 
         private void UiTick(object sender, EventArgs e)
         {
-            if (overlay == null || lastSnapshot == null)
+            if (overlay == null)
                 return;
 
             try
@@ -186,19 +190,18 @@ namespace WTFnetApp
                 natAge < 60 ? 1 :
                 2;
 
-            string natText =
-                natState == 0 ? "NAT!" :
-                natState == 1 ? "NAT~" :
-                "NAT";
+            string systemState =
+                natState == 0 ? "ACTIVE" :
+                natState == 1 ? "WARM" :
+                "IDLE";
 
-            int ping = (int)Math.Max(0, lastSnapshot.Recent);
+            int weight = 0;
+            if (lastSnapshot != null)
+            {
+                weight = (int)Math.Max(0, Math.Min(100, (lastSnapshot.CongestionScore / 15.0) * 100.0));
+            }
 
-
-            overlay.UpdatePing(
-                $"{ping} ms",
-                $"{speedifyMode.ToUpper()} {natText}",
-                natState
-            );
+            overlay.UpdateStatus(lastSnapshot, natState, systemState, weight);
         }
 
         // =========================
