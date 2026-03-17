@@ -560,3 +560,20 @@ Not allowed in cleanup-only pass:
 - Ownership consolidations
 - Invariants verified
 - Risks not changed (with reason)
+
+Small-file consolidation rule
+
+If a file:
+- is under ~40 lines
+- has one helper function
+- is referenced by only one class
+
+it should be merged into its parent subsystem.
+
+
+After any modification:
+
+1 run dotnet build
+2 report build result
+3 stop if compilation fails
+4 do not attempt speculative fixes
