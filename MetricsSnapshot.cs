@@ -52,6 +52,7 @@
         public double QueueDelay;      // Recent - DynamicBase
         public double QueueGrowth;     // queue slope
         public double QueueAcceleration;
+        public double QueuePressure;
 
         // =========================
         // TREND ANALYSIS
@@ -92,11 +93,17 @@
         public long SendBytesPerSecond;
 
         public double CombinedBandwidthMbps;
+        public double ExternalPingMs;
 
         public double RetransmissionRate;
         public double RetransmissionGrowth;
 
         public double CongestionScore;
+        public double CongestionMomentum;
+        public double LagScore;
+        public double LagProbability;
+        public string PredictionConfidence;
+        public string DominantSignal;
         public double HealthScore;
 
         public int ActiveConnections;

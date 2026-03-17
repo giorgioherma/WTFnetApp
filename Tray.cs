@@ -27,6 +27,7 @@ namespace WTFnetApp
 
             trayMenu.Items.Add("Dashboard", null, (s, e) => ToggleDashboard());
             trayMenu.Items.Add("Toggle Overlay", null, (s, e) => core.ToggleOverlay());
+            trayMenu.Items.Add("Ping Servers Now", null, async (s, e) => await RunManualPingScan());
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("Exit", null, Exit);
 
@@ -39,6 +40,19 @@ namespace WTFnetApp
             };
 
             trayIcon.DoubleClick += (s, e) => core.ToggleOverlay();
+        }
+
+
+        async System.Threading.Tasks.Task RunManualPingScan()
+        {
+            try
+            {
+                await core.RunManualServerPingScan();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("server", "manual ping scan failed " + ex.Message);
+            }
         }
 
         void ToggleDashboard()

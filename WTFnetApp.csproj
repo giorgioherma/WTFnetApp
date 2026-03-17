@@ -54,6 +54,14 @@
     <Compile Include="NetworkMetricsEngine.cs" />
     <Compile Include="NetworkCongestionDetector.cs" />
     <Compile Include="NetworkController.cs" />
+    <Compile Include="PredictionEngine.cs" />
+    <Compile Include="LagEventRecorder.cs" />
+    <Compile Include="DecisionEngine.cs" />
+    <Compile Include="SpeedifyController.cs" />
+    <Compile Include="PatternMemoryManager.cs" />
+    <Compile Include="LagPredictor.cs" />
+    <Compile Include="SignalWeightTrainer.cs" />
+    <Compile Include="PatternAnalyzer.cs" />
     <Compile Include="NetworkAnalysisFrame.cs" />
     <Compile Include="SpeedifyTelemetryReader.cs" />
     <Compile Include="SpeedifyServerTracker.cs" />
