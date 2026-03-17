@@ -142,8 +142,8 @@ namespace WTFnetApp
 
         private void OnFastPing(double latency, long timestamp)
         {
-            // Prediction engine will use this later.
-            // Currently not connected to UI or logs.
+            if (latency > 0)
+                networkController.UpdateExternalPing(latency);
         }
 
         // =========================
@@ -236,6 +236,12 @@ namespace WTFnetApp
                 overlay.Hide();
             else
                 overlay.Show();
+        }
+
+        public async Task RunManualServerPingScan()
+        {
+            Logger.Log("server", "manual server ping scan requested");
+            await networkController.RunManualServerPingScan();
         }
     }
 }

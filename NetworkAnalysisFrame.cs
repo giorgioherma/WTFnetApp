@@ -13,6 +13,7 @@ namespace WTFnetApp
         public double QueueDelay;
         public double QueueGrowth;
         public double QueueAcceleration;
+        public double QueuePressure;
 
         public double LatencyDrift;
         public double RetransmissionRate;
@@ -34,6 +35,7 @@ namespace WTFnetApp
                 QueueDelay = snapshot.QueueDelay,
                 QueueGrowth = snapshot.QueueGrowth,
                 QueueAcceleration = snapshot.QueueAcceleration,
+                QueuePressure = snapshot.QueuePressure,
                 LatencyDrift = snapshot.LatencyDrift,
                 RetransmissionRate = snapshot.RetransmissionRate,
                 CongestionScore = snapshot.CongestionScore,
