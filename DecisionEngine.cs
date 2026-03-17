@@ -1,5 +1,3 @@
-using System;
-
 namespace WTFnetApp
 {
     public enum NetworkControlState
@@ -8,6 +6,9 @@ namespace WTFnetApp
         Normal,
         Warning,
         Panic
+        Stable,
+        CongestionBuilding,
+        LagSpike
     }
 
     public class DecisionEngine
@@ -54,7 +55,7 @@ namespace WTFnetApp
             if (recovered)
                 lagPressureController.OnRecovery();
 
-            lagPressureController.UpdateDecay(failureDetector.State, serverQuality.ServerScore);
+            lagPressureController.UpdateDecay(failureDetector.State);
 
             double thresholdScale = 1.0 / serverQuality.ServerScore;
             LagEventType lagEventType = playerLagDetector.Update(snapshot, baselineRtt, thresholdScale);
@@ -69,12 +70,13 @@ namespace WTFnetApp
 
             double effectiveConfidence = learningEngine.Confidence * serverQuality.ServerScore;
             double confidenceScore = ComputeConfidence(snapshot);
-            bool queueBeforeLag = snapshot.QueueGrowth > QueueGrowthSignalThreshold;
+            bool queueBeforeLag = snapshot.QueueGrowth > 0.2;
             bool persisted = confidenceScore > 0.35 || IncrementPersistence(snapshot);
+            bool persisted = confidenceScore > 0.35 ? true : IncrementPersistence(snapshot);
             bool enoughSignals = CountPositiveSignals(snapshot) >= 2;
 
-            double panicEnter = (PanicEnterBaseThreshold / aggression) * thresholdScale;
-            double panicLeave = (PanicLeaveBaseThreshold / aggression) * thresholdScale;
+            double panicEnter = (0.65 / aggression) * thresholdScale;
+            double panicLeave = (0.50 / aggression) * thresholdScale;
 
             if (degraded)
             {
@@ -87,14 +89,14 @@ namespace WTFnetApp
             }
             else if (state == NetworkControlState.Normal)
             {
-                if (snapshot.PatternMatchScore > NormalToWarningPatternThreshold && queueBeforeLag && enoughSignals && persisted)
+                if (snapshot.PatternMatchScore > 0.6 && queueBeforeLag && enoughSignals && persisted)
                     state = NetworkControlState.Warning;
             }
             else if (state == NetworkControlState.Warning)
             {
                 bool panicReady = snapshot.PatternMatchScore > panicEnter &&
-                                  effectiveConfidence > PanicEnterLearningConfidenceThreshold &&
-                                  confidenceScore > (PanicEnterConfidenceThreshold / aggression) &&
+                                  effectiveConfidence > 0.65 &&
+                                  confidenceScore > (0.45 / aggression) &&
                                   queueBeforeLag && enoughSignals && persisted;
 
                 if (panicReady)
@@ -102,7 +104,7 @@ namespace WTFnetApp
                     state = NetworkControlState.Panic;
                     panicHoldTicks = Math.Max(1, (int)Math.Round(15 * aggression));
                 }
-                else if (snapshot.PatternMatchScore < WarningToNormalPatternThreshold)
+                else if (snapshot.PatternMatchScore < 0.45)
                 {
                     state = NetworkControlState.Normal;
                 }
@@ -113,7 +115,7 @@ namespace WTFnetApp
                 {
                     panicHoldTicks--;
                 }
-                else if (snapshot.PatternMatchScore < panicLeave || confidenceScore < PanicExitConfidenceThreshold)
+                else if (snapshot.PatternMatchScore < panicLeave || confidenceScore < 0.30)
                 {
                     state = NetworkControlState.Warning;
                 }
@@ -123,9 +125,11 @@ namespace WTFnetApp
             return state;
         }
 
+        private int persistenceTicks;
+
         private bool IncrementPersistence(MetricsSnapshot snapshot)
         {
-            bool active = snapshot.QueueGrowth > QueueGrowthSignalThreshold || snapshot.QueueAcceleration > QueueAccelerationSignalThreshold || snapshot.LatencyDrift > LatencyDriftSignalThreshold || snapshot.RetransmissionGrowth > 0;
+            bool active = snapshot.QueueGrowth > 0.2 || snapshot.QueueAcceleration > 0.1 || snapshot.LatencyDrift > 4 || snapshot.RetransmissionGrowth > 0;
             if (active)
                 persistenceTicks++;
             else
@@ -137,9 +141,9 @@ namespace WTFnetApp
         private int CountPositiveSignals(MetricsSnapshot s)
         {
             int count = 0;
-            if (s.QueueGrowth > QueueGrowthSignalThreshold) count++;
-            if (s.QueueAcceleration > QueueAccelerationSignalThreshold) count++;
-            if (s.LatencyDrift > LatencyDriftSignalThreshold) count++;
+            if (s.QueueGrowth > 0.2) count++;
+            if (s.QueueAcceleration > 0.1) count++;
+            if (s.LatencyDrift > 4) count++;
             if (s.RetransmissionGrowth > 0) count++;
             return count;
         }
@@ -189,6 +193,49 @@ namespace WTFnetApp
             if (value < 0) return 0;
             if (value > 1) return 1;
             return value;
+        private NetworkControlState state = NetworkControlState.Stable;
+        private NetworkControlState pending = NetworkControlState.Stable;
+        private int confirmCount;
+
+        public NetworkControlState CurrentState => state;
+
+        public NetworkControlState Update(MetricsSnapshot s)
+        {
+            var target = Evaluate(s);
+
+            if (target == state)
+            {
+                pending = state;
+                confirmCount = 0;
+                return state;
+            }
+
+            if (target != pending)
+            {
+                pending = target;
+                confirmCount = 1;
+                return state;
+            }
+
+            confirmCount++;
+            if (confirmCount >= 3)
+            {
+                state = pending;
+                confirmCount = 0;
+            }
+
+            return state;
+        }
+
+        private NetworkControlState Evaluate(MetricsSnapshot s)
+        {
+            if (s.LagScore > 1.5)
+                return NetworkControlState.LagSpike;
+
+            if (s.CongestionScore >= 3 && s.CongestionScore <= 6 && s.QueueAcceleration > 0)
+                return NetworkControlState.CongestionBuilding;
+
+            return NetworkControlState.Stable;
         }
     }
 }

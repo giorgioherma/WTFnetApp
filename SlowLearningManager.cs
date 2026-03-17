@@ -4,9 +4,6 @@ namespace WTFnetApp
 {
     public class SlowLearningManager
     {
-        private const double EpochThresholdDeltaStep = 0.01;
-        private const double MitigationSuccessLagPressureDrop = 0.03;
-        private const int MitigationOutcomeWindowSeconds = 3;
         private static readonly TimeSpan EpochDuration = TimeSpan.FromSeconds(30);
 
         private DateTime epochStart = DateTime.UtcNow;

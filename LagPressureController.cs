@@ -12,7 +12,7 @@ namespace WTFnetApp
         public double LagPressure { get; private set; }
         public double BurstMultiplier { get; private set; } = 1.0;
 
-        public void UpdateDecay(NetworkState networkState, double serverScore)
+        public void UpdateDecay(NetworkState networkState)
         {
             DateTime now = DateTime.UtcNow;
             double dt = (now - lastUpdate).TotalSeconds;
@@ -23,6 +23,7 @@ namespace WTFnetApp
             if (serverScore < 0.2) serverScore = 0.2;
             if (serverScore > 1.0) serverScore = 1.0;
             LagPressure -= (DecayRatePerSecond * serverScore) * dt;
+            LagPressure -= DecayRatePerSecond * dt;
             LagPressure = Clamp01(LagPressure);
 
             if (networkState == NetworkState.Degraded && LagPressure > 0.8)

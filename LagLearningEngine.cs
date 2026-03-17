@@ -29,11 +29,6 @@ namespace WTFnetApp
         public double Confidence => confidenceEstimator.Confidence;
         public double DynamicThreshold => thresholdController.DynamicThreshold;
 
-        public void ApplySlowThresholdDelta(double delta)
-        {
-            thresholdController.ApplyEpochDelta(delta);
-        }
-
         public void Update(MetricsSnapshot snapshot, DataSet dataSet, bool learningEnabled)
         {
             if (snapshot == null)

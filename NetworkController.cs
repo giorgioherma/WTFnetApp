@@ -12,6 +12,22 @@ namespace WTFnetApp
 
         private double latestExternalPing = -1;
 
+        private double latestExternalPing = -1;
+        private readonly LagEventRecorder lagEventRecorder = new LagEventRecorder();
+        private readonly PatternAnalyzer patternAnalyzer = new PatternAnalyzer();
+        private readonly SignalWeights signalWeights = new SignalWeights();
+        private readonly SignalWeightTrainer weightTrainer;
+        private readonly LagPredictor lagPredictor;
+        private readonly PatternMemoryManager patternMemory = new PatternMemoryManager();
+
+        private double latestExternalPing = -1;
+
+        public NetworkController()
+        {
+            weightTrainer = new SignalWeightTrainer(signalWeights);
+            lagPredictor = new LagPredictor(signalWeights);
+        }
+
         public void Start()
         {
             serverTracker.Start();
@@ -37,13 +53,26 @@ namespace WTFnetApp
             snapshot = metricsEngine.Process(snapshot);
 
             var state = decisionEngine.Update(snapshot, metricsEngine.DataSet);
-            speedifyController.Apply(state, snapshot);
+            LagPrediction prediction = lagPredictor.Predict(snapshot);
+            snapshot.LagProbability = prediction.Probability;
+            snapshot.PredictionConfidence = prediction.Confidence;
+            snapshot.DominantSignal = prediction.DominantSignal;
 
-            slowLearningManager.Observe(
-                snapshot,
-                state,
-                decisionEngine.CurrentLearningThreshold,
-                decisionEngine.ApplySlowThresholdDelta);
+            LagEvent lagEvent;
+            if (lagEventRecorder.TryCapture(snapshot, metricsEngine.DataSet, out lagEvent))
+            {
+                LagEventFeatures features = patternAnalyzer.ExtractFeatures(lagEvent);
+                weightTrainer.LearnFromLagEvent(features);
+                patternMemory.Learn(lagEvent, features);
+                Logger.Log("lag", $"event learned conf={snapshot.PredictionConfidence} dom={snapshot.DominantSignal}");
+            }
+            else if (snapshot.LagScore < 1.0)
+            {
+                weightTrainer.LearnFromFalsePositive(snapshot.LagProbability);
+            }
+
+            var state = decisionEngine.Update(snapshot);
+            speedifyController.Apply(state, snapshot);
 
             return snapshot;
         }
