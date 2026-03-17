@@ -1,3 +1,4 @@
+---
 name: wtfnetapp-lte-stabilizer
 description: >
   Build, refactor, and extend WTFnetApp into a production-grade LTE/5G network
@@ -71,7 +72,16 @@ Telemetry Input
   -> Actuation
   -> Logging / UI
 
-No class may skip layers or own logic from multiple layers unless explicitly approved.
+  Telemetry Input
+  -> Metrics Extraction
+  -> Signal Normalization
+  -> Prediction
+  -> Learning
+  -> Decision
+  -> Actuation
+  -> Logging / UI
+
+  No class may skip layers or own logic from multiple layers unless explicitly approved.
 
 Canonical subsystems
 1. Telemetry layer
