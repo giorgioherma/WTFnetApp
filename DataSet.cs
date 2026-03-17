@@ -13,6 +13,12 @@ namespace WTFnetApp
         public double Congestion;
         public double MosScore;
 
+        public double QueueDelay;
+        public double QueueGrowth;
+        public double QueueAcceleration;
+        public double CongestionScore;
+        public double LatencyDrift;
+
         public bool MultiConnection;
         public bool Connected;
 
@@ -279,6 +285,100 @@ namespace WTFnetApp
             int prev = (last - 1 + MAX_SAMPLES) % MAX_SAMPLES;
 
             return buffer[last].Latency - buffer[prev].Latency;
+        }
+
+
+
+        public double AverageLatency(int lastN)
+        {
+            if (count == 0) return 0;
+
+            int n = Math.Min(lastN, count);
+            if (n <= 0) return 0;
+
+            double sum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int idx = (index - 1 - i + MAX_SAMPLES) % MAX_SAMPLES;
+                sum += buffer[idx].Latency;
+            }
+
+            return sum / n;
+        }
+
+        public double AverageQueue(int lastN)
+        {
+            if (count == 0) return 0;
+
+            int n = Math.Min(lastN, count);
+            if (n <= 0) return 0;
+
+            double sum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int idx = (index - 1 - i + MAX_SAMPLES) % MAX_SAMPLES;
+                sum += buffer[idx].QueueDelay;
+            }
+
+            return sum / n;
+        }
+
+        public double AverageJitter(int lastN)
+        {
+            if (count == 0) return 0;
+
+            int n = Math.Min(lastN, count);
+            if (n <= 0) return 0;
+
+            double sum = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int idx = (index - 1 - i + MAX_SAMPLES) % MAX_SAMPLES;
+                sum += buffer[idx].Jitter;
+            }
+
+            return sum / n;
+        }
+
+        // =========================
+        // CYCLE DETECTION
+        // =========================
+
+        public int DetectQueueCycle()
+        {
+            if (count < 10)
+                return 0;
+
+            int cycles = 0;
+
+            for (int i = 2; i < count; i++)
+            {
+                int idxA = (index - i + MAX_SAMPLES) % MAX_SAMPLES;
+                int idxB = (index - i - 1 + MAX_SAMPLES) % MAX_SAMPLES;
+                int idxC = (index - i - 2 + MAX_SAMPLES) % MAX_SAMPLES;
+
+                var a = buffer[idxA];
+                var b = buffer[idxB];
+                var c = buffer[idxC];
+
+                if (a == null || b == null || c == null)
+                    continue;
+
+                if (a.QueueGrowth > 0 && b.QueueGrowth < 0 && c.QueueGrowth > 0)
+                    cycles++;
+            }
+
+            return cycles;
+        }
+
+        public string GetTimelineSummary()
+        {
+            double latAvg = AverageLatency(20);
+            double queueAvg = AverageQueue(20);
+            double jitterAvg = AverageJitter(20);
+            int cycles = DetectQueueCycle();
+
+            return $"LAT_AVG={latAvg:F1} QUEUE_AVG={queueAvg:F1} JITTER_AVG={jitterAvg:F1} CYCLES={cycles}";
         }
 
         // =========================
