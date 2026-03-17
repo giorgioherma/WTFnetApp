@@ -16,8 +16,11 @@ namespace WTFnetApp
         public double QueueDelay;
         public double QueueGrowth;
         public double QueueAcceleration;
+        public double QueuePressure;
         public double CongestionScore;
         public double LatencyDrift;
+        public double RetransmissionRate;
+        public double RetransmissionGrowth;
 
         public bool MultiConnection;
         public bool Connected;
@@ -392,6 +395,42 @@ namespace WTFnetApp
 
             int last = (index - 1 + MAX_SAMPLES) % MAX_SAMPLES;
             return buffer[last];
+        }
+
+
+        public NetSample[] GetRecentSamples(int lastN)
+        {
+            if (count == 0 || lastN <= 0)
+                return Array.Empty<NetSample>();
+
+            int n = Math.Min(lastN, count);
+            NetSample[] arr = new NetSample[n];
+
+            for (int i = 0; i < n; i++)
+            {
+                int idx = (index - n + i + MAX_SAMPLES) % MAX_SAMPLES;
+                arr[i] = buffer[idx];
+            }
+
+            return arr;
+        }
+
+        public void CopyRecentSamples(NetSample[] destination, int sampleCount)
+        {
+            if (destination == null || destination.Length == 0 || count == 0 || sampleCount <= 0)
+                return;
+
+            int n = Math.Min(Math.Min(sampleCount, count), destination.Length);
+            int start = (index - n + MAX_SAMPLES) % MAX_SAMPLES;
+
+            for (int i = 0; i < n; i++)
+            {
+                int idx = (start + i) % MAX_SAMPLES;
+                destination[i] = buffer[idx];
+            }
+
+            for (int i = n; i < destination.Length; i++)
+                destination[i] = null;
         }
 
         public NetSample[] GetSamples()
