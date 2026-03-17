@@ -9,29 +9,13 @@ namespace WTFnetApp
         private NetworkCongestionDetector detector = new NetworkCongestionDetector();
         private double previousQueueDelay;
         private double previousQueueGrowth;
-        private double previousRetransRate;
-        private double queueBaseline;
-        private double congestionMomentum;
-        private double latencyBaseline;
-        private double smoothedCongestionScore;
-        private double previousLatency;
-        private double latencySlopeBaseline;
-        private double bandwidthBaseline;
 
         public MetricsSnapshot Process(MetricsSnapshot snapshot)
         {
             snapshot.QueueDelay = snapshot.QueueDelayMs;
 
-            if (snapshot.QueueDelay < 20)
-            {
-                if (queueBaseline == 0)
-                    queueBaseline = snapshot.QueueDelay;
-                else
-                    queueBaseline = queueBaseline * 0.95 + snapshot.QueueDelay * 0.05;
-            }
-
             if (previousQueueDelay > 0)
-                snapshot.QueueGrowth = snapshot.QueueDelay - previousQueueDelay;
+                snapshot.QueueGrowth = Math.Max(0, snapshot.QueueDelay - previousQueueDelay);
             else
                 snapshot.QueueGrowth = 0;
 
@@ -99,6 +83,8 @@ namespace WTFnetApp
 
             if (queueBaseline > 0 && snapshot.QueueDelay > queueBaseline * 2)
                 congestion += 1.0;
+            if (snapshot.QueueDelay > 10)
+                congestion += 0.5;
 
             if (snapshot.QueueGrowth > 5)
                 congestion += 1.0;
@@ -143,6 +129,7 @@ namespace WTFnetApp
 
             var timeline = dataSet.GetTimelineSummary();
             Logger.Log("timeline", timeline);
+            snapshot.CongestionScore = congestion;
 
             double health = snapshot.MosScore;
             health *= (1.0 - snapshot.PacketLoss);
