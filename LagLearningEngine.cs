@@ -208,15 +208,24 @@ namespace WTFnetApp
             if (rttCount == 0)
                 return 0;
 
-            double min = double.MaxValue;
+            double[] temp = new double[rttCount];
+            int n = 0;
             for (int i = 0; i < rttCount; i++)
             {
                 double v = rttWindow[i];
-                if (v > 0 && v < min)
-                    min = v;
+                if (v > 0)
+                    temp[n++] = v;
             }
 
-            return min == double.MaxValue ? 0 : min;
+            if (n == 0)
+                return 0;
+
+            Array.Sort(temp, 0, n);
+            int idx = (int)(n * 0.2);
+            if (idx >= n)
+                idx = n - 1;
+
+            return temp[idx];
         }
     }
 }
