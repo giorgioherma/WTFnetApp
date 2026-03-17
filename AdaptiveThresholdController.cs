@@ -17,5 +17,12 @@ namespace WTFnetApp
         {
             dynamicThreshold = Math.Max(0.55, dynamicThreshold - 0.01);
         }
+
+        public void ApplyEpochDelta(double delta)
+        {
+            if (delta > 0.01) delta = 0.01;
+            if (delta < -0.01) delta = -0.01;
+            dynamicThreshold = Math.Max(0.55, Math.Min(0.90, dynamicThreshold + delta));
+        }
     }
 }

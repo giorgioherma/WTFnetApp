@@ -65,6 +65,9 @@
     <Compile Include="LearningGate.cs" />
     <Compile Include="FailureDetector.cs" />
     <Compile Include="ServerQualityEstimator.cs" />
+    <Compile Include="SlowLearningManager.cs" />
+    <Compile Include="DecisionEngine.cs" />
+    <Compile Include="SpeedifyController.cs" />
     <Compile Include="LagEventRecorder.cs" />
     <Compile Include="DecisionEngine.cs" />
     <Compile Include="SpeedifyController.cs" />

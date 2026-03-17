@@ -8,6 +8,9 @@ namespace WTFnetApp
         private readonly SpeedifyServerTracker serverTracker = new SpeedifyServerTracker();
         private readonly DecisionEngine decisionEngine = new DecisionEngine();
         private readonly SpeedifyController speedifyController = new SpeedifyController();
+        private readonly SlowLearningManager slowLearningManager = new SlowLearningManager();
+
+        private double latestExternalPing = -1;
 
         private double latestExternalPing = -1;
         private readonly LagEventRecorder lagEventRecorder = new LagEventRecorder();

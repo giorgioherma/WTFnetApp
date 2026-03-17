@@ -23,8 +23,15 @@ namespace WTFnetApp
 
         private NetworkControlState state = NetworkControlState.Calibration;
         private int panicHoldTicks;
+        private int persistenceTicks;
 
         public NetworkControlState CurrentState => state;
+        public double CurrentLearningThreshold => learningEngine.DynamicThreshold;
+
+        public void ApplySlowThresholdDelta(double delta)
+        {
+            learningEngine.ApplySlowThresholdDelta(delta);
+        }
 
         public NetworkControlState Update(MetricsSnapshot snapshot, DataSet dataSet)
         {
@@ -54,6 +61,7 @@ namespace WTFnetApp
             double effectiveConfidence = learningEngine.Confidence * serverQuality.ServerScore;
             double confidenceScore = ComputeConfidence(snapshot);
             bool queueBeforeLag = snapshot.QueueGrowth > 0.2;
+            bool persisted = confidenceScore > 0.35 || IncrementPersistence(snapshot);
             bool persisted = confidenceScore > 0.35 ? true : IncrementPersistence(snapshot);
             bool enoughSignals = CountPositiveSignals(snapshot) >= 2;
 

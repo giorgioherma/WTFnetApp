@@ -20,6 +20,9 @@ namespace WTFnetApp
                 dt = 0;
 
             lastUpdate = now;
+            if (serverScore < 0.2) serverScore = 0.2;
+            if (serverScore > 1.0) serverScore = 1.0;
+            LagPressure -= (DecayRatePerSecond * serverScore) * dt;
             LagPressure -= DecayRatePerSecond * dt;
             LagPressure = Clamp01(LagPressure);
 
