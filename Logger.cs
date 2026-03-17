@@ -37,6 +37,10 @@ namespace WTFnetApp
                 $"DRIFT {frame.LatencyDrift,6:+0.0;-0.0;0.0} | " +
                 $"RETR {frame.RetransmissionRate,5:F3} | " +
                 $"SCORE {frame.CongestionScore,4:F1} | " +
+                $"LP {frame.LagPressure,4:F2} | " +
+                $"AGG {frame.AggressionFactor,4:F2} | " +
+                $"EVT {frame.LagEventType} | " +
+                $"NET {frame.NetworkState} | " +
                 $"SRC {frame.Source}";
 
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] {ts}");

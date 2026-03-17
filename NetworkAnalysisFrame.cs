@@ -18,6 +18,10 @@ namespace WTFnetApp
         public double LatencyDrift;
         public double RetransmissionRate;
         public double CongestionScore;
+        public double LagPressure;
+        public double AggressionFactor;
+        public string LagEventType;
+        public string NetworkState;
 
         public NetworkIssueSource Source;
 
@@ -39,6 +43,10 @@ namespace WTFnetApp
                 LatencyDrift = snapshot.LatencyDrift,
                 RetransmissionRate = snapshot.RetransmissionRate,
                 CongestionScore = snapshot.CongestionScore,
+                LagPressure = snapshot.LagPressure,
+                AggressionFactor = snapshot.AggressionFactor,
+                LagEventType = snapshot.LagEventType,
+                NetworkState = snapshot.NetworkState,
                 Source = snapshot.IssueSource
             };
         }

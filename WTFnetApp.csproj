@@ -55,6 +55,16 @@
     <Compile Include="NetworkCongestionDetector.cs" />
     <Compile Include="NetworkController.cs" />
     <Compile Include="PredictionEngine.cs" />
+    <Compile Include="LagPattern.cs" />
+    <Compile Include="ConfidenceEstimator.cs" />
+    <Compile Include="AdaptiveThresholdController.cs" />
+    <Compile Include="LagLearningEngine.cs" />
+    <Compile Include="LagPressureController.cs" />
+    <Compile Include="PlayerLagDetector.cs" />
+    <Compile Include="AggressionController.cs" />
+    <Compile Include="LearningGate.cs" />
+    <Compile Include="FailureDetector.cs" />
+    <Compile Include="ServerQualityEstimator.cs" />
     <Compile Include="LagEventRecorder.cs" />
     <Compile Include="DecisionEngine.cs" />
     <Compile Include="SpeedifyController.cs" />

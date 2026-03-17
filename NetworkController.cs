@@ -9,6 +9,7 @@ namespace WTFnetApp
         private readonly DecisionEngine decisionEngine = new DecisionEngine();
         private readonly SpeedifyController speedifyController = new SpeedifyController();
 
+        private double latestExternalPing = -1;
         private readonly LagEventRecorder lagEventRecorder = new LagEventRecorder();
         private readonly PatternAnalyzer patternAnalyzer = new PatternAnalyzer();
         private readonly SignalWeights signalWeights = new SignalWeights();
@@ -48,6 +49,7 @@ namespace WTFnetApp
             snapshot.ExternalPingMs = latestExternalPing;
             snapshot = metricsEngine.Process(snapshot);
 
+            var state = decisionEngine.Update(snapshot, metricsEngine.DataSet);
             LagPrediction prediction = lagPredictor.Predict(snapshot);
             snapshot.LagProbability = prediction.Probability;
             snapshot.PredictionConfidence = prediction.Confidence;
