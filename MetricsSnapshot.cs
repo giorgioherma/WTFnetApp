@@ -52,6 +52,7 @@
         public double QueueDelay;      // Recent - DynamicBase
         public double QueueGrowth;     // queue slope
         public double QueueAcceleration;
+        public double QueuePressure;
 
         // =========================
         // TREND ANALYSIS
@@ -92,11 +93,29 @@
         public long SendBytesPerSecond;
 
         public double CombinedBandwidthMbps;
+        public double ExternalPingMs;
 
         public double RetransmissionRate;
         public double RetransmissionGrowth;
 
         public double CongestionScore;
+        public double CongestionMomentum;
+        public double LagScore;
+        public double LagProbability;
+        public double PatternMatchScore;
+        public double LearningConfidence;
+        public double SignatureAvgQueueGrowth;
+        public string PredictionConfidence;
+        public string DominantSignal;
+        public double LagPressure;
+        public string LagEventType;
+        public int PendingLagEvents;
+        public double BurstMultiplier;
+        public double AggressionFactor;
+        public bool LearningEnabled;
+        public string GamePhase;
+        public string NetworkState;
+        public double ServerScore;
         public double HealthScore;
 
         public int ActiveConnections;

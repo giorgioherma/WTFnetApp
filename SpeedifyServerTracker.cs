@@ -127,8 +127,12 @@ namespace WTFnetApp
                 knownServers.Add(ip);
                 Logger.Log("server", $"NEW SPEEDIFY SERVER {ip}");
                 SaveServer(ip);
-                _ = TestServerPing(ip);
             }
+        }
+
+        public Task RunManualPingScan()
+        {
+            return PingServers("MANUAL");
         }
 
         private void SaveServer(string ip)
@@ -149,19 +153,24 @@ namespace WTFnetApp
 
         private async Task CheckServersOnStartup()
         {
+            await PingServers("STARTUP");
+        }
+
+        private async Task PingServers(string reason)
+        {
             var servers = LoadServers();
+
+            foreach (var activeServer in GetSpeedifyServers())
+            {
+                if (!servers.Contains(activeServer))
+                    servers.Add(activeServer);
+            }
 
             foreach (var ip in servers)
             {
                 int ping = await WtfFastPing.Ping(ip);
-                Logger.Log("server", $"SERVER {ip} STARTUP PING {ping}ms");
+                Logger.Log("server", $"SERVER {ip} {reason} PING {ping}ms");
             }
-        }
-
-        private async Task TestServerPing(string ip)
-        {
-            int ping = await WtfFastPing.Ping(ip);
-            Logger.Log("server", $"SERVER {ip} PING {ping}ms");
         }
     }
 }
