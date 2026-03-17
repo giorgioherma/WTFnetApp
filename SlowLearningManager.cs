@@ -59,10 +59,10 @@ namespace WTFnetApp
                 mitigationStartPressure = snapshot.LagPressure;
             }
 
-            if (mitigationPending && (DateTime.UtcNow - mitigationStart).TotalSeconds >= 3)
+            if (mitigationPending && (DateTime.UtcNow - mitigationStart).TotalSeconds >= MitigationOutcomeWindowSeconds)
             {
                 mitigationPending = false;
-                if (snapshot.LagPressure < mitigationStartPressure - 0.03)
+                if (snapshot.LagPressure < mitigationStartPressure - MitigationSuccessLagPressureDrop)
                     mitigationSuccesses++;
                 else
                     mitigationFailures++;
@@ -98,12 +98,12 @@ namespace WTFnetApp
 
             double delta = 0;
             if (falsePositives > confirmedLagEvents)
-                delta = 0.01;
+                delta = EpochThresholdDeltaStep;
             else if (confirmedLagEvents > 0 && successRate >= 0.5)
-                delta = -0.01;
+                delta = -EpochThresholdDeltaStep;
 
-            if (delta > 0.01) delta = 0.01;
-            if (delta < -0.01) delta = -0.01;
+            if (delta > EpochThresholdDeltaStep) delta = EpochThresholdDeltaStep;
+            if (delta < -EpochThresholdDeltaStep) delta = -EpochThresholdDeltaStep;
 
             Logger.Log("slowlearn",
                 $"epoch=30s predicted={predictedRiskEvents} confirmed={confirmedLagEvents} fp={falsePositives} avgLP={avgLagPressure:F2} mit={mitigationAttempts} succ={mitigationSuccesses} fail={mitigationFailures} successRate={successRate:P0} thrDelta={delta:+0.00;-0.00;0.00}");
