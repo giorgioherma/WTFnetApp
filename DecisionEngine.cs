@@ -13,6 +13,16 @@ namespace WTFnetApp
 
     public class DecisionEngine
     {
+        private const double QueueGrowthSignalThreshold = 0.2;
+        private const double QueueAccelerationSignalThreshold = 0.1;
+        private const double LatencyDriftSignalThreshold = 4.0;
+        private const double NormalToWarningPatternThreshold = 0.6;
+        private const double WarningToNormalPatternThreshold = 0.45;
+        private const double PanicExitConfidenceThreshold = 0.30;
+        private const double PanicEnterConfidenceThreshold = 0.45;
+        private const double PanicEnterLearningConfidenceThreshold = 0.65;
+        private const double PanicEnterBaseThreshold = 0.65;
+        private const double PanicLeaveBaseThreshold = 0.50;
         private readonly LagLearningEngine learningEngine = new LagLearningEngine();
         private readonly LagPressureController lagPressureController = new LagPressureController();
         private readonly PlayerLagDetector playerLagDetector = new PlayerLagDetector();

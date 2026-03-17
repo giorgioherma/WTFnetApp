@@ -4,18 +4,34 @@ namespace WTFnetApp
 {
     public class PredictionEngine
     {
+        private const int BandwidthWindowSize = 10;
+
+        private readonly double[] bandwidthWindow = new double[BandwidthWindowSize];
+        private int bandwidthIndex;
+        private int bandwidthCount;
+
         private double previousScore;
 
-        public double ComputeCongestionScore(MetricsSnapshot s, double congestionFlags)
+        public double ComputeCongestionScore(MetricsSnapshot snapshot, double congestionFlags)
         {
-            double raw =
-                0.35 * s.QueueAcceleration +
-                0.25 * s.QueueGrowth +
-                80.0 * s.RetransmissionGrowth +
-                0.15 * s.LatencyDrift +
-                congestionFlags;
+            AddBandwidthSample(snapshot.CombinedBandwidthMbps);
 
-            raw = Math.Max(0, Math.Min(15, raw));
+            double queueSignal = Clamp01(snapshot.QueueGrowth / 8.0);
+            double accelerationSignal = Clamp01((snapshot.QueueAcceleration + 2.0) / 6.0);
+            double driftSignal = Clamp01(snapshot.LatencyDrift / 20.0);
+            double retransSignal = Clamp01(snapshot.RetransmissionGrowth * 120.0);
+            double pressureSignal = Clamp01(snapshot.QueuePressure / 200.0);
+            double oscillationSignal = Clamp01(ComputeBandwidthStdDev() / 10.0);
+
+            double normalizedScore =
+                0.30 * queueSignal +
+                0.25 * accelerationSignal +
+                0.20 * driftSignal +
+                0.15 * retransSignal +
+                0.10 * pressureSignal +
+                0.10 * oscillationSignal;
+
+            double raw = Math.Max(0, Math.Min(15, normalizedScore * 15.0 + congestionFlags));
             previousScore = previousScore * 0.7 + raw * 0.3;
             return Math.Max(0, Math.Min(15, previousScore));
         }
