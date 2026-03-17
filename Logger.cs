@@ -33,9 +33,14 @@ namespace WTFnetApp
                 $"JIT {frame.Jitter,4:F1} | " +
                 $"LOSS {frame.PacketLoss * 100,4:F1}% | " +
                 $"Q {frame.QueueDelay,5:F1} | " +
+                $"QP {frame.QueuePressure,5:F1} | " +
                 $"DRIFT {frame.LatencyDrift,6:+0.0;-0.0;0.0} | " +
                 $"RETR {frame.RetransmissionRate,5:F3} | " +
                 $"SCORE {frame.CongestionScore,4:F1} | " +
+                $"LP {frame.LagPressure,4:F2} | " +
+                $"AGG {frame.AggressionFactor,4:F2} | " +
+                $"EVT {frame.LagEventType} | " +
+                $"NET {frame.NetworkState} | " +
                 $"SRC {frame.Source}";
 
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] {ts}");
@@ -49,6 +54,7 @@ namespace WTFnetApp
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] QUEUE DELAY   {frame.QueueDelay,7:F1}");
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] QUEUE GROWTH  {frame.QueueGrowth,7:+0.0;-0.0;0.0}");
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] QUEUE ACCEL   {frame.QueueAcceleration,7:+0.0;-0.0;0.0}");
+            WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] QUEUE PRESS   {frame.QueuePressure,7:F1}");
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] ");
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] RETRANS       {frame.RetransmissionRate,7:F3}");
             WriteLine($"{DateTime.Now:HH:mm:ss.fff} [analysis] SCORE         {frame.CongestionScore,7:F1}");
