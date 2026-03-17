@@ -45,6 +45,7 @@ namespace WTFnetApp
             if (snapshot.IsDownloadCongested) congestionFlags += 0.8;
             if (snapshot.IsUploadCongested) congestionFlags += 0.8;
 
+            snapshot.CongestionMomentum = snapshot.QueueAcceleration + snapshot.QueueGrowth;
             snapshot.CongestionScore = predictionEngine.ComputeCongestionScore(snapshot, congestionFlags);
 
             double pingSource = snapshot.ExternalPingMs > 0 ? snapshot.ExternalPingMs : snapshot.Recent;

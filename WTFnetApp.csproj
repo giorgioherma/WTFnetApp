@@ -68,6 +68,13 @@
     <Compile Include="SlowLearningManager.cs" />
     <Compile Include="DecisionEngine.cs" />
     <Compile Include="SpeedifyController.cs" />
+    <Compile Include="LagEventRecorder.cs" />
+    <Compile Include="DecisionEngine.cs" />
+    <Compile Include="SpeedifyController.cs" />
+    <Compile Include="PatternMemoryManager.cs" />
+    <Compile Include="LagPredictor.cs" />
+    <Compile Include="SignalWeightTrainer.cs" />
+    <Compile Include="PatternAnalyzer.cs" />
     <Compile Include="NetworkAnalysisFrame.cs" />
     <Compile Include="SpeedifyTelemetryReader.cs" />
     <Compile Include="SpeedifyServerTracker.cs" />
