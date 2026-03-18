@@ -1,4 +1,6 @@
-﻿using System;
+﻿
+#if false
+using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -55,7 +57,6 @@ namespace WTFnetApp
         public string Decision;
         public string Block;
 
-        public bool Test;
         public bool Debug;
 
         public override string ToString()
@@ -68,7 +69,7 @@ namespace WTFnetApp
                 $"NET[{TrafficKB:F0}KB DL:{(Download ? 1 : 0)} UNR:{(Unreal ? 1 : 0)}] " +
                 $"MODE:{Mode} ALW:{(Allow ? 1 : 0)} " +
                 $"DEC[{Decision}] BLK[{Block}] " +
-                $"T:{(Test ? 1 : 0)} D:{(Debug ? 1 : 0)}";
+                $"D:{(Debug ? 1 : 0)}";
         }
     }
     public class DashboardForm : Form
@@ -154,16 +155,15 @@ namespace WTFnetApp
             // reposition if resolution or monitor changes
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += (s, e) => PositionTopLeft();
         }
-
-        private void PositionTopRight()
-        {
-            var screen = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(screen.Left - Width - 12, screen.Top + 12);
-        }
         private void PositionTopLeft()
         {
-            var screen = Screen.PrimaryScreen.WorkingArea;
-            Location = new Point(screen.Left - Width - 12, screen.Top + 12);
+            var screen = Screen.FromControl(this).WorkingArea;
+            Location = new Point(screen.Left + 12, screen.Top + 12);
+        }
+        private void PositionTopRight()
+        {
+            var screen = Screen.FromControl(this).WorkingArea;
+            Location = new Point(screen.Right - Width - 12, screen.Top + 12);
         }
 
         public void UpdatePing(string text, string mode, int natState)
@@ -412,8 +412,6 @@ namespace WTFnetApp
                 lteProDashboard.Visible = !lteProDashboard.Visible;
             }
         }
-
-
         public Form1()
         {
             InitializeComponent();
@@ -421,7 +419,7 @@ namespace WTFnetApp
             nat = new NatKeepAlive();
             _ = nat.StartNatKeepAlive();
 
-        // hide main window
+            // hide main window
             Opacity = 0;
             ShowInTaskbar = false;
             WindowState = FormWindowState.Minimized;
@@ -963,6 +961,8 @@ namespace WTFnetApp
                 await Task.Delay(1000);
             }
         }
+    }
+}
 
         // =========================
         // MAIN LOOP
@@ -970,91 +970,14 @@ namespace WTFnetApp
 
         async Task Timer_Tick(object sender, EventArgs e)
         {
-            if (isRunning) return;
-            isRunning = true;
 
-            try
-            {
-                UpdateTraffic();
+            
 
-                await VerifySpeedifyState();
-
-                string target = targets[currentPing];
-                currentPing = (currentPing + 1) % targets.Length;
-
-                int? result = null;
-
-                try
-                {
-                    using (var ping = new Ping())
-                    {
-                        var r = await ping.SendPingAsync(target, 500);
-
-                        if (r.Status == IPStatus.Success)
-                            result = (int)r.RoundtripTime;
-                    }
-                }
-                catch
-                {
-                }
-                if (result.HasValue)
-                {
-                    lastPing = result.Value;
-
-                    pings.Add(result.Value);
-                    timeouts.Add(0);
-                }
-                else
-                {
-                    lastPing = -1;
-
-                    pings.Add(0);
-                    timeouts.Add(1);
-                }
-                if (pings.Count > window)
-                {
-                    pings.RemoveAt(0);
-                    timeouts.RemoveAt(0);
-                }
-
-                var valid = pings.Where(x => x > 0).ToList();
-                if (valid.Count < 5) return;
-
-                int avg = (int)valid.Average();
-                int recentAvg = (int)valid.Skip(Math.Max(0, valid.Count - 6)).Average();
-                int maxPing = valid.Max();
-
-                int hour = DateTime.Now.Hour;
-                if (!hourlyHistory.ContainsKey(hour))
-                    hourlyHistory[hour] = new List<int>();
-
-                if (avg < 200) hourlyHistory[hour].Add(avg);
-                if (hourlyHistory[hour].Count > 300) hourlyHistory[hour].RemoveAt(0);
-
-                int baseline = hourlyHistory[hour].Count < 5
-                    ? avg
-                    : (int)hourlyHistory[hour].Average();
-
-                int jitter = (int)valid
-                        .Skip(1)
-                        .Select((p, i) => Math.Abs(p - valid[i]))
-                        .Average();
-
-                double lossRate = timeouts.Sum() / (double)window;
-
-
-                int dynBase = Math.Min(baseline, 60);
-
-                if ((DateTime.Now - lastMetricsLog).TotalSeconds > 5)
-                {
-                    lastMetricsLog = DateTime.Now;
-
-                    Log("metrics",
-                        $"avg:{avg} recent:{recentAvg} max:{maxPing} " +
-                        $"jitter:{jitter} loss:{lossRate:F2} " +
-                        $"pressure:{preSpikePressure:F2} bad:{badStreak} good:{goodStreak}");
-                }
-
+                
+            
+            
+            
+            
                 // =========================
                 // LTE PRO TOOL
                 // =========================
@@ -1637,3 +1560,4 @@ namespace WTFnetApp
         }
     }
 }
+#endif

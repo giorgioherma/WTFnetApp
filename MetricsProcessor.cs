@@ -1,140 +1,130 @@
 ﻿using System;
-using System.Linq;
-using System.Collections.Generic;
 
-public class MetricsProcessor
+namespace WTFnetApp
 {
-    private readonly DataSet data;
-
-    public MetricsProcessor(DataSet dataSet)
+    public class MetricsProcessor
     {
-        data = dataSet;
-    }
+        // =========================
+        // BUFFER
+        // =========================
 
-    private List<NetSample> Samples()
-    {
-        return data.GetSamples().ToList();
-    }
-    public double LatencyAvg()
-    {
-        var samples = Samples();
-        if (samples.Count == 0) return 0;
+        private const int SIZE = 30;
 
-        return samples.Average(s => s.Latency);
-    }
+        private readonly int[] buffer = new int[SIZE];
 
-    public double JitterAvg()
-    {
-        var samples = Samples();
-        if (samples.Count == 0) return 0;
+        private int index = 0;
+        private int count = 0;
 
-        return samples.Average(s => s.Jitter);
-    }
+        // =========================
+        // RUNNING STATS
+        // =========================
 
-    public double JitterVariance()
-    {
-        var samples = Samples();
-        if (samples.Count == 0) return 0;
+        private double sum = 0;
+        private double sumSq = 0;
 
-        double avg = samples.Average(s => s.Jitter);
-        return samples.Average(s => Math.Pow(s.Jitter - avg, 2));
-    }
+        private int maxPing = 0;
 
-    public double CongestionLevel()
-    {
-        var samples = Samples();
-        if (samples.Count == 0) return 0;
+        private int lastPing = 0;
 
-        return samples.Last().Congestion;
-    }
+        // packet loss tracking
+        private int lossCount = 0;
+        private int totalCount = 0;
 
-    public double CongestionTrend()
-    {
-        var samples = Samples();
-        if (samples.Count < 2) return 0;
+        // dynamic baseline
+        private double dynamicBase = 40;
 
-        return samples.Last().Congestion - samples.First().Congestion;
-    }
+        // =========================
+        // ADD SAMPLE
+        // =========================
 
-    public double CalculateSpfScore()
-    {
-        var samples = Samples();
-        if (samples.Count == 0) return 0;
-
-        var s = samples.Last();
-
-        double latScore = Math.Max(0, 1 - (s.Latency / 200));
-        double jitScore = Math.Max(0, 1 - (s.Jitter / 50));
-        double congScore = 1 - s.Congestion;
-        double mosScore = s.MosScore / 5;
-
-        return
-            0.40 * latScore +
-            0.35 * jitScore +
-            0.15 * congScore +
-            0.10 * mosScore;
-    }
-
-    public double CalculateTrend()
-    {
-        var samples = data.GetSamples();
-        int count = samples.Length;
-
-        if (count < 10)
-            return 0;
-
-        // Short window: recent samples
-        int shortWindow = 3;
-
-        // Long window: baseline samples
-        int longWindow = 10;
-
-        if (count < longWindow)
-            return 0;
-
-        double shortSum = 0;
-        double longSum = 0;
-
-        // Recent latency average
-        for (int i = count - shortWindow; i < count; i++)
+        public void AddPing(int ping)
         {
-            shortSum += samples[i].Latency;
+            totalCount++;
+
+            if (ping >= 900) // timeout
+            {
+                lossCount++;
+                return;
+            }
+
+            int old = buffer[index];
+
+            // remove old sample
+            if (count == SIZE)
+            {
+                sum -= old;
+                sumSq -= old * old;
+            }
+
+            // insert new
+            buffer[index] = ping;
+
+            sum += ping;
+            sumSq += ping * ping;
+
+            index++;
+            if (index >= SIZE)
+                index = 0;
+
+            if (count < SIZE)
+                count++;
+
+            if (ping > maxPing)
+                maxPing = ping;
+
+            lastPing = ping;
+
+            UpdateDynamicBaseline();
         }
 
-        // Older baseline latency average
-        for (int i = count - longWindow; i < count - shortWindow; i++)
+        // =========================
+        // BASELINE
+        // =========================
+
+        private void UpdateDynamicBaseline()
         {
-            longSum += samples[i].Latency;
+            if (count < 5)
+                return;
+
+            double avg = sum / count;
+
+            // slow adaptation
+            dynamicBase = dynamicBase * 0.9 + avg * 0.1;
         }
 
-        double shortAvg = shortSum / shortWindow;
-        double longAvg = longSum / (longWindow - shortWindow);
+        // =========================
+        // SNAPSHOT
+        // =========================
 
-        return shortAvg - longAvg;
-    }
+        public MetricsSnapshot Snapshot()
+        {
+            if (count == 0)
+                return new MetricsSnapshot();
 
-    public bool PredictSpike()
-    {
-        var samples = Samples();
-        if (samples.Count < 10) return false;
+            double avg = sum / count;
 
-        var last = samples.Last();
-        var earlier = samples[samples.Count - 10];
+            double variance =
+                (sumSq / count) - (avg * avg);
 
-        double jitterSlope = last.Jitter - earlier.Jitter;
-        double congestionSlope = last.Congestion - earlier.Congestion;
+            if (variance < 0)
+                variance = 0;
 
-        return jitterSlope > 5 && congestionSlope > 0.1;
-    }
+            double jitter = Math.Sqrt(variance);
 
-    public string ConnectionState()
-    {
-        double spf = CalculateSpfScore();
+            double loss =
+                totalCount > 0
+                ? (double)lossCount / totalCount
+                : 0;
 
-        if (PredictSpike()) return "Danger";
-        if (spf > 0.8) return "Stable";
-        if (spf > 0.6) return "Warning";
-
-        return "Poor";
+            return new MetricsSnapshot
+            {
+                Average = avg,
+                Recent = lastPing,
+                Max = maxPing,
+                Jitter = jitter,
+                PacketLoss = loss,
+                DynamicBase = dynamicBase
+            };
+        }
     }
 }

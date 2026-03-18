@@ -1,19 +1,35 @@
 ﻿using System;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace WTFnetApp
 {
     internal static class Program
     {
-        /// <summary>
-        /// The main entry point for the application.
-        /// </summary>
         [STAThread]
-        static void Main()
+        static async Task Main()
         {
+            Logger.Log("system", "application starting");
+
+            Application.ThreadException += (s, e) =>
+            {
+                Logger.Log("crash", e.Exception.ToString());
+            };
+
+            AppDomain.CurrentDomain.UnhandledException += (s, e) =>
+            {
+                Logger.Log("crash", e.ExceptionObject.ToString());
+            };
+
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new Form1());
+
+            var generalstab = new DerGrosseGeneralstab();
+            generalstab.Startup();
+
+            var tray = new Tray(generalstab);
+
+            Application.Run();
         }
     }
 }
