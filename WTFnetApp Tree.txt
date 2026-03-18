@@ -1,0 +1,135 @@
+Absolutely — report only, no changes made.
+
+I audited the current .cs inventory and reference graph against your “core/helper/dead/duplicate/debug” cleanup workflow.
+Commands I used
+
+    rg --files -g '*.cs' | sort
+
+    nl -ba WTFnetApp.csproj | sed -n '48,120p'
+
+    rg -n "\b<ClassName>\b|new <ClassName>\(|<ClassName>\." *.cs WTFnetApp.csproj (for multiple candidate classes)
+
+    nl -ba Program.cs | sed -n '1,120p'
+
+    nl -ba NetworkController.cs | sed -n '1,80p'
+
+    nl -ba NetworkMetricsEngine.cs | sed -n '1,120p'
+
+    nl -ba DecisionEngine.cs | sed -n '1,80p'
+
+    nl -ba SpeedifyController.cs | sed -n '1,120p'
+
+    nl -ba ConnectionStability.cs | sed -n '1,140p'
+
+    nl -ba LteProTool.cs | sed -n '1,180p'
+
+    nl -ba PingOverlay.cs | sed -n '1,200p'
+
+    nl -ba Form1.cs | sed -n '220,280p'
+
+    nl -ba SpeedifyTelemetryReader.cs | sed -n '1,120p'
+
+    nl -ba SpeedifyServerTracker.cs | sed -n '1,120p'
+
+High-level diagnosis
+
+You currently compile a mixed architecture:
+
+    A canonical runtime path through NetworkController -> NetworkMetricsEngine -> DecisionEngine -> SpeedifyController.
+
+    Plus legacy/parallel UI and tooling files still in project include list.
+
+Entrypoint today runs DerGrosseGeneralstab + Tray, not Form1.
+What to KEEP as core (current architecture)
+
+These are your meaningful “spine” files:
+
+    Program.cs (entrypoint)
+
+    derGrosseGeneralstab.cs (app orchestration)
+
+    NetworkController.cs (canonical pipeline hub)
+
+    NetworkMetricsEngine.cs (derived metric ownership)
+
+    DecisionEngine.cs (sole runtime state owner)
+
+    SpeedifyController.cs (applies state decisions)
+
+    PredictionEngine.cs (scoring formulas)
+
+    MetricsSnapshot.cs (tick contract)
+
+    DataSet.cs (history/ring buffer used by metrics + learning)
+
+    SpeedifyTelemetryReader.cs + WtfFastPing.cs (ingest adapters)
+
+So your “8–10 meaningful files” instinct is correct for the core, but you still have supporting files for learning + UI + infra.
+KEEP as helpers (actively referenced)
+
+These are small and still clearly wired:
+
+    LagLearningEngine, LagPattern, AdaptiveThresholdController, ConfidenceEstimator
+
+    LagPressureController, PlayerLagDetector, AggressionController, LearningGate, FailureDetector, ServerQualityEstimator, SlowLearningManager
+
+    SpeedifyServerTracker, Logger, NetworkAnalysisFrame, Tray, UIOverlay, NatKeepAlive
+
+(Each is present in compile includes and/or referenced from DecisionEngine, NetworkController, or derGrosseGeneralstab).
+Strong cleanup candidates (dead / duplicate / drift)
+1) NetworkCongestionDetector.cs → likely dead legacy
+
+    Compiled, but no usages found outside self + csproj.
+
+2) MetricsProcessor.cs → likely dead legacy
+
+    Compiled, but no usages found outside self + csproj.
+
+3) SpeedifyMetricsAdapter.cs → likely dead alternate path
+
+    Compiled, but no call sites found (Convert unreferenced).
+
+4) ConnectionStability.cs → likely dead utility drift
+
+    Compiled but appears standalone (example-only comments, no observed wiring).
+
+5) Form1.cs / Form1.Designer.cs / LteDashboardForm.cs / LteDashboardForm.Designer.cs / LteProTool.cs / PingOverlay.cs → legacy UI branch
+
+    Still compiled, but app entrypoint does not launch Form1.
+
+    Form1 holds alternate dashboard/tool flow (LteProTool, PingOverlay) indicating a second UI/control branch.
+
+    PingOverlay.cs is especially suspicious: class/file mismatch and invalid-looking token at line 20 (4 private ...).
+
+“Merge into parent?” (your helper rule)
+
+Using your rule “helper used by more than one class? if no, merge”:
+
+    Do not merge yet for decision/learning helpers (AggressionController, LearningGate, FailureDetector, etc.) — they are small but carry distinct responsibilities in DecisionEngine, and merging now would increase complexity/risk.
+
+    Do consider merge/removal for legacy utilities with zero references (MetricsProcessor, NetworkCongestionDetector, SpeedifyMetricsAdapter, maybe ConnectionStability), since they are not part of active runtime ownership.
+
+Recommended staged cleanup plan (report only)
+
+    Phase A (safest): remove truly unreferenced runtime duplicates
+
+        NetworkCongestionDetector.cs, MetricsProcessor.cs, SpeedifyMetricsAdapter.cs
+
+    Phase B: decide UI branch strategy
+
+        Keep only one UI stack (derGrosseGeneralstab + UIOverlay + Tray vs Form1 stack)
+
+    Phase C: prune orphan tools/utilities
+
+        ConnectionStability.cs, possibly PingOverlay.cs if confirmed unused
+
+Bottom line
+
+You are right: the repo drifted into too many fragments and parallel branches.
+Current best end-state is:
+
+    Core control spine (~8–10 files) + small, clearly wired helpers
+
+    Remove dead legacy analytics + alternate metric pipelines + duplicate UI branch.
+
+If you want, next step I can produce a file-by-file KEEP / MERGE / DELETE checklist with exact command sequence for a zero-surprise cleanup pass (still report-only unless you say execute).

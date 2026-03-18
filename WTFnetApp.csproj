@@ -46,13 +46,11 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="ConnectionStability.cs" />
     <Compile Include="DataSet.cs" />
     <Compile Include="derGrosseGeneralstab.cs" />
     <Compile Include="Logger.cs" />
     <Compile Include="MetricsSnapshot.cs" />
     <Compile Include="NetworkMetricsEngine.cs" />
-    <Compile Include="NetworkCongestionDetector.cs" />
     <Compile Include="NetworkController.cs" />
     <Compile Include="PredictionEngine.cs" />
     <Compile Include="LagPattern.cs" />
@@ -71,24 +69,15 @@
     <Compile Include="NetworkAnalysisFrame.cs" />
     <Compile Include="SpeedifyTelemetryReader.cs" />
     <Compile Include="SpeedifyServerTracker.cs" />
-    <Compile Include="SpeedifyMetricsAdapter.cs" />
     <Compile Include="Tray.cs" />
     <Compile Include="UIOverlay.cs">
       <SubType>Form</SubType>
     </Compile>
     <Compile Include="WtfFastPing.cs" />
-    <Compile Include="MetricsProcessor.cs" />
     <Compile Include="Form1.cs" />
     <Compile Include="Form1.Designer.cs">
       <DependentUpon>Form1.cs</DependentUpon>
     </Compile>
-    <Compile Include="LteDashboardForm.cs">
-      <SubType>Form</SubType>
-    </Compile>
-    <Compile Include="LteDashboardForm.Designer.cs">
-      <DependentUpon>LteDashboardForm.cs</DependentUpon>
-    </Compile>
-    <Compile Include="LteProTool.cs" />
     <Compile Include="NatKeepAlive.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
