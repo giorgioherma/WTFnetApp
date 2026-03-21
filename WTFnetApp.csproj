@@ -67,6 +67,7 @@
     <Compile Include="DecisionEngine.cs" />
     <Compile Include="SpeedifyController.cs" />
     <Compile Include="NetworkAnalysisFrame.cs" />
+    <Compile Include="SpeedifyMetricsParser.cs" />
     <Compile Include="SpeedifyTelemetryReader.cs" />
     <Compile Include="SpeedifyServerTracker.cs" />
     <Compile Include="Tray.cs" />

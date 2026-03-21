@@ -200,10 +200,9 @@ namespace WTFnetApp
             {
                 weight = (int)Math.Max(0, Math.Min(100, (lastSnapshot.CongestionScore / 15.0) * 100.0));
             }
-
-            overlay.UpdateStatus(lastSnapshot, natState, systemState, weight);
         }
 
+            
         // =========================
         // LOGGING
         // =========================

@@ -8,19 +8,29 @@ using System.Threading.Tasks;
 
 namespace WTFnetApp
 {
+    public enum NatState
+    {
+        Unknown = 0,
+        Stable = 1,
+        GracePeriod = 2,
+        Unstable = 3,
+        Lost = 4
+    }
+
     internal class NatKeepAlive
     {
         // =========================
         // NAT EVENT TRACKING
         // =========================
 
-        private List<DateTime> natEvents = new List<DateTime>();
+        private readonly List<DateTime> natEvents = new List<DateTime>();
         private DateTime lastNatRecreate = DateTime.MinValue;
 
         public DateTime LastNatRecreate => lastNatRecreate;
+        public NatState CurrentNatState => currentNatState;
 
-        private int natEventWindowMinutes = 5;
-        private int natEventThreshold = 3;
+        private readonly int natEventWindowMinutes = 5;
+        private readonly int natEventThreshold = 3;
 
         private UdpClient natClient;
         private CancellationTokenSource natToken;
@@ -29,7 +39,18 @@ namespace WTFnetApp
         private int natSendFailures = 0;
         private int natLocalPort = -1;
 
-        private int natGraceSeconds = 15;
+        private readonly int natGraceSeconds = 15;
+
+        private NatState currentNatState = NatState.Unknown;
+
+        private void SetNatState(NatState newState)
+        {
+            if (currentNatState == newState)
+                return;
+
+            currentNatState = newState;
+            Logger.Log("nat", $"state -> {currentNatState}");
+        }
 
         // =========================
         // START
@@ -42,6 +63,7 @@ namespace WTFnetApp
 
             natKeepAliveRunning = true;
             natToken = new CancellationTokenSource();
+            natSendFailures = 0;
 
             var endpoints = new[]
             {
@@ -58,9 +80,7 @@ namespace WTFnetApp
                 natClient = new UdpClient(new IPEndPoint(IPAddress.Any, 0));
 
                 var ep = (IPEndPoint)natClient.Client.LocalEndPoint;
-                int newPort = ep?.Port ?? -1;
-
-                lastNatRecreate = DateTime.Now;
+                int newPort = ep != null ? ep.Port : -1;
 
                 if (natLocalPort != -1 && newPort != natLocalPort)
                 {
@@ -68,15 +88,24 @@ namespace WTFnetApp
                     Logger.Log("nat", $"NAT RECREATED | old:{natLocalPort} new:{newPort}");
 
                     lastNatRecreate = DateTime.Now;
-
                     natEvents.Add(DateTime.Now);
 
                     natEvents.RemoveAll(t =>
                         (DateTime.Now - t).TotalMinutes > natEventWindowMinutes);
+
+                    if (natEvents.Count >= natEventThreshold)
+                        SetNatState(NatState.Unstable);
+                    else
+                        SetNatState(NatState.GracePeriod);
+                }
+                else
+                {
+                    lastNatRecreate = DateTime.Now;
+                    SetNatState(NatState.Stable);
                 }
 
                 natLocalPort = newPort;
-
+                SetNatState(NatState.GracePeriod);
                 Logger.Log("nat", $"keepalive started | port:{natLocalPort}");
 
                 // =========================
@@ -88,8 +117,11 @@ namespace WTFnetApp
                     try
                     {
                         await natClient.SendAsync(data, data.Length, endpoints[endpointIndex]);
+                        natSendFailures = 0;
                     }
-                    catch { }
+                    catch
+                    {
+                    }
 
                     await Task.Delay(200);
                 }
@@ -106,6 +138,11 @@ namespace WTFnetApp
 
                         natSendFailures = 0;
 
+                        if ((DateTime.Now - lastNatRecreate).TotalSeconds <= natGraceSeconds)
+                            SetNatState(NatState.GracePeriod);
+                        else
+                            SetNatState(NatState.Stable);
+
                         endpointIndex++;
                         if (endpointIndex >= endpoints.Length)
                             endpointIndex = 0;
@@ -116,16 +153,14 @@ namespace WTFnetApp
 
                         Logger.Log("nat", $"send failure {natSendFailures}");
 
+                        if (natSendFailures >= 1)
+                            SetNatState(NatState.Unstable);
+
                         if (natSendFailures >= 3)
                         {
                             Logger.Log("nat", $"NAT LOST | port:{natLocalPort}");
-
-                            StopNatKeepAlive();
-
-                            await Task.Delay(500);
-
-                            _ = StartNatKeepAlive();
-                            return;
+                            SetNatState(NatState.Lost);
+                            break;
                         }
                     }
 
@@ -145,6 +180,7 @@ namespace WTFnetApp
 
                 natClient = null;
                 natKeepAliveRunning = false;
+                SetNatState(NatState.Unknown);
 
                 Logger.Log("nat", "keepalive stopped");
             }
@@ -160,7 +196,7 @@ namespace WTFnetApp
                 return;
 
             Logger.Log("nat", "stop requested");
-
+            SetNatState(NatState.Unknown);
             natToken?.Cancel();
         }
     }

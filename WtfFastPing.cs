@@ -108,6 +108,14 @@ namespace WTFnetApp
             Logger.Log("fastping", "prediction probe stopped");
         }
 
+        internal static async Task<int> Ping(string host)
+        {
+            throw new NotImplementedException();
+        }
+    }
+}
+#if(false)
+
         // =========================
         // QUICK PROBE PING
         // =========================
@@ -133,3 +141,4 @@ namespace WTFnetApp
 
     }
 }
+#endif

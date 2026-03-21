@@ -10,7 +10,7 @@ namespace WTFnetApp
         ContextMenuStrip trayMenu;
 
         DerGrosseGeneralstab core;
-        LteDashboardForm dashboard;
+        
 
         public Tray(DerGrosseGeneralstab core)
         {
@@ -25,7 +25,6 @@ namespace WTFnetApp
         {
             trayMenu = new ContextMenuStrip();
 
-            trayMenu.Items.Add("Dashboard", null, (s, e) => ToggleDashboard());
             trayMenu.Items.Add("Toggle Overlay", null, (s, e) => core.ToggleOverlay());
             trayMenu.Items.Add("Ping Servers Now", null, async (s, e) => await RunManualPingScan());
             trayMenu.Items.Add(new ToolStripSeparator());
@@ -55,20 +54,7 @@ namespace WTFnetApp
             }
         }
 
-        void ToggleDashboard()
-        {
-            if (dashboard == null || dashboard.IsDisposed)
-            {
-                dashboard = new LteDashboardForm();
-                dashboard.Show();
-            }
-            else
-            {
-                dashboard.Visible = !dashboard.Visible;
-            }
-        }
-
-        void Exit(object sender, EventArgs e)
+      void Exit(object sender, EventArgs e)
         {
             Logger.Log("system", "application exiting");
 

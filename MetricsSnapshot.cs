@@ -12,85 +12,53 @@
 
     public class MetricsSnapshot
     {
-        // =========================
-        // LATENCY
-        // =========================
-
         public double Recent;
         public double Average;
         public double Max;
 
-        // =========================
-        // VARIABILITY
-        // =========================
-
         public double Jitter;
         public double Variance;
         public double MicroJitter;
-
-        // =========================
-        // NETWORK HEALTH
-        // =========================
+        public double LatencyDrift;
+        public double LatencySlope;
+        public double Trend;
+        public double LatencyDelta;
 
         public double PacketLoss;
         public double LossBurst;
         public bool Congested;
-        public int Priority;
-        public long ReceiveBytes;
-        public long SendBytes;
-
-        // =========================
-        // BASELINE
-        // =========================
-
-        public double DynamicBase;
-
-        // =========================
-        // QUEUE DETECTION
-        // =========================
-
-        public double QueueDelay;      // Recent - DynamicBase
-        public double QueueGrowth;     // queue slope
-        public double QueueAcceleration;
-        public double QueuePressure;
-
-        // =========================
-        // TREND ANALYSIS
-        // =========================
-
-        public double LatencySlope;
-        public double Trend;
-        public double LatencyDrift;
-
-        // =========================
-        // BURST DETECTION
-        // =========================
-
-        public double LatencyDelta;
-
-        // =========================
-        // ADAPTER DETAILS
-        // =========================
-
-        public double Adapter1Latency;
-        public double Adapter2Latency;
-
-        // =========================
-        // SPEEDIFY EXTENSIONS
-        // =========================
-
-        public double LatencyMs;
-        public double BaseLatencyMs;
-        public double QueueDelayMs;
-
-        public double MosScore;
-
         public bool IsCongested;
         public bool IsDownloadCongested;
         public bool IsUploadCongested;
 
+        public int Priority;
+
+        public long ReceiveBytes;
+        public long SendBytes;
         public long ReceiveBytesPerSecond;
         public long SendBytesPerSecond;
+
+        public double DynamicBase;
+
+        public double QueueDelay;
+        public double QueueGrowth;
+        public double QueueAcceleration;
+        public double QueuePressure;
+        public double QueueDelayMs;
+
+        public double Adapter1Latency;
+        public double Adapter2Latency;
+
+        public bool Connected;
+        public bool MultiConnection;
+        public string SpeedifyRemoteIp;
+
+        public double LatencyMs;
+        public double BaseLatencyMs;
+        public double MosScore;
+        public NatState NatState;
+
+
 
         public double CombinedBandwidthMbps;
         public double ExternalPingMs;
