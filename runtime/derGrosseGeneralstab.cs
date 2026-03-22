@@ -13,21 +13,14 @@ namespace WTFnetApp
 
         private UIOverlay overlay;
         private NatKeepAlive nat;
-
+        private readonly NetworkMetricsEngine networkMetricsEngine = new NetworkMetricsEngine();
         private SpeedifyTelemetryReader speedifyReader;
-        private MetricsSnapshot lastSnapshot;
-        private NetworkController networkController;
+        private StartupServerTest fastestServer;
 
+        // Optional / legacy-ish pieces kept around for now
         private WtfFastPing fastPing;
-
-        // UI refresh timer
+        private MetricsSnapshot lastSnapshot;
         private System.Windows.Forms.Timer uiTimer;
-
-        // =========================
-        // STATE
-        // =========================
-
-        private string speedifyMode = "speed";
 
         // =========================
         // CONSTRUCTOR
@@ -37,42 +30,68 @@ namespace WTFnetApp
         {
             Logger.Log("engine", "initializing core");
 
-            // Overlay
+            InitializeOverlay();
+            InitializeNat();
+            InitializeNetworkController();
+            InitializeTelemetry();
+
+            Logger.Log("engine", "network monitor started");
+        }
+
+        // =========================
+        // INITIALIZATION
+        // =========================
+
+        private void InitializeOverlay()
+        {
             overlay = new UIOverlay();
             overlay.Show();
 
-            // NAT keepalive
+            Logger.Log("tray", "tray initialized");
+        }
+
+        private void InitializeNat()
+        {
             nat = new NatKeepAlive();
             _ = nat.StartNatKeepAlive();
+        }
 
-            networkController = new NetworkController();
+        private void InitializeNetworkController()
+        {
+            fastestServer = new StartupServerTest();
             networkController.Start();
+        }
 
-            //Speedify telemetry
+        private void InitializeTelemetry()
+        {
             speedifyReader = new SpeedifyTelemetryReader(OnSpeedifySnapshot);
             speedifyReader.Start();
+        }
 
+        // =========================
+        // SPEEDIFY SNAPSHOT INPUT
+        // =========================
 
-            // Fast ping engine (prediction only)
-            fastPing = new WtfFastPing(
-                new string[]
-                {
-                    "1.1.1.1",
-                    "8.8.8.8",
-                    "9.9.9.9"
-                },
-                OnFastPing
-            );
+        private void OnSpeedifySnapshot(MetricsSnapshot snapshot)
+        {
+            try
+            {
+                if (snapshot == null)
+                    return;
 
-            fastPing.Start();
+                // Keep old processing path alive if still useful
+                if (networkController != null)
+                    snapshot = networkController.ProcessSnapshot(snapshot);
 
-            // UI refresh timer
-            uiTimer = new System.Windows.Forms.Timer();
-            uiTimer.Interval = 250;
-            uiTimer.Tick += UiTick;
-            uiTimer.Start();
+                lastSnapshot = snapshot;
 
-            Logger.Log("engine", "network monitor started");
+                networkMetricsEngine.Update(snapshot, nat.CurrentNatState);
+                overlay?.RenderOverlay(networkMetricsEngine.GetState().Overlay);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("engine", "snapshot handoff error: " + ex.Message);
+            }
         }
 
         // =========================
@@ -110,7 +129,7 @@ namespace WTFnetApp
 
             var results = await Task.WhenAll(tasks);
 
-            string best = "Frankfurt";
+            string best = "Ljubljana";
             int bestPing = int.MaxValue;
 
             foreach (var r in results)
@@ -137,73 +156,6 @@ namespace WTFnetApp
         }
 
         // =========================
-        // FAST PING CALLBACK
-        // =========================
-
-        private void OnFastPing(double latency, long timestamp)
-        {
-            if (latency > 0)
-                networkController.UpdateExternalPing(latency);
-        }
-
-        // =========================
-        // SPEEDIFY SNAPSHOT INPUT
-        // =========================
-
-        public void OnSpeedifySnapshot(MetricsSnapshot snapshot)
-        {
-            snapshot = networkController.ProcessSnapshot(snapshot);
-            lastSnapshot = snapshot;
-        }
-
-        // =========================
-        // UI UPDATE TIMER
-        // =========================
-
-        private void UiTick(object sender, EventArgs e)
-        {
-            if (overlay == null)
-                return;
-
-            try
-            {
-                UpdateOverlay();
-                LogSnapshot();
-            }
-            catch (Exception ex)
-            {
-                Logger.Log("error", ex.ToString());
-            }
-        }
-
-        // =========================
-        // OVERLAY UPDATE
-        // =========================
-
-        private void UpdateOverlay()
-        {
-            double natAge =
-                (DateTime.Now - nat.LastNatRecreate).TotalSeconds;
-
-            int natState =
-                natAge < 15 ? 0 :
-                natAge < 60 ? 1 :
-                2;
-
-            string systemState =
-                natState == 0 ? "ACTIVE" :
-                natState == 1 ? "WARM" :
-                "IDLE";
-
-            int weight = 0;
-            if (lastSnapshot != null)
-            {
-                weight = (int)Math.Max(0, Math.Min(100, (lastSnapshot.CongestionScore / 15.0) * 100.0));
-            }
-        }
-
-            
-        // =========================
         // LOGGING
         // =========================
 
@@ -219,7 +171,6 @@ namespace WTFnetApp
                 $"jitter={lastSnapshot.Jitter:F1} " +
                 $"loss={lastSnapshot.PacketLoss:F2}"
             );
-
         }
 
         // =========================
@@ -240,7 +191,49 @@ namespace WTFnetApp
         public async Task RunManualServerPingScan()
         {
             Logger.Log("server", "manual server ping scan requested");
-            await networkController.RunManualServerPingScan();
+
+            if (networkController != null)
+                await networkController.RunManualServerPingScan();
+        }
+
+        // =========================
+        // ACCESSORS
+        // =========================
+
+        public DataSet GetDataSet()
+        {
+            return networkMetricsEngine.GetDataSet();
+        }
+
+        public NetworkEngineState GetNetworkState()
+        {
+            return networkMetricsEngine.GetState();
+        }
+
+        // =========================
+        // SHUTDOWN
+        // =========================
+
+        public async Task StopAsync()
+        {
+            try
+            {
+                if (speedifyReader != null)
+                    await speedifyReader.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("engine", "speedify stop error: " + ex.Message);
+            }
+
+            try
+            {
+                await networkMetricsEngine.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("engine", "metrics engine stop error: " + ex.Message);
+            }
         }
     }
 }

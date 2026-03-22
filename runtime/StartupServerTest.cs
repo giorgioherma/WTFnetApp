@@ -2,10 +2,10 @@ namespace WTFnetApp
 {
     using System.Threading.Tasks;
 
-    public class NetworkController
+    public class StartupServerTest
     {
         private readonly NetworkMetricsEngine metricsEngine = new NetworkMetricsEngine();
-        private readonly SpeedifyServerTracker serverTracker = new SpeedifyServerTracker();
+        private readonly VPNServerList speedifyserverLog = new VPNServerList();
         private readonly DecisionEngine decisionEngine = new DecisionEngine();
         private readonly SpeedifyController speedifyController = new SpeedifyController();
         private readonly SlowLearningManager slowLearningManager = new SlowLearningManager();

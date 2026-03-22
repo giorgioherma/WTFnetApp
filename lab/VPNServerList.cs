@@ -8,7 +8,7 @@ using System.Threading.Tasks;
 
 namespace WTFnetApp
 {
-    public class SpeedifyServerTracker
+    public class VPNServerList
     {
         private readonly HashSet<string> knownServers = new HashSet<string>();
         private readonly string storePath = "speedify_servers.txt";

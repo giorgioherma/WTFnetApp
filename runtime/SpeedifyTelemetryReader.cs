@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -8,8 +9,16 @@ namespace WTFnetApp
 {
     public class SpeedifyTelemetryReader
     {
+        private const string SpeedifyWsHost = "127.0.0.1";
+        private const int SpeedifyWsPort = 9330;
+        private const string SpeedifyWsPath = "/";
+
         private ClientWebSocket ws;
-        private bool running;
+        private volatile bool running;
+
+        private readonly HashSet<string> capturedSnapshotEvents = new HashSet<string>();
+        private readonly HashSet<string> seenEventNames = new HashSet<string>();
+
         private readonly Action<MetricsSnapshot> onSnapshot;
         private readonly SpeedifyMetricsParser parser = new SpeedifyMetricsParser();
 
@@ -20,14 +29,14 @@ namespace WTFnetApp
 
         public void Start()
         {
-            if (running) return;
+            if (running)
+                return;
 
             running = true;
-            Logger.Log("speedify", "websocket telemetry starting");
-            Task.Run(StreamLoop);
+            _ = RunLoop();
         }
 
-        public async void Stop()
+        public async Task StopAsync()
         {
             running = false;
 
@@ -54,53 +63,76 @@ namespace WTFnetApp
             Logger.Log("speedify", "websocket telemetry stopped");
         }
 
-        private async Task StreamLoop()
+        private async Task RunLoop()
         {
             while (running)
             {
                 try
                 {
-                    ws = new ClientWebSocket();
-                    ws.Options.AddSubProtocol("event-protocol");
-                    ws.Options.SetRequestHeader("Origin", "easywsclient://");
-
-                    Logger.Log("speedify", "connecting websocket...");
-                    await ws.ConnectAsync(
-                        new Uri("ws://127.0.0.1:9330/systemdata"),
-                        CancellationToken.None);
-
-                    Logger.Log("speedify", "websocket connected");
-
-                    await Send(ws, @"[""request_current_state"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_networks"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_streaming_stats"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_stats"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_connection_stats"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_session_stats"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_adapter_stats"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_tunnel_stats"",null,""speedify_sdk""]");
-                    await Send(ws, @"[""request_latency_stats"",null,""speedify_sdk""]");
-
-                    await ReceiveLoop(ws);
-
-                    Logger.Log("speedify", "websocket stream ended — restarting");
+                    Logger.Log("speedify", "websocket telemetry starting");
+                    SpeedifyStreamLogger.Reset();
+                    await StreamLoop();
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log("speedify", "websocket error: " + ex.Message);
-                }
-
-                try
-                {
-                    ws?.Dispose();
-                    ws = null;
-                }
-                catch
-                {
+                    if (running)
+                        Logger.Log("speedify", "stream loop error: " + ex.Message);
                 }
 
                 if (running)
                     await Task.Delay(2000);
+            }
+        }
+
+        private async Task StreamLoop()
+        {
+            try
+            {
+                capturedSnapshotEvents.Clear();
+                seenEventNames.Clear();
+
+                ws = new ClientWebSocket();
+                ws.Options.AddSubProtocol("event-protocol");
+                ws.Options.SetRequestHeader("Origin", "easywsclient://");
+
+                string uri = $"ws://{SpeedifyWsHost}:{SpeedifyWsPort}{SpeedifyWsPath}";
+                Logger.Log("speedify", "connecting websocket: " + uri);
+
+                await ws.ConnectAsync(new Uri(uri), CancellationToken.None);
+
+                Logger.Log("speedify", "websocket connected");
+
+                await SendRequests(ws,
+                    "request_referrer_data"
+                );
+
+                await ReceiveLoop(ws);
+
+                if (running)
+                    Logger.Log("speedify", "websocket stream ended — restarting");
+            }
+            catch (Exception ex)
+            {
+                if (running)
+                    Logger.Log("speedify", "websocket error: " + ex.Message);
+            }
+
+            try
+            {
+                ws?.Dispose();
+                ws = null;
+            }
+            catch
+            {
+            }
+        }
+
+        private async Task SendRequests(ClientWebSocket socket, params string[] requestNames)
+        {
+            foreach (string requestName in requestNames)
+            {
+                string msg = $"[\"{requestName}\",null,\"speedify_sdk\"]";
+                await Send(socket, msg);
             }
         }
 
@@ -140,21 +172,69 @@ namespace WTFnetApp
 
                     Logger.Log("speedify-ws-event", eventName);
 
+                    if (!seenEventNames.Contains(eventName))
+                    {
+                        seenEventNames.Add(eventName);
+                        Logger.Log("speedify-new-event", eventName);
+                    }
+
+                    if (!capturedSnapshotEvents.Contains(eventName))
+                    {
+                        capturedSnapshotEvents.Add(eventName);
+                        Logger.Log("speedify-snapshot-event", eventName);
+
+                        if (ShouldCaptureFullSnapshot(eventName))
+                        {
+                            Logger.Log("speedify-snapshot-raw", rawMessage);
+                            Logger.Log("speedify-snapshot-payload", payloadJson);
+                            SpeedifyStreamLogger.CaptureEvent(eventName, payloadJson);
+                        }
+                        else
+                        {
+                            Logger.Log("speedify-snapshot-skip", eventName + " (name-only)");
+                        }
+                    }
+
                     if (eventName == "report_connection_stats")
                     {
                         MetricsSnapshot snap = parser.ParseConnectionStats(payloadJson);
                         if (snap != null)
                             onSnapshot?.Invoke(snap);
                     }
-                    else if (eventName == "report_session_stats")
-                    {
-                        Logger.Log("speedify-session", payloadJson);
-                    }
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log("speedify", "parse error: " + ex.Message);
+                    if (running)
+                        Logger.Log("speedify", "parse error: " + ex.Message);
                 }
+            }
+        }
+
+        private bool ShouldCaptureFullSnapshot(string eventName)
+        {
+            switch (eventName)
+            {
+                case "report_current_state":
+                case "report_connected_server":
+                case "report_connection_settings":
+                case "report_privacy_settings":
+                case "report_networks":
+                case "report_streaming_stats":
+                case "report_connection_stats":
+                case "report_session_stats":
+                case "report_latency_stats":
+                case "report_adapter_stats":
+                case "report_tunnel_stats":
+                case "report_stats":
+                case "report_system_data":
+                case "report_version_data":
+                case "report_user_location":
+                case "report_networksharing_discovery":
+                case "report_nag":
+                    return true;
+
+                default:
+                    return false;
             }
         }
 
@@ -178,30 +258,39 @@ namespace WTFnetApp
 
             try
             {
-                if (string.IsNullOrWhiteSpace(raw)) return false;
-                if (!raw.StartsWith("[\"")) return false;
+                if (string.IsNullOrWhiteSpace(raw))
+                    return false;
+
+                if (!raw.StartsWith("[\""))
+                    return false;
 
                 int firstQuote = 2;
                 int secondQuote = raw.IndexOf('"', firstQuote);
-                if (secondQuote < 0) return false;
+                if (secondQuote < 0)
+                    return false;
 
                 eventName = raw.Substring(firstQuote, secondQuote - firstQuote);
 
                 int firstComma = raw.IndexOf(',', secondQuote + 1);
-                if (firstComma < 0) return false;
+                if (firstComma < 0)
+                    return false;
 
                 int payloadStart = firstComma + 1;
                 while (payloadStart < raw.Length && char.IsWhiteSpace(raw[payloadStart]))
                     payloadStart++;
 
-                if (payloadStart >= raw.Length) return false;
+                if (payloadStart >= raw.Length)
+                    return false;
 
                 char openChar = raw[payloadStart];
                 char closeChar;
 
-                if (openChar == '{') closeChar = '}';
-                else if (openChar == '[') closeChar = ']';
-                else return false;
+                if (openChar == '{')
+                    closeChar = '}';
+                else if (openChar == '[')
+                    closeChar = ']';
+                else
+                    return false;
 
                 int depth = 0;
                 bool inString = false;
@@ -229,9 +318,13 @@ namespace WTFnetApp
                         continue;
                     }
 
-                    if (inString) continue;
+                    if (inString)
+                        continue;
 
-                    if (c == openChar) depth++;
+                    if (c == openChar)
+                    {
+                        depth++;
+                    }
                     else if (c == closeChar)
                     {
                         depth--;
@@ -240,6 +333,12 @@ namespace WTFnetApp
                             payloadJson = raw.Substring(payloadStart, i - payloadStart + 1);
                             return !string.IsNullOrWhiteSpace(eventName);
                         }
+                    }
+                    if (eventName == "report_connection_stats")
+                    {
+                        MetricsSnapshot snap = parser.ParseConnectionStats(payloadJson);
+                        if (snap != null)
+                            onSnapshot?.Invoke(snap);
                     }
                 }
 

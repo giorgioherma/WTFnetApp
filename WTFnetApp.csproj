@@ -46,41 +46,89 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="DataSet.cs" />
-    <Compile Include="derGrosseGeneralstab.cs" />
-    <Compile Include="Logger.cs" />
-    <Compile Include="MetricsSnapshot.cs" />
-    <Compile Include="NetworkMetricsEngine.cs" />
-    <Compile Include="NetworkController.cs" />
-    <Compile Include="PredictionEngine.cs" />
-    <Compile Include="LagPattern.cs" />
-    <Compile Include="ConfidenceEstimator.cs" />
-    <Compile Include="AdaptiveThresholdController.cs" />
-    <Compile Include="LagLearningEngine.cs" />
-    <Compile Include="LagPressureController.cs" />
-    <Compile Include="PlayerLagDetector.cs" />
-    <Compile Include="AggressionController.cs" />
-    <Compile Include="LearningGate.cs" />
-    <Compile Include="FailureDetector.cs" />
-    <Compile Include="ServerQualityEstimator.cs" />
-    <Compile Include="SlowLearningManager.cs" />
-    <Compile Include="DecisionEngine.cs" />
-    <Compile Include="SpeedifyController.cs" />
-    <Compile Include="NetworkAnalysisFrame.cs" />
-    <Compile Include="SpeedifyMetricsParser.cs" />
-    <Compile Include="SpeedifyTelemetryReader.cs" />
-    <Compile Include="SpeedifyServerTracker.cs" />
-    <Compile Include="Tray.cs" />
-    <Compile Include="UIOverlay.cs">
-      <SubType>Form</SubType>
+    <Compile Include="runtime\DataSet.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="WtfFastPing.cs" />
-    <Compile Include="Form1.cs" />
-    <Compile Include="Form1.Designer.cs">
+    <Compile Include="runtime\derGrosseGeneralstab.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\Logger.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\MetricsSnapshot.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\NetworkMetricsEngine.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\StartupServerTest.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <None Include="legacy\PredictionEngine.cs" />
+    <None Include="lab\LagPattern.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <Compile Include="lab\ConfidenceEstimator.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <None Include="lab\AdaptiveThresholdController.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="legacy\LagLearningEngine.cs" />
+    <None Include="legacy\LagPressureController.cs" />
+    <None Include="lab\PlayerLagDetector.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="lab\AggressionController.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="lab\LearningGate.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="lab\FailureDetector.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="lab\ServerQualityEstimator.cs" />
+    <None Include="lab\SlowLearningManager.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="lab\DecisionEngine.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Include="legacy\TOOLSpeedefyStreamLogger.cs" />
+    <Compile Include="lab\SpeedifyController.cs">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Compile>
+    <None Include="legacy\NetworkAnalysisFrame.cs" />
+    <Compile Include="runtime\SpeedifyMetricsParser.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\SpeedifyTelemetryReader.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="lab\VPNServerList.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="lab\Tray.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\UIOverlay.cs">
+      <SubType>Form</SubType>
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\WtfFastPing.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <None Include="legacy\Form1.cs" />
+    <Compile Include="legacy\Form1.Designer.cs">
       <DependentUpon>Form1.cs</DependentUpon>
     </Compile>
-    <Compile Include="NatKeepAlive.cs" />
-    <Compile Include="Program.cs" />
+    <Compile Include="runtime\NatKeepAlive.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
+    <Compile Include="runtime\Program.cs">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
     <EmbeddedResource Include="Properties\Resources.resx">
       <Generator>ResXFileCodeGenerator</Generator>
@@ -102,7 +150,8 @@
     </Compile>
   </ItemGroup>
   <ItemGroup>
-    <None Include="App.config" />
+    <None Include="runtime\App.config" />
   </ItemGroup>
+  <ItemGroup />
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>
