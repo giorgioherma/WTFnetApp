@@ -1,3 +1,6 @@
+using System;
+using System.Threading;
+
 namespace WTFnetApp
 {
     public class ConfidenceEstimator
@@ -9,21 +12,29 @@ namespace WTFnetApp
         {
             get
             {
-                if (totalPatternOccurrences <= 0)
+                int total = totalPatternOccurrences;
+                if (total <= 0)
                     return 0;
 
-                return (double)lagOccurrences / totalPatternOccurrences;
+                return Math.Max(0, Math.Min(1,
+                    (double)lagOccurrences / total));
             }
         }
 
         public void RecordPatternOccurrence()
         {
-            totalPatternOccurrences++;
+            Interlocked.Increment(ref totalPatternOccurrences);
         }
 
         public void RecordLagOccurrence()
         {
-            lagOccurrences++;
+            Interlocked.Increment(ref lagOccurrences);
+        }
+
+        public void Reset()
+        {
+            lagOccurrences = 0;
+            totalPatternOccurrences = 0;
         }
     }
 }

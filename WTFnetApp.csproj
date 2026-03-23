@@ -61,9 +61,9 @@
     <Compile Include="runtime\NetworkMetricsEngine.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="runtime\StartupServerTest.cs">
+    <None Include="lab\StartupServerTest.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
+    </None>
     <None Include="legacy\PredictionEngine.cs" />
     <None Include="lab\LagPattern.cs">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -96,9 +96,9 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="legacy\TOOLSpeedefyStreamLogger.cs" />
-    <Compile Include="lab\SpeedifyController.cs">
+    <None Include="lab\SpeedifyController.cs">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Compile>
+    </None>
     <None Include="legacy\NetworkAnalysisFrame.cs" />
     <Compile Include="runtime\SpeedifyMetricsParser.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
@@ -106,9 +106,9 @@
     <Compile Include="runtime\SpeedifyTelemetryReader.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="lab\VPNServerList.cs">
+    <None Include="lab\VPNServerList.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
+    </None>
     <Compile Include="lab\Tray.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>

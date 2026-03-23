@@ -35,6 +35,31 @@ namespace WTFnetApp
 
         private FastPingState state = new FastPingState();
 
+        // ======================================
+        // SIMPLE ONE-SHOT PING HELPER
+        // ======================================
+
+        public static async Task<int> Ping(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+                return -1;
+
+            try
+            {
+                using (var ping = new System.Net.NetworkInformation.Ping())
+                {
+                    PingReply reply = await ping.SendPingAsync(host, 1000, Payload);
+                    if (reply.Status == IPStatus.Success)
+                        return (int)reply.RoundtripTime;
+                }
+            }
+            catch
+            {
+            }
+
+            return -1;
+        }
+
         public void Start()
         {
             if (running)

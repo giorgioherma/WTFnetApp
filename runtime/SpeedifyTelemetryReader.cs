@@ -70,7 +70,6 @@ namespace WTFnetApp
                 try
                 {
                     Logger.Log("speedify", "websocket telemetry starting");
-                    SpeedifyStreamLogger.Reset();
                     await StreamLoop();
                 }
                 catch (Exception ex)
@@ -95,21 +94,18 @@ namespace WTFnetApp
                 ws.Options.AddSubProtocol("event-protocol");
                 ws.Options.SetRequestHeader("Origin", "easywsclient://");
 
-                string uri = $"ws://{SpeedifyWsHost}:{SpeedifyWsPort}{SpeedifyWsPath}";
+                string uri = "ws://" + SpeedifyWsHost + ":" + SpeedifyWsPort + SpeedifyWsPath;
                 Logger.Log("speedify", "connecting websocket: " + uri);
 
                 await ws.ConnectAsync(new Uri(uri), CancellationToken.None);
 
                 Logger.Log("speedify", "websocket connected");
 
-                await SendRequests(ws,
-                    "request_referrer_data"
-                );
-
+                await SendRequests(ws, "request_referrer_data");
                 await ReceiveLoop(ws);
 
                 if (running)
-                    Logger.Log("speedify", "websocket stream ended — restarting");
+                    Logger.Log("speedify", "websocket stream ended - restarting");
             }
             catch (Exception ex)
             {
@@ -119,8 +115,11 @@ namespace WTFnetApp
 
             try
             {
-                ws?.Dispose();
-                ws = null;
+                if (ws != null)
+                {
+                    ws.Dispose();
+                    ws = null;
+                }
             }
             catch
             {
@@ -131,7 +130,7 @@ namespace WTFnetApp
         {
             foreach (string requestName in requestNames)
             {
-                string msg = $"[\"{requestName}\",null,\"speedify_sdk\"]";
+                string msg = "[\"" + requestName + "\",null,\"speedify_sdk\"]";
                 await Send(socket, msg);
             }
         }
@@ -167,10 +166,12 @@ namespace WTFnetApp
 
                 try
                 {
-                    if (!TryUnwrapSpeedifyMessage(rawMessage, out string eventName, out string payloadJson))
+                    string eventName;
+                    string payloadJson;
+
+                    if (!TryUnwrapSpeedifyMessage(rawMessage, out eventName, out payloadJson))
                         continue;
 
-                    Logger.Log("speedify-ws-event", eventName);
 
                     if (!seenEventNames.Contains(eventName))
                     {
@@ -187,7 +188,6 @@ namespace WTFnetApp
                         {
                             Logger.Log("speedify-snapshot-raw", rawMessage);
                             Logger.Log("speedify-snapshot-payload", payloadJson);
-                            SpeedifyStreamLogger.CaptureEvent(eventName, payloadJson);
                         }
                         else
                         {
@@ -198,8 +198,8 @@ namespace WTFnetApp
                     if (eventName == "report_connection_stats")
                     {
                         MetricsSnapshot snap = parser.ParseConnectionStats(payloadJson);
-                        if (snap != null)
-                            onSnapshot?.Invoke(snap);
+                        if (snap != null && onSnapshot != null)
+                            onSnapshot(snap);
                     }
                 }
                 catch (Exception ex)
@@ -333,12 +333,6 @@ namespace WTFnetApp
                             payloadJson = raw.Substring(payloadStart, i - payloadStart + 1);
                             return !string.IsNullOrWhiteSpace(eventName);
                         }
-                    }
-                    if (eventName == "report_connection_stats")
-                    {
-                        MetricsSnapshot snap = parser.ParseConnectionStats(payloadJson);
-                        if (snap != null)
-                            onSnapshot?.Invoke(snap);
                     }
                 }
 

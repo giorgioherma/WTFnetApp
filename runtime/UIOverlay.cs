@@ -4,12 +4,51 @@ using System.Windows.Forms;
 
 namespace WTFnetApp
 {
-    public partial class UIOverlay : Form
+    public class UIOverlay : Form
     {
+        private readonly Label pingLabel;
+        private readonly Label modeLabel;
+
         private string lastText = "";
         private string lastModeText = "";
         private Color lastPingColor = Color.Empty;
         private Color lastModeColor = Color.Empty;
+
+        public UIOverlay()
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            TopMost = true;
+            ShowInTaskbar = false;
+            BackColor = Color.Black;
+            ForeColor = Color.White;
+            Opacity = 0.80;
+            Width = 220;
+            Height = 70;
+            Left = 20;
+            Top = 20;
+
+            pingLabel = new Label();
+            pingLabel.AutoSize = true;
+            pingLabel.Font = new Font("Segoe UI", 16F, FontStyle.Bold);
+            pingLabel.ForeColor = Color.Lime;
+            pingLabel.BackColor = Color.Transparent;
+            pingLabel.Left = 12;
+            pingLabel.Top = 8;
+            pingLabel.Text = "-- ms";
+
+            modeLabel = new Label();
+            modeLabel.AutoSize = true;
+            modeLabel.Font = new Font("Segoe UI", 12F, FontStyle.Bold);
+            modeLabel.ForeColor = Color.White;
+            modeLabel.BackColor = Color.Transparent;
+            modeLabel.Left = 12;
+            modeLabel.Top = 38;
+            modeLabel.Text = "NAT";
+
+            Controls.Add(pingLabel);
+            Controls.Add(modeLabel);
+        }
 
         public void RenderOverlay(OverlayRenderState render)
         {
@@ -39,8 +78,10 @@ namespace WTFnetApp
             modeLabel.Text = render.NatText;
             modeLabel.ForeColor = render.NatColor;
         }
-    }
-}
-protected override bool ShowWithoutActivation => true;
+
+        protected override bool ShowWithoutActivation
+        {
+            get { return true; }
+        }
     }
 }

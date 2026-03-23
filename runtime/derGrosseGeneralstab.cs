@@ -15,12 +15,9 @@ namespace WTFnetApp
         private NatKeepAlive nat;
         private readonly NetworkMetricsEngine networkMetricsEngine = new NetworkMetricsEngine();
         private SpeedifyTelemetryReader speedifyReader;
-        private StartupServerTest fastestServer;
 
         // Optional / legacy-ish pieces kept around for now
-        private WtfFastPing fastPing;
         private MetricsSnapshot lastSnapshot;
-        private System.Windows.Forms.Timer uiTimer;
 
         // =========================
         // CONSTRUCTOR
@@ -32,7 +29,6 @@ namespace WTFnetApp
 
             InitializeOverlay();
             InitializeNat();
-            InitializeNetworkController();
             InitializeTelemetry();
 
             Logger.Log("engine", "network monitor started");
@@ -56,12 +52,6 @@ namespace WTFnetApp
             _ = nat.StartNatKeepAlive();
         }
 
-        private void InitializeNetworkController()
-        {
-            fastestServer = new StartupServerTest();
-            networkController.Start();
-        }
-
         private void InitializeTelemetry()
         {
             speedifyReader = new SpeedifyTelemetryReader(OnSpeedifySnapshot);
@@ -78,10 +68,6 @@ namespace WTFnetApp
             {
                 if (snapshot == null)
                     return;
-
-                // Keep old processing path alive if still useful
-                if (networkController != null)
-                    snapshot = networkController.ProcessSnapshot(snapshot);
 
                 lastSnapshot = snapshot;
 
@@ -105,7 +91,7 @@ namespace WTFnetApp
             _ = Task.Run(async () =>
             {
                 string bestServer = await DetectBestServerFast();
-                Logger.Log("startup", $"Using server region: {bestServer}");
+                Logger.Log("startup", "Using server region: " + bestServer);
             });
         }
 
@@ -122,17 +108,17 @@ namespace WTFnetApp
                 { "Milan", "9.9.9.9" }
             };
 
-            var tasks = new List<Task<(string, int)>>();
+            var tasks = new List<Task<Tuple<string, int>>>();
 
             foreach (var s in servers)
                 tasks.Add(CheckServer(s.Key, s.Value));
 
-            var results = await Task.WhenAll(tasks);
+            Tuple<string, int>[] results = await Task.WhenAll(tasks);
 
             string best = "Ljubljana";
             int bestPing = int.MaxValue;
 
-            foreach (var r in results)
+            foreach (Tuple<string, int> r in results)
             {
                 if (r.Item2 > 0 && r.Item2 < bestPing)
                 {
@@ -141,18 +127,17 @@ namespace WTFnetApp
                 }
             }
 
-            Logger.Log("startup", $"Best server: {best} ({bestPing}ms)");
-
+            Logger.Log("startup", "Best server: " + best + " (" + bestPing + "ms)");
             return best;
         }
 
-        private async Task<(string, int)> CheckServer(string name, string host)
+        private async Task<Tuple<string, int>> CheckServer(string name, string host)
         {
             int ping = await WtfFastPing.Ping(host);
 
-            Logger.Log("startup", $"server check {name} = {ping}ms");
+            Logger.Log("startup", "server check " + name + " = " + ping + "ms");
 
-            return (name, ping);
+            return Tuple.Create(name, ping);
         }
 
         // =========================
@@ -166,11 +151,10 @@ namespace WTFnetApp
 
             Logger.Log(
                 "net",
-                $"ping={lastSnapshot.Recent:F0} " +
-                $"avg={lastSnapshot.Average:F1} " +
-                $"jitter={lastSnapshot.Jitter:F1} " +
-                $"loss={lastSnapshot.PacketLoss:F2}"
-            );
+                "ping=" + lastSnapshot.Recent.ToString("F0") + " " +
+                "avg=" + lastSnapshot.Average.ToString("F1") + " " +
+                "jitter=" + lastSnapshot.Jitter.ToString("F1") + " " +
+                "loss=" + lastSnapshot.PacketLoss.ToString("F2"));
         }
 
         // =========================
@@ -188,12 +172,10 @@ namespace WTFnetApp
                 overlay.Show();
         }
 
-        public async Task RunManualServerPingScan()
+        public Task RunManualServerPingScan()
         {
-            Logger.Log("server", "manual server ping scan requested");
-
-            if (networkController != null)
-                await networkController.RunManualServerPingScan();
+            Logger.Log("server", "manual server ping scan disabled (StartupServerTest removed)");
+            return Task.CompletedTask;
         }
 
         // =========================
