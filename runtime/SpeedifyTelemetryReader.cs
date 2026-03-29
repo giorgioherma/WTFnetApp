@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -169,9 +170,8 @@ namespace WTFnetApp
                     string eventName;
                     string payloadJson;
 
-                    if (!TryUnwrapSpeedifyMessage(rawMessage, out eventName, out payloadJson))
+                    if (!TryParseSpeedifyMessage(rawMessage, out eventName, out payloadJson))
                         continue;
-
 
                     if (!seenEventNames.Contains(eventName))
                     {
@@ -251,92 +251,31 @@ namespace WTFnetApp
             Logger.Log("speedify", "sent: " + msg);
         }
 
-        private bool TryUnwrapSpeedifyMessage(string raw, out string eventName, out string payloadJson)
+        private bool TryParseSpeedifyMessage(string raw, out string eventName, out string payloadJson)
         {
             eventName = null;
             payloadJson = null;
 
             try
             {
-                if (string.IsNullOrWhiteSpace(raw))
-                    return false;
-
-                if (!raw.StartsWith("[\""))
-                    return false;
-
-                int firstQuote = 2;
-                int secondQuote = raw.IndexOf('"', firstQuote);
-                if (secondQuote < 0)
-                    return false;
-
-                eventName = raw.Substring(firstQuote, secondQuote - firstQuote);
-
-                int firstComma = raw.IndexOf(',', secondQuote + 1);
-                if (firstComma < 0)
-                    return false;
-
-                int payloadStart = firstComma + 1;
-                while (payloadStart < raw.Length && char.IsWhiteSpace(raw[payloadStart]))
-                    payloadStart++;
-
-                if (payloadStart >= raw.Length)
-                    return false;
-
-                char openChar = raw[payloadStart];
-                char closeChar;
-
-                if (openChar == '{')
-                    closeChar = '}';
-                else if (openChar == '[')
-                    closeChar = ']';
-                else
-                    return false;
-
-                int depth = 0;
-                bool inString = false;
-                bool escape = false;
-
-                for (int i = payloadStart; i < raw.Length; i++)
+                using (JsonDocument doc = JsonDocument.Parse(raw))
                 {
-                    char c = raw[i];
+                    if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                        return false;
 
-                    if (escape)
-                    {
-                        escape = false;
-                        continue;
-                    }
+                    JsonElement arr = doc.RootElement;
 
-                    if (c == '\\' && inString)
-                    {
-                        escape = true;
-                        continue;
-                    }
+                    if (arr.GetArrayLength() < 2)
+                        return false;
 
-                    if (c == '"')
-                    {
-                        inString = !inString;
-                        continue;
-                    }
+                    if (arr[0].ValueKind != JsonValueKind.String)
+                        return false;
 
-                    if (inString)
-                        continue;
+                    eventName = arr[0].GetString();
+                    payloadJson = arr[1].GetRawText();
 
-                    if (c == openChar)
-                    {
-                        depth++;
-                    }
-                    else if (c == closeChar)
-                    {
-                        depth--;
-                        if (depth == 0)
-                        {
-                            payloadJson = raw.Substring(payloadStart, i - payloadStart + 1);
-                            return !string.IsNullOrWhiteSpace(eventName);
-                        }
-                    }
+                    return !string.IsNullOrWhiteSpace(eventName);
                 }
-
-                return false;
             }
             catch
             {

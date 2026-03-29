@@ -1,6 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Globalization;
+using System.Text.Json;
 
 namespace WTFnetApp
 {
@@ -20,214 +20,165 @@ namespace WTFnetApp
 
             try
             {
-                MetricsSnapshot snapshot = new MetricsSnapshot();
-                snapshot.TimeUtc = DateTime.UtcNow;
-
-                snapshot.ActiveConnectionCount = ReadIntValue(json, "numActive");
-                snapshot.BackupConnectionCount = ReadIntValue(json, "numBackup");
-
-                string aggregateRow = FindAggregateRow(json);
-                string firstRealRow = FindConnectedRow(json, 0);
-                string secondRealRow = FindConnectedRow(json, 1);
-
-                if (!string.IsNullOrWhiteSpace(aggregateRow))
+                using (JsonDocument doc = JsonDocument.Parse(json))
                 {
-                    snapshot.TunnelConnected = ReadBoolValue(aggregateRow, "cnnct");
-                    snapshot.AggregateCongested = ReadBoolValue(aggregateRow, "congested");
-                    snapshot.AggregateLatencyMs = ReadDoubleValue(aggregateRow, "ltMs");
-                    snapshot.AggregateJitterMs = ReadDoubleValue(aggregateRow, "jtMs");
-                    snapshot.AggregateRxBps = ReadDoubleValue(aggregateRow, "rcvBps");
-                    snapshot.AggregateTxBps = ReadDoubleValue(aggregateRow, "sndBps");
-                    snapshot.AggregateTotalBps = ReadDoubleValue(aggregateRow, "totBps");
+                    JsonElement root = doc.RootElement;
 
-                    snapshot.IsCongested = ReadBoolValue(aggregateRow, "congested");
-                    snapshot.IsDownloadCongested = ReadBoolValue(aggregateRow, "downloadCongested");
-                    snapshot.IsUploadCongested = ReadBoolValue(aggregateRow, "uploadCongested");
+                    MetricsSnapshot snapshot = new MetricsSnapshot();
+
+                    snapshot.TimeUtc = DateTime.UtcNow;
+
+                    JsonElement numActive;
+                    if (root.TryGetProperty("numActive", out numActive))
+                        snapshot.ActiveConnectionCount = ReadInt(numActive);
+
+                    JsonElement numBackup;
+                    if (root.TryGetProperty("numBackup", out numBackup))
+                        snapshot.BackupConnectionCount = ReadInt(numBackup);
+
+                    JsonElement aggregateRow = default(JsonElement);
+                    bool hasAggregate = false;
+
+                    JsonElement firstRealRow = default(JsonElement);
+                    bool hasFirstReal = false;
+
+                    JsonElement secondRealRow = default(JsonElement);
+                    bool hasSecondReal = false;
+
+                    JsonElement connections;
+                    if (root.TryGetProperty("connections", out connections) &&
+                        connections.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (JsonElement row in connections.EnumerateArray())
+                        {
+                            string guid = ReadString(row, "guid");
+                            string protocol = ReadString(row, "protocol");
+                            bool connected = ReadBool(row, "cnnct");
+
+                            bool isAggregate = string.Equals(guid, "speedify", StringComparison.OrdinalIgnoreCase);
+                            bool isProxy = string.Equals(protocol, "proxy", StringComparison.OrdinalIgnoreCase);
+
+                            if (isAggregate)
+                            {
+                                aggregateRow = row;
+                                hasAggregate = true;
+                                continue;
+                            }
+
+                            if (!isProxy && connected)
+                            {
+                                if (!hasFirstReal)
+                                {
+                                    firstRealRow = row;
+                                    hasFirstReal = true;
+                                }
+                                else if (!hasSecondReal)
+                                {
+                                    secondRealRow = row;
+                                    hasSecondReal = true;
+                                }
+                            }
+                        }
+                    }
+
+                    // Aggregate tunnel row = main truth for ping/tunnel
+                    if (hasAggregate)
+                    {
+                        snapshot.TunnelConnected = ReadBool(aggregateRow, "cnnct");
+                        snapshot.AggregateCongested = ReadBool(aggregateRow, "congested");
+                        snapshot.AggregateLatencyMs = ReadDouble(aggregateRow, "ltMs");
+                        snapshot.AggregateJitterMs = ReadDouble(aggregateRow, "jtMs");
+                        snapshot.AggregateRxBps = ReadDouble(aggregateRow, "rcvBps");
+                        snapshot.AggregateTxBps = ReadDouble(aggregateRow, "sndBps");
+                        snapshot.AggregateTotalBps = ReadDouble(aggregateRow, "totBps");
+                    }
+
+                    // Real connected links
+                    if (hasFirstReal)
+                    {
+                        snapshot.PrimaryRemoteIp = ReadString(firstRealRow, "remoteIp");
+                        snapshot.SpeedifyRemoteIp = string.IsNullOrWhiteSpace(snapshot.PrimaryRemoteIp)
+                            ? "speedify"
+                            : snapshot.PrimaryRemoteIp;
+
+                        snapshot.Adapter1Latency = ReadDouble(firstRealRow, "ltMs");
+                    }
+
+                    if (hasSecondReal)
+                    {
+                        snapshot.Adapter2Latency = ReadDouble(secondRealRow, "ltMs");
+                    }
+
+                    // Legacy compatibility values
+                    double latency = snapshot.AggregateLatencyMs > 0
+                        ? snapshot.AggregateLatencyMs
+                        : snapshot.Adapter1Latency;
+
+                    double jitter = snapshot.AggregateJitterMs > 0
+                        ? snapshot.AggregateJitterMs
+                        : 0;
+
+                    double microJitter = previousLatency > 0 && latency > 0
+                        ? Math.Abs(latency - previousLatency)
+                        : 0;
+
+                    smoothJitter = smoothJitter == 0
+                        ? jitter
+                        : smoothJitter * 0.6 + jitter * 0.4;
+
+                    if (latency > 0 && (dynamicBase == 0 || latency < dynamicBase))
+                        dynamicBase = latency;
+
+                    previousLatency = latency;
+                    AddLatencySample(latency);
+
+                    snapshot.Recent = latency;
+                    snapshot.Average = GetWindowAverage();
+                    snapshot.Max = GetWindowMax();
+                    snapshot.Jitter = smoothJitter;
+                    snapshot.MicroJitter = microJitter;
+                    snapshot.DynamicBase = dynamicBase;
+
+                    snapshot.Connected = snapshot.TunnelConnected;
+                    snapshot.Congested = snapshot.AggregateCongested;
+
+                    snapshot.LatencyMs = latency;
+                    snapshot.BaseLatencyMs = dynamicBase;
+                    snapshot.QueueDelayMs = Math.Max(0, snapshot.LatencyMs - snapshot.BaseLatencyMs);
+
+                    if (hasAggregate)
+                    {
+                        snapshot.IsCongested = ReadBool(aggregateRow, "congested");
+                        snapshot.IsDownloadCongested = ReadBool(aggregateRow, "downloadCongested");
+                        snapshot.IsUploadCongested = ReadBool(aggregateRow, "uploadCongested");
+                    }
+
+                    if (hasFirstReal)
+                    {
+                        snapshot.ReceiveBytesPerSecond = (long)ReadDouble(firstRealRow, "rcvBps");
+                        snapshot.SendBytesPerSecond = (long)ReadDouble(firstRealRow, "sndBps");
+
+                        double mos = ReadDouble(firstRealRow, "mos");
+                        if (mos > 0)
+                            snapshot.MosScore = mos;
+
+                        double rcvBytes = ReadDouble(firstRealRow, "rcvBytes");
+                        if (rcvBytes > 0)
+                            snapshot.ReceiveBytes = (long)rcvBytes;
+
+                        double sndBytes = ReadDouble(firstRealRow, "sndBytes");
+                        if (sndBytes > 0)
+                            snapshot.SendBytes = (long)sndBytes;
+                    }
+
+                    return snapshot;
                 }
-
-                if (!string.IsNullOrWhiteSpace(firstRealRow))
-                {
-                    snapshot.PrimaryRemoteIp = ReadStringValue(firstRealRow, "remoteIp");
-                    snapshot.SpeedifyRemoteIp = string.IsNullOrWhiteSpace(snapshot.PrimaryRemoteIp)
-                        ? "speedify"
-                        : snapshot.PrimaryRemoteIp;
-
-                    snapshot.Adapter1Latency = ReadDoubleValue(firstRealRow, "ltMs");
-                    snapshot.ReceiveBytesPerSecond = (long)ReadDoubleValue(firstRealRow, "rcvBps");
-                    snapshot.SendBytesPerSecond = (long)ReadDoubleValue(firstRealRow, "sndBps");
-
-                    double mos = ReadDoubleValue(firstRealRow, "mos");
-                    if (mos > 0)
-                        snapshot.MosScore = mos;
-
-                    double rcvBytes = ReadDoubleValue(firstRealRow, "rcvBytes");
-                    if (rcvBytes > 0)
-                        snapshot.ReceiveBytes = (long)rcvBytes;
-
-                    double sndBytes = ReadDoubleValue(firstRealRow, "sndBytes");
-                    if (sndBytes > 0)
-                        snapshot.SendBytes = (long)sndBytes;
-                }
-
-                if (!string.IsNullOrWhiteSpace(secondRealRow))
-                {
-                    snapshot.Adapter2Latency = ReadDoubleValue(secondRealRow, "ltMs");
-                }
-
-                double latency = snapshot.AggregateLatencyMs > 0
-                    ? snapshot.AggregateLatencyMs
-                    : snapshot.Adapter1Latency;
-
-                double jitter = snapshot.AggregateJitterMs > 0
-                    ? snapshot.AggregateJitterMs
-                    : 0;
-
-                double microJitter = previousLatency > 0 && latency > 0
-                    ? Math.Abs(latency - previousLatency)
-                    : 0;
-
-                smoothJitter = smoothJitter == 0
-                    ? jitter
-                    : smoothJitter * 0.6 + jitter * 0.4;
-
-                if (latency > 0 && (dynamicBase == 0 || latency < dynamicBase))
-                    dynamicBase = latency;
-
-                previousLatency = latency;
-                AddLatencySample(latency);
-
-                snapshot.Recent = latency;
-                snapshot.Average = GetWindowAverage();
-                snapshot.Max = GetWindowMax();
-                snapshot.Jitter = smoothJitter;
-                snapshot.MicroJitter = microJitter;
-                snapshot.DynamicBase = dynamicBase;
-
-                snapshot.Connected = snapshot.TunnelConnected;
-                snapshot.Congested = snapshot.AggregateCongested;
-
-                snapshot.LatencyMs = latency;
-                snapshot.BaseLatencyMs = dynamicBase;
-                snapshot.QueueDelayMs = Math.Max(0, snapshot.LatencyMs - snapshot.BaseLatencyMs);
-
-                return snapshot;
             }
             catch (Exception ex)
             {
                 Logger.Log("speedify-parser", "ParseConnectionStats error: " + ex.Message);
                 return null;
             }
-        }
-
-        private string FindAggregateRow(string json)
-        {
-            return FindRow(json, "\"guid\":\"speedify\"");
-        }
-
-        private string FindConnectedRow(string json, int connectedIndex)
-        {
-            int found = 0;
-            int pos = 0;
-
-            while (pos < json.Length)
-            {
-                int start = json.IndexOf('{', pos);
-                if (start < 0)
-                    break;
-
-                int end = FindMatchingBrace(json, start);
-                if (end < 0)
-                    break;
-
-                string row = json.Substring(start, end - start + 1);
-
-                string guid = ReadStringValue(row, "guid");
-                string protocol = ReadStringValue(row, "protocol");
-                bool connected = ReadBoolValue(row, "cnnct");
-
-                bool isAggregate = string.Equals(guid, "speedify", StringComparison.OrdinalIgnoreCase);
-                bool isProxy = string.Equals(protocol, "proxy", StringComparison.OrdinalIgnoreCase);
-
-                if (!isAggregate && !isProxy && connected)
-                {
-                    if (found == connectedIndex)
-                        return row;
-
-                    found++;
-                }
-
-                pos = end + 1;
-            }
-
-            return null;
-        }
-
-        private string FindRow(string json, string mustContain)
-        {
-            int pos = 0;
-
-            while (pos < json.Length)
-            {
-                int start = json.IndexOf('{', pos);
-                if (start < 0)
-                    break;
-
-                int end = FindMatchingBrace(json, start);
-                if (end < 0)
-                    break;
-
-                string row = json.Substring(start, end - start + 1);
-                if (row.IndexOf(mustContain, StringComparison.OrdinalIgnoreCase) >= 0)
-                    return row;
-
-                pos = end + 1;
-            }
-
-            return null;
-        }
-
-        private int FindMatchingBrace(string text, int startIndex)
-        {
-            int depth = 0;
-            bool inString = false;
-            bool escape = false;
-
-            for (int i = startIndex; i < text.Length; i++)
-            {
-                char c = text[i];
-
-                if (escape)
-                {
-                    escape = false;
-                    continue;
-                }
-
-                if (c == '\\' && inString)
-                {
-                    escape = true;
-                    continue;
-                }
-
-                if (c == '"')
-                {
-                    inString = !inString;
-                    continue;
-                }
-
-                if (inString)
-                    continue;
-
-                if (c == '{')
-                    depth++;
-                else if (c == '}')
-                {
-                    depth--;
-                    if (depth == 0)
-                        return i;
-                }
-            }
-
-            return -1;
         }
 
         private void AddLatencySample(double latency)
@@ -268,127 +219,50 @@ namespace WTFnetApp
             return max;
         }
 
-        private static string ReadStringValue(string text, string name)
+        private static string ReadString(JsonElement parent, string name)
         {
-            string key = "\"" + name + "\"";
-            int keyPos = text.IndexOf(key, StringComparison.Ordinal);
-            if (keyPos < 0)
-                return null;
-
-            int colon = text.IndexOf(':', keyPos + key.Length);
-            if (colon < 0)
-                return null;
-
-            int firstQuote = text.IndexOf('"', colon + 1);
-            if (firstQuote < 0)
-                return null;
-
-            int i = firstQuote + 1;
-            bool escape = false;
-
-            while (i < text.Length)
-            {
-                char c = text[i];
-
-                if (escape)
-                {
-                    escape = false;
-                    i++;
-                    continue;
-                }
-
-                if (c == '\\')
-                {
-                    escape = true;
-                    i++;
-                    continue;
-                }
-
-                if (c == '"')
-                    return text.Substring(firstQuote + 1, i - firstQuote - 1);
-
-                i++;
-            }
+            JsonElement value;
+            if (parent.TryGetProperty(name, out value) && value.ValueKind == JsonValueKind.String)
+                return value.GetString();
 
             return null;
         }
 
-        private static bool ReadBoolValue(string text, string name)
+        private static bool ReadBool(JsonElement parent, string name)
         {
-            string raw = ReadRawValue(text, name);
-            if (raw == null)
-                return false;
+            JsonElement value;
+            if (parent.TryGetProperty(name, out value))
+            {
+                if (value.ValueKind == JsonValueKind.True) return true;
+                if (value.ValueKind == JsonValueKind.False) return false;
+            }
 
-            return string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase);
+            return false;
         }
 
-        private static double ReadDoubleValue(string text, string name)
+        private static double ReadDouble(JsonElement parent, string name)
         {
-            string raw = ReadRawValue(text, name);
-            if (string.IsNullOrWhiteSpace(raw))
-                return 0;
-
-            double value;
-            if (double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out value))
-                return value;
+            JsonElement value;
+            if (parent.TryGetProperty(name, out value) && value.ValueKind == JsonValueKind.Number)
+            {
+                try { return value.GetDouble(); }
+                catch { return 0; }
+            }
 
             return 0;
         }
 
-        private static int ReadIntValue(string text, string name)
+        private static int ReadInt(JsonElement value)
         {
-            string raw = ReadRawValue(text, name);
-            if (string.IsNullOrWhiteSpace(raw))
-                return 0;
-
-            int intValue;
-            if (int.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out intValue))
-                return intValue;
-
-            double doubleValue;
-            if (double.TryParse(raw, NumberStyles.Any, CultureInfo.InvariantCulture, out doubleValue))
-                return (int)doubleValue;
-
-            return 0;
-        }
-
-        private static string ReadRawValue(string text, string name)
-        {
-            string key = "\"" + name + "\"";
-            int keyPos = text.IndexOf(key, StringComparison.Ordinal);
-            if (keyPos < 0)
-                return null;
-
-            int colon = text.IndexOf(':', keyPos + key.Length);
-            if (colon < 0)
-                return null;
-
-            int start = colon + 1;
-            while (start < text.Length && char.IsWhiteSpace(text[start]))
-                start++;
-
-            if (start >= text.Length)
-                return null;
-
-            if (text[start] == '"')
+            try
             {
-                int endQuote = text.IndexOf('"', start + 1);
-                if (endQuote > start)
-                    return text.Substring(start + 1, endQuote - start - 1);
-
-                return null;
+                return value.GetInt32();
             }
-
-            int end = start;
-            while (end < text.Length)
+            catch
             {
-                char c = text[end];
-                if (c == ',' || c == '}' || c == ']')
-                    break;
-                end++;
+                try { return (int)value.GetDouble(); }
+                catch { return 0; }
             }
-
-            return text.Substring(start, end - start).Trim();
         }
     }
 }

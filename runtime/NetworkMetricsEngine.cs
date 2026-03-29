@@ -25,44 +25,35 @@ namespace WTFnetApp
     public sealed class NetworkMetricsEngine
     {
         private readonly DataSet dataSet = new DataSet();
-        private readonly WtfFastPing fastPing = new WtfFastPing();
         private readonly NetworkEngineState state = new NetworkEngineState();
 
         public NetworkMetricsEngine()
         {
             state.Bank = dataSet.Bank;
-            fastPing.Start();
         }
 
-        public async Task StopAsync()
+        public Task StopAsync()
         {
-            await fastPing.StopAsync();
+            return Task.CompletedTask;
         }
 
-        public void Update(MetricsSnapshot snapshot, NatState natState)
+        public void Update(MetricsSnapshot snapshot, UnifiedNetworkState unified, NatState natState)
         {
-            if (snapshot == null)
+            if (unified == null)
                 return;
 
-            dataSet.Add(snapshot);
+            if (snapshot != null)
+                dataSet.Add(snapshot);
 
-            fastPing.UpdateTunnelLatency(snapshot.AggregateLatencyMs);
+            state.PingMs = unified.DisplayedPingMs > 0
+                ? unified.DisplayedPingMs
+                : unified.LatencyMs;
 
-            string primaryTarget = snapshot.PrimaryRemoteIp;
-            if (string.IsNullOrWhiteSpace(primaryTarget))
-                primaryTarget = snapshot.ConnectedServerPublicIp;
+            state.PingColorKey = GetPingColorKey(unified);
+            state.TunnelState = BuildTunnelState(unified);
 
-            if (!string.IsNullOrWhiteSpace(primaryTarget))
-                fastPing.UpdateTargets(primaryTarget, "1.1.1.1");
-
-            FastPingState pingState = fastPing.GetState();
-
-            state.PingMs = pingState.DisplayedPingMs;
-            state.PingColorKey = GetPingColorKey(pingState);
-            state.TunnelState = snapshot.TunnelConnected ? "Tunnel OK" : "Tunnel Down";
-
-            BuildOverlayState(pingState, natState);
-            FillBank(snapshot, pingState);
+            BuildOverlayState(unified, natState);
+            FillBank(unified);
         }
 
         public NetworkEngineState GetState()
@@ -75,15 +66,15 @@ namespace WTFnetApp
             return dataSet;
         }
 
-        private void BuildOverlayState(FastPingState pingState, NatState natState)
+        private void BuildOverlayState(UnifiedNetworkState unified, NatState natState)
         {
             state.Overlay.PingText = FormatPingText(state.PingMs);
-            state.Overlay.PingColor = GetPingColor(state.PingMs, pingState);
+            state.Overlay.PingColor = GetPingColor(unified);
             state.Overlay.NatText = natState.ToString();
             state.Overlay.NatColor = GetNatColor(natState);
         }
-        
-        private void FillBank(MetricsSnapshot snapshot, FastPingState pingState)
+
+        private void FillBank(UnifiedNetworkState unified)
         {
             DashboardBank bank = dataSet.Bank;
 
@@ -93,23 +84,45 @@ namespace WTFnetApp
             bank.PingColorKey = state.PingColorKey;
             bank.TunnelState = state.TunnelState;
 
-            bank.TunnelConnected = snapshot.TunnelConnected;
-            bank.ConnectedServerName = snapshot.ConnectedServerName;
-            bank.ConnectedServerPublicIp = snapshot.ConnectedServerPublicIp;
+            bank.TunnelConnected = unified.TunnelConnected;
+            bank.ConnectedServerName = unified.ConnectedServerName;
+            bank.ConnectedServerPublicIp = unified.ConnectedServerPublicIp;
 
-            bank.AggregateJitterMs = snapshot.AggregateJitterMs;
-            bank.AggregateRxBps = snapshot.AggregateRxBps;
-            bank.AggregateTxBps = snapshot.AggregateTxBps;
-            bank.AggregateTotalBps = snapshot.AggregateTotalBps;
+            bank.AggregateJitterMs = unified.AggregateJitterMs > 0
+                ? unified.AggregateJitterMs
+                : unified.JitterMs;
 
-            bank.ActiveConnectionCount = snapshot.ActiveConnectionCount;
-            bank.BackupConnectionCount = snapshot.BackupConnectionCount;
+            bank.AggregateRxBps = unified.AggregateRxBps;
+            bank.AggregateTxBps = unified.AggregateTxBps;
+            bank.AggregateTotalBps = unified.AggregateTotalBps;
 
-            bank.PrimaryRemoteIp = snapshot.PrimaryRemoteIp;
+            bank.ActiveConnectionCount = unified.ActiveConnectionCount;
+            bank.BackupConnectionCount = unified.BackupConnectionCount;
 
-            bank.SpikeDetected = pingState.SpikeDetected;
-            bank.PingConfidence = pingState.Confidence;
-            bank.PingStale = pingState.IsStale;
+            bank.PrimaryRemoteIp = !string.IsNullOrWhiteSpace(unified.PrimaryRemoteIp)
+                ? unified.PrimaryRemoteIp
+                : unified.FastPingPrimaryTarget;
+
+            bank.SpikeDetected = unified.SpikeDetected;
+            bank.PingConfidence = unified.Confidence;
+            bank.PingStale = unified.IsStale;
+        }
+
+        private string BuildTunnelState(UnifiedNetworkState unified)
+        {
+            if (unified == null)
+                return "Unknown";
+
+            if (unified.SourceKind == UnifiedNetworkSourceKind.FastPing)
+                return "No Tunnel";
+
+            if (unified.TunnelConnected)
+                return "Tunnel OK";
+
+            if (unified.HasSpeedify || unified.SpeedifyAvailable)
+                return "Tunnel Down";
+
+            return "Unknown";
         }
 
         private string FormatPingText(double pingMs)
@@ -120,15 +133,37 @@ namespace WTFnetApp
             return ((int)Math.Round(pingMs)).ToString() + " ms";
         }
 
-        private Color GetPingColor(double pingMs, FastPingState pingState)
+        private Color GetPingColor(UnifiedNetworkState unified)
         {
-            if (pingState == null || pingState.IsStale || pingMs <= 0)
+            if (unified == null || unified.IsStale || state.PingMs <= 0)
                 return Color.Gray;
 
-            if (pingMs < 50)
+            switch (unified.HealthState)
+            {
+                case UnifiedNetworkHealthState.Critical:
+                    return Color.Red;
+
+                case UnifiedNetworkHealthState.Warning:
+                    return Color.OrangeRed;
+
+                case UnifiedNetworkHealthState.OffBaseline:
+                    return Color.Orange;
+
+                case UnifiedNetworkHealthState.Healthy:
+                    return Color.LimeGreen;
+
+                case UnifiedNetworkHealthState.Stale:
+                    return Color.Gray;
+
+                case UnifiedNetworkHealthState.Unknown:
+                default:
+                    break;
+            }
+
+            if (state.PingMs < 50)
                 return Color.LimeGreen;
 
-            if (pingMs < 90)
+            if (state.PingMs < 90)
                 return Color.Orange;
 
             return Color.Red;
@@ -155,17 +190,37 @@ namespace WTFnetApp
             }
         }
 
-        private string GetPingColorKey(FastPingState pingState)
+        private string GetPingColorKey(UnifiedNetworkState unified)
         {
-            if (pingState == null || pingState.IsStale || pingState.DisplayedPingMs <= 0)
+            if (unified == null || unified.IsStale || state.PingMs <= 0)
                 return "gray";
 
-            double ping = pingState.DisplayedPingMs;
+            switch (unified.HealthState)
+            {
+                case UnifiedNetworkHealthState.Critical:
+                    return "red";
 
-            if (ping <= 50)
+                case UnifiedNetworkHealthState.Warning:
+                    return "red";
+
+                case UnifiedNetworkHealthState.OffBaseline:
+                    return "yellow";
+
+                case UnifiedNetworkHealthState.Healthy:
+                    return "green";
+
+                case UnifiedNetworkHealthState.Stale:
+                    return "gray";
+
+                case UnifiedNetworkHealthState.Unknown:
+                default:
+                    break;
+            }
+
+            if (state.PingMs <= 50)
                 return "green";
 
-            if (ping <= 90)
+            if (state.PingMs <= 90)
                 return "yellow";
 
             return "red";
