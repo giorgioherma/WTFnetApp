@@ -37,13 +37,15 @@ namespace WTFnetApp
         private readonly Ping pingSecondary = new Ping();
 
         private volatile bool running;
-        private Task loopTask;
+        private Task probeLoopTask;
+        private Task publishLoopTask;
 
         private string secondaryFallbackHost = "1.1.1.1";
         private double tunnelLatencyMs = -1;
 
         private FastPingState state = new FastPingState();
-        private FastPingState lastPublishedState = null;
+
+        private const int PublishIntervalMs = 250;
 
         public event Action<FastPingState> StateUpdated;
 
@@ -74,7 +76,9 @@ namespace WTFnetApp
                 return;
 
             running = true;
-            loopTask = RunLoop();
+            probeLoopTask = RunProbeLoop();
+            publishLoopTask = RunPublishLoop();
+
             Logger.Log("fastping", "probe started");
         }
 
@@ -84,8 +88,17 @@ namespace WTFnetApp
 
             try
             {
-                if (loopTask != null)
-                    await loopTask;
+                if (probeLoopTask != null)
+                    await probeLoopTask;
+            }
+            catch
+            {
+            }
+
+            try
+            {
+                if (publishLoopTask != null)
+                    await publishLoopTask;
             }
             catch
             {
@@ -143,7 +156,7 @@ namespace WTFnetApp
             }
         }
 
-        private async Task RunLoop()
+        private async Task RunProbeLoop()
         {
             bool probePrimaryNext = true;
 
@@ -171,6 +184,41 @@ namespace WTFnetApp
                 {
                     if (running)
                         Logger.Log("fastping", "loop error: " + ex.Message);
+
+                    await Task.Delay(250);
+                }
+            }
+        }
+
+        private async Task RunPublishLoop()
+        {
+            while (running)
+            {
+                FastPingState snapshot = null;
+
+                try
+                {
+                    lock (sync)
+                    {
+                        // Recompute again on publish boundary so UI gets freshest blend.
+                        RecomputeState_NoLock();
+                        snapshot = state.Clone();
+                    }
+
+                    try
+                    {
+                        StateUpdated?.Invoke(snapshot);
+                    }
+                    catch
+                    {
+                    }
+
+                    await Task.Delay(PublishIntervalMs);
+                }
+                catch (Exception ex)
+                {
+                    if (running)
+                        Logger.Log("fastping", "publish loop error: " + ex.Message);
 
                     await Task.Delay(250);
                 }
@@ -263,10 +311,13 @@ namespace WTFnetApp
             }
 
             UpdateJitter_NoLock(target, sample);
+
+            // Update loss before baseline quality decisions.
+            target.LossRate = ComputeLossRate_NoLock(target);
+
             UpdateBaseline_NoLock(target);
             UpdateBadQualityRate_NoLock(target);
 
-            target.LossRate = ComputeLossRate_NoLock(target);
             target.Confidence = ComputeConfidence_NoLock(target);
         }
 
@@ -275,9 +326,8 @@ namespace WTFnetApp
             target.ConsecutiveMisses++;
             PushOutcome_NoLock(target, false);
 
-            UpdateBadQualityRate_NoLock(target);
-
             target.LossRate = ComputeLossRate_NoLock(target);
+            UpdateBadQualityRate_NoLock(target);
             target.Confidence = ComputeConfidence_NoLock(target);
         }
 
@@ -347,6 +397,8 @@ namespace WTFnetApp
             int bad = 0;
             int total = 0;
 
+            double reference = target.BaselinePingMs > 0 ? target.BaselinePingMs : target.StablePingMs;
+
             for (int i = 0; i < target.SuccessCount; i++)
             {
                 double value = target.SuccessRtts[i];
@@ -355,7 +407,6 @@ namespace WTFnetApp
 
                 total++;
 
-                double reference = target.BaselinePingMs > 0 ? target.BaselinePingMs : target.StablePingMs;
                 bool badSuccess =
                     reference > 0 &&
                     (value > reference + 25.0 || value > reference * 1.45);
@@ -371,8 +422,11 @@ namespace WTFnetApp
                     misses++;
             }
 
+            // Misses are always bad outcomes.
             bad += misses;
-            total += target.OutcomeCount - target.SuccessCount + misses;
+
+            // Add only the missing outcomes that were not in successRtts.
+            total += (target.OutcomeCount - target.SuccessCount);
 
             if (total <= 0)
                 target.BadQualityRate = 0;
@@ -566,56 +620,6 @@ namespace WTFnetApp
             next.HealthState = ComputeHealthState_NoLock(next);
 
             state = next;
-
-            bool shouldPublish = HasMeaningfulChange(lastPublishedState, next);
-
-            if (shouldPublish)
-            {
-                lastPublishedState = next.Clone();
-
-                try
-                {
-                    StateUpdated?.Invoke(next.Clone());
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private bool HasMeaningfulChange(FastPingState previous, FastPingState next)
-        {
-            if (previous == null || next == null)
-                return true;
-
-            if (Math.Abs(previous.DisplayedPingMs - next.DisplayedPingMs) > 1.0)
-                return true;
-
-            if (previous.HealthState != next.HealthState)
-                return true;
-
-            if (previous.SpikeDetected != next.SpikeDetected)
-                return true;
-
-            if (previous.IsStale != next.IsStale)
-                return true;
-
-            if (Math.Abs(previous.BaselinePingMs - next.BaselinePingMs) > 2.0)
-                return true;
-
-            if (Math.Abs(previous.JitterMs - next.JitterMs) > 2.0)
-                return true;
-
-            if (Math.Abs(previous.Confidence - next.Confidence) > 0.05)
-                return true;
-
-            if (!string.Equals(previous.PrimaryTarget, next.PrimaryTarget, StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            if (!string.Equals(previous.SecondaryTarget, next.SecondaryTarget, StringComparison.OrdinalIgnoreCase))
-                return true;
-
-            return false;
         }
 
         private bool IsSpike_NoLock(double instant, double stable, double floor)
@@ -822,8 +826,24 @@ namespace WTFnetApp
             {
                 if (tunnel > 0)
                     return tunnel;
+                if (instant > 0)
+                    return instant;
                 if (stable > 0)
                     return stable;
+                return -1;
+            }
+
+            if (tunnel <= 0)
+            {
+                if (instant > 0 && stable > 0)
+                    return (0.70 * instant) + (0.30 * stable);
+
+                if (instant > 0)
+                    return instant;
+
+                if (stable > 0)
+                    return stable;
+
                 return -1;
             }
 

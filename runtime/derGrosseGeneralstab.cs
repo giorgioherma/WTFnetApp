@@ -149,6 +149,8 @@ namespace WTFnetApp
                 UnifiedNetworkState unifiedState =
                     networkSignalResolver.Resolve(snapshot, fastPingState);
 
+                unifiedState.RefreshDisplayState(nat != null ? nat.CurrentNatState : NatState.Unknown);
+
                 lastUnifiedState = unifiedState;
 
                 MetricsSnapshot effectiveSnapshot = snapshot;
@@ -156,7 +158,11 @@ namespace WTFnetApp
                 if (effectiveSnapshot == null || !unifiedState.SpeedifyTelemetryFresh)
                     effectiveSnapshot = BuildFallbackSnapshot(unifiedState);
 
-                networkMetricsEngine.Update(effectiveSnapshot, unifiedState, nat.CurrentNatState);
+                networkMetricsEngine.Update(
+                    effectiveSnapshot,
+                    unifiedState,
+                    nat != null ? nat.CurrentNatState : NatState.Unknown);
+
                 overlay?.RenderOverlay(networkMetricsEngine.GetState().Overlay);
             }
         }
@@ -336,6 +342,16 @@ namespace WTFnetApp
             catch (Exception ex)
             {
                 Logger.Log("engine", "speedify stop error: " + ex.Message);
+            }
+
+            try
+            {
+                if (nat != null)
+                    nat.StopNatKeepAlive();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("engine", "nat stop error: " + ex.Message);
             }
 
             try

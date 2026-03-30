@@ -10,24 +10,41 @@ namespace WTFnetApp
     public sealed class UIOverlay : Form
     {
         private string pingText = "-- ms";
+        private string jitterText = "J --";
         private string modeText = "NAT";
 
         private Color pingColor = Color.LimeGreen;
+        private Color jitterColor = Color.DeepSkyBlue;
         private Color modeColor = Color.Gold;
 
-        private string lastPingText = string.Empty;
-        private string lastModeText = string.Empty;
-        private Color lastPingColor = Color.Empty;
-        private Color lastModeColor = Color.Empty;
+        private string pendingPingText = "-- ms";
+        private string pendingJitterText = "J --";
+        private string pendingModeText = "NAT";
+
+        private Color pendingPingColor = Color.LimeGreen;
+        private Color pendingJitterColor = Color.DeepSkyBlue;
+        private Color pendingModeColor = Color.Gold;
+
+        private string lastPaintedPingText = string.Empty;
+        private string lastPaintedJitterText = string.Empty;
+        private string lastPaintedModeText = string.Empty;
+
+        private Color lastPaintedPingColor = Color.Empty;
+        private Color lastPaintedJitterColor = Color.Empty;
+        private Color lastPaintedModeColor = Color.Empty;
+
+        private readonly object stateLock = new object();
 
         private readonly Font pingFont;
-        private readonly Font modeFont;
+        private readonly Font infoFont;
+        private readonly Timer renderTimer;
 
         private const int OverlayWidth = 180;
-        private const int OverlayHeight = 72;
+        private const int OverlayHeight = 92;
         private const int CornerRadius = 14;
 
-        // lower = more transparent
+        private const int RenderIntervalMs = 250;
+
         private const int PanelAlpha = 120;
         private const int ShineAlpha = 18;
         private const int BorderAlpha = 90;
@@ -49,7 +66,7 @@ namespace WTFnetApp
             DoubleBuffered = true;
 
             pingFont = new Font("Segoe UI", 17f, FontStyle.Bold, GraphicsUnit.Point);
-            modeFont = new Font("Segoe UI", 10.5f, FontStyle.Bold, GraphicsUnit.Point);
+            infoFont = new Font("Segoe UI", 10.25f, FontStyle.Bold, GraphicsUnit.Point);
 
             SetStyle(
                 ControlStyles.AllPaintingInWmPaint |
@@ -57,6 +74,10 @@ namespace WTFnetApp
                 ControlStyles.OptimizedDoubleBuffer |
                 ControlStyles.ResizeRedraw,
                 true);
+
+            renderTimer = new Timer();
+            renderTimer.Interval = RenderIntervalMs;
+            renderTimer.Tick += RenderTimer_Tick;
 
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
         }
@@ -85,14 +106,20 @@ namespace WTFnetApp
         {
             base.OnHandleCreated(e);
             ApplyTopMost();
-            RenderNow();
+            RenderNow(force: true);
+
+            if (!DesignMode)
+                renderTimer.Start();
         }
 
         protected override void OnShown(EventArgs e)
         {
             base.OnShown(e);
             ApplyTopMost();
-            RenderNow();
+            RenderNow(force: true);
+
+            if (!renderTimer.Enabled)
+                renderTimer.Start();
         }
 
         protected override void OnActivated(EventArgs e)
@@ -115,6 +142,14 @@ namespace WTFnetApp
             base.WndProc(ref m);
         }
 
+        private void RenderTimer_Tick(object sender, EventArgs e)
+        {
+            if (IsDisposed || !IsHandleCreated)
+                return;
+
+            RenderNow(force: false);
+        }
+
         private void OnDisplaySettingsChanged(object sender, EventArgs e)
         {
             RefreshTopMost();
@@ -122,51 +157,42 @@ namespace WTFnetApp
 
         public void RenderOverlay(OverlayRenderState render)
         {
-            if (IsDisposed)
-                return;
-
-            if (InvokeRequired)
-            {
-                BeginInvoke(new Action(() => RenderOverlay(render)));
-                return;
-            }
-
-            if (render == null)
+            if (render == null || IsDisposed)
                 return;
 
             string newPingText = render.PingText;
+            string newJitterText = render.JitterText;
             string newModeText = render.NatText;
+
             Color newPingColor = render.PingColor;
+            Color newJitterColor = render.JitterColor;
             Color newModeColor = render.NatColor;
 
             if (string.IsNullOrWhiteSpace(newPingText))
                 newPingText = "-- ms";
 
+            if (string.IsNullOrWhiteSpace(newJitterText))
+                newJitterText = "J --";
+
             if (string.IsNullOrWhiteSpace(newModeText))
                 newModeText = "NAT";
 
-            if (newPingText == lastPingText &&
-                newModeText == lastModeText &&
-                newPingColor == lastPingColor &&
-                newModeColor == lastModeColor)
+            lock (stateLock)
             {
-                return;
+                pendingPingText = newPingText;
+                pendingJitterText = newJitterText;
+                pendingModeText = newModeText;
+
+                pendingPingColor = newPingColor;
+                pendingJitterColor = newJitterColor;
+                pendingModeColor = newModeColor;
             }
 
-            pingText = newPingText;
-            modeText = newModeText;
-            pingColor = newPingColor;
-            modeColor = newModeColor;
-
-            lastPingText = newPingText;
-            lastModeText = newModeText;
-            lastPingColor = newPingColor;
-            lastModeColor = newModeColor;
+            if (InvokeRequired || !IsHandleCreated)
+                return;
 
             if (!Visible)
                 Show();
-
-            RenderNow();
         }
 
         public void SetOverlayPosition(int x, int y)
@@ -182,7 +208,7 @@ namespace WTFnetApp
 
             Left = x;
             Top = y;
-            RenderNow();
+            RenderNow(force: true);
         }
 
         public void RefreshTopMost()
@@ -197,13 +223,55 @@ namespace WTFnetApp
             }
 
             ApplyTopMost();
-            RenderNow();
+            RenderNow(force: true);
         }
 
-        private void RenderNow()
+        private void RenderNow(bool force)
         {
             if (!IsHandleCreated)
                 return;
+
+            string nextPingText;
+            string nextJitterText;
+            string nextModeText;
+
+            Color nextPingColor;
+            Color nextJitterColor;
+            Color nextModeColor;
+
+            lock (stateLock)
+            {
+                nextPingText = pendingPingText;
+                nextJitterText = pendingJitterText;
+                nextModeText = pendingModeText;
+
+                nextPingColor = pendingPingColor;
+                nextJitterColor = pendingJitterColor;
+                nextModeColor = pendingModeColor;
+            }
+
+            bool changed =
+                force ||
+                nextPingText != lastPaintedPingText ||
+                nextJitterText != lastPaintedJitterText ||
+                nextModeText != lastPaintedModeText ||
+                nextPingColor != lastPaintedPingColor ||
+                nextJitterColor != lastPaintedJitterColor ||
+                nextModeColor != lastPaintedModeColor;
+
+            if (!changed)
+                return;
+
+            pingText = nextPingText;
+            jitterText = nextJitterText;
+            modeText = nextModeText;
+
+            pingColor = nextPingColor;
+            jitterColor = nextJitterColor;
+            modeColor = nextModeColor;
+
+            if (!Visible)
+                Show();
 
             using (Bitmap bitmap = new Bitmap(OverlayWidth, OverlayHeight, PixelFormat.Format32bppArgb))
             using (Graphics g = Graphics.FromImage(bitmap))
@@ -221,7 +289,7 @@ namespace WTFnetApp
                     using (SolidBrush bgBrush = new SolidBrush(Color.FromArgb(PanelAlpha, 34, 34, 40)))
                         g.FillPath(bgBrush, panelPath);
 
-                    Rectangle shineRect = new Rectangle(1, 1, OverlayWidth - 3, (OverlayHeight / 2) - 2);
+                    Rectangle shineRect = new Rectangle(1, 1, OverlayWidth - 3, (OverlayHeight / 2) - 4);
                     using (GraphicsPath shinePath = CreateRoundedRect(shineRect, CornerRadius - 2))
                     using (SolidBrush shineBrush = new SolidBrush(Color.FromArgb(ShineAlpha, 255, 255, 255)))
                         g.FillPath(shineBrush, shinePath);
@@ -232,17 +300,29 @@ namespace WTFnetApp
 
                 using (SolidBrush shadowBrush = new SolidBrush(Color.FromArgb(ShadowAlpha, 0, 0, 0)))
                 using (SolidBrush pingBrush = new SolidBrush(pingColor))
+                using (SolidBrush jitterBrush = new SolidBrush(jitterColor))
                 using (SolidBrush modeBrush = new SolidBrush(modeColor))
                 {
-                    g.DrawString(pingText, pingFont, shadowBrush, 14f, 9f);
-                    g.DrawString(pingText, pingFont, pingBrush, 13f, 8f);
+                    g.DrawString(pingText, pingFont, shadowBrush, 14f, 7f);
+                    g.DrawString(pingText, pingFont, pingBrush, 13f, 6f);
 
-                    g.DrawString(modeText, modeFont, shadowBrush, 15f, 44f);
-                    g.DrawString(modeText, modeFont, modeBrush, 14f, 43f);
+                    g.DrawString(jitterText, infoFont, shadowBrush, 15f, 38f);
+                    g.DrawString(jitterText, infoFont, jitterBrush, 14f, 37f);
+
+                    g.DrawString(modeText, infoFont, shadowBrush, 15f, 59f);
+                    g.DrawString(modeText, infoFont, modeBrush, 14f, 58f);
                 }
 
                 SetBitmap(bitmap);
             }
+
+            lastPaintedPingText = pingText;
+            lastPaintedJitterText = jitterText;
+            lastPaintedModeText = modeText;
+
+            lastPaintedPingColor = pingColor;
+            lastPaintedJitterColor = jitterColor;
+            lastPaintedModeColor = modeColor;
 
             ApplyTopMost();
         }
@@ -334,11 +414,18 @@ namespace WTFnetApp
             {
                 Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
 
+                if (renderTimer != null)
+                {
+                    renderTimer.Stop();
+                    renderTimer.Tick -= RenderTimer_Tick;
+                    renderTimer.Dispose();
+                }
+
                 if (pingFont != null)
                     pingFont.Dispose();
 
-                if (modeFont != null)
-                    modeFont.Dispose();
+                if (infoFont != null)
+                    infoFont.Dispose();
             }
 
             base.Dispose(disposing);

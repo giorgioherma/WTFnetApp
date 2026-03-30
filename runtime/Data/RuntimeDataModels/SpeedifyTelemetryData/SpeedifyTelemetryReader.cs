@@ -23,6 +23,11 @@ namespace WTFnetApp
         private readonly Action<MetricsSnapshot> onSnapshot;
         private readonly SpeedifyMetricsParser parser = new SpeedifyMetricsParser();
 
+        public SpeedifyStructuredState CurrentStructuredState
+        {
+            get { return parser.CurrentStructuredState; }
+        }
+
         public SpeedifyTelemetryReader(Action<MetricsSnapshot> handler)
         {
             onSnapshot = handler;
@@ -102,7 +107,15 @@ namespace WTFnetApp
 
                 Logger.Log("speedify", "websocket connected");
 
-                await SendRequests(ws, "request_referrer_data");
+                await SendRequests(
+                    ws,
+                    "request_referrer_data",
+                    "request_current_state",
+                    "request_networks",
+                    "request_connection_stats",
+                    "request_session_stats",
+                    "request_connected_server");
+
                 await ReceiveLoop(ws);
 
                 if (running)
@@ -195,12 +208,9 @@ namespace WTFnetApp
                         }
                     }
 
-                    if (eventName == "report_connection_stats")
-                    {
-                        MetricsSnapshot snap = parser.ParseConnectionStats(payloadJson);
-                        if (snap != null && onSnapshot != null)
-                            onSnapshot(snap);
-                    }
+                    MetricsSnapshot snap = parser.ParseEvent(eventName, payloadJson);
+                    if (snap != null && onSnapshot != null)
+                        onSnapshot(snap);
                 }
                 catch (Exception ex)
                 {

@@ -7,8 +7,7 @@ namespace WTFnetApp
     {
         None = 0,
         FastPing = 1,
-        Speedify = 2,
-        Hybrid = 3
+        Speedify = 2
     }
 
     public enum UnifiedNetworkHealthState
@@ -31,8 +30,7 @@ namespace WTFnetApp
         LocalRoute = 5,
         Tunnel = 6,
         Bonding = 7,
-        Congestion = 8,
-        Hybrid = 9
+        Congestion = 8
     }
 
     public enum UnifiedRecommendedAction
@@ -76,7 +74,6 @@ namespace WTFnetApp
         public double TotalBps = 0;
         public double Mos = -1;
 
-        // Derived / scored fields
         public double QualityScore = -1;
         public double StabilityScore = -1;
         public double ResponsivenessScore = -1;
@@ -109,6 +106,7 @@ namespace WTFnetApp
 
         public double LatencyMs = -1;
         public double JitterMs = -1;
+        public double JitterPressure = 0;
         public double BaselineLatencyMs = -1;
         public double FloorLatencyMs = -1;
         public double DisplayedPingMs = -1;
@@ -194,6 +192,17 @@ namespace WTFnetApp
         public List<UnifiedLinkState> Links = new List<UnifiedLinkState>();
 
         // =========================================================
+        // DISPLAY / PRESENTATION SEMANTICS
+        // =========================================================
+
+        public string DisplayPingText = "-- ms";
+        public string DisplayPingColorKey = "gray";
+        public string DisplayTunnelState = "Unknown";
+
+        public string DisplayNatText = "Unknown";
+        public string DisplayNatColorKey = "gray";
+
+        // =========================================================
         // COMBINED SCORES (computed elsewhere, stored here)
         // =========================================================
 
@@ -254,6 +263,113 @@ namespace WTFnetApp
         public bool HasLinkData
         {
             get { return Links != null && Links.Count > 0; }
+        }
+
+        public void RefreshDisplayState(NatState natState)
+        {
+            double ping = DisplayedPingMs > 0 ? DisplayedPingMs : LatencyMs;
+
+            DisplayPingText = FormatPingText(ping);
+            DisplayPingColorKey = GetPingColorKey(ping);
+            DisplayTunnelState = BuildTunnelState();
+
+            DisplayNatText = natState.ToString();
+            DisplayNatColorKey = GetNatColorKey(natState);
+        }
+
+        private string BuildTunnelState()
+        {
+            if (SourceKind == UnifiedNetworkSourceKind.FastPing)
+                return "No Tunnel";
+
+            if (TunnelConnected)
+                return "Tunnel OK";
+
+            if (HasSpeedify || SpeedifyAvailable)
+                return "Tunnel Down";
+
+            return "Unknown";
+        }
+
+        private string FormatPingText(double pingMs)
+        {
+            if (pingMs <= 0)
+                return "-- ms";
+
+            return ((int)Math.Round(pingMs)).ToString() + " ms";
+        }
+
+        private string GetPingColorKey(double pingMs)
+        {
+            if (SourceKind == UnifiedNetworkSourceKind.FastPing)
+            {
+                if (pingMs > 0)
+                {
+                    if (pingMs <= 50)
+                        return "green";
+
+                    if (pingMs <= 90)
+                        return "yellow";
+
+                    return "red";
+                }
+
+                return "gray";
+            }
+
+            if (IsStale || pingMs <= 0)
+                return "gray";
+
+            switch (HealthState)
+            {
+                case UnifiedNetworkHealthState.Critical:
+                    return "red";
+
+                case UnifiedNetworkHealthState.Warning:
+                    return "red";
+
+                case UnifiedNetworkHealthState.OffBaseline:
+                    return "yellow";
+
+                case UnifiedNetworkHealthState.Healthy:
+                    return "green";
+
+                case UnifiedNetworkHealthState.Stale:
+                    return "gray";
+
+                case UnifiedNetworkHealthState.Unknown:
+                default:
+                    break;
+            }
+
+            if (pingMs <= 50)
+                return "green";
+
+            if (pingMs <= 90)
+                return "yellow";
+
+            return "red";
+        }
+
+        private string GetNatColorKey(NatState natState)
+        {
+            switch (natState)
+            {
+                case NatState.Lost:
+                    return "red";
+
+                case NatState.Unstable:
+                    return "yellow";
+
+                case NatState.GracePeriod:
+                    return "gold";
+
+                case NatState.Stable:
+                    return "green";
+
+                default:
+                    return "gray";
+            }
         }
 
         public UnifiedNetworkState Clone()
