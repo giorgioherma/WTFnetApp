@@ -8,15 +8,27 @@ namespace WTFnetApp
     {
         private static readonly object lockObj = new object();
         private static readonly object deviationLockObj = new object();
+        private static readonly object rawFastPingLockObj = new object();
 
         private static string logFile = "wtfnet_log.txt";
         private static string deviationLogFile = "wtfnet_deviation_log.txt";
+        private static string rawFastPingLogFile = "wtfnet_fastping_raw.txt";
 
         private static DateTime lastAnalysisLog = DateTime.MinValue;
+
+        private static string lastAnalysisHealth = string.Empty;
+        private static string lastAnalysisNatColor = string.Empty;
+        private static bool lastAnalysisStale;
+        private static bool lastAnalysisSpike;
+        private static int lastAnalysisLossBucket = -1;
+        private static int lastAnalysisBadBucket = -1;
+        private static int lastAnalysisPingBucket = -1;
+        private static int lastAnalysisJitterBucket = -1;
 
         // =========================================================
         // SESSION START
         // =========================================================
+
         public static void StartSession()
         {
             WriteLine("");
@@ -33,9 +45,18 @@ namespace WTFnetApp
             WriteDeviationLine("============================================================");
         }
 
+        public static void StartFastPingRawSession()
+        {
+            WriteRawFastPingLine("");
+            WriteRawFastPingLine("============================================================");
+            WriteRawFastPingLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [fastping-raw] NEW SESSION");
+            WriteRawFastPingLine("============================================================");
+        }
+
         // =========================================================
         // OPTIONAL FILE NAME OVERRIDES
         // =========================================================
+
         public static void SetLogFile(string fileName)
         {
             if (string.IsNullOrWhiteSpace(fileName))
@@ -58,9 +79,21 @@ namespace WTFnetApp
             }
         }
 
+        public static void SetFastPingRawLogFile(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                return;
+
+            lock (rawFastPingLockObj)
+            {
+                rawFastPingLogFile = fileName;
+            }
+        }
+
         // =========================================================
         // BASIC LOG
         // =========================================================
+
         public static void Log(string category, string message)
         {
             string line =
@@ -69,9 +102,6 @@ namespace WTFnetApp
             WriteLine(line);
         }
 
-        // =========================================================
-        // CRITICAL EVENTS (disconnects, failures, etc.)
-        // =========================================================
         public static void LogCritical(string message)
         {
             string line =
@@ -83,6 +113,7 @@ namespace WTFnetApp
         // =========================================================
         // DEVIATION LOG
         // =========================================================
+
         public static void LogDeviation(string message)
         {
             string line =
@@ -100,55 +131,92 @@ namespace WTFnetApp
         }
 
         // =========================================================
-        // ANALYSIS LOGGING (throttled)
+        // RAW FASTPING LOG
         // =========================================================
-        public static void LogAnalysis(MetricsSnapshot s)
+
+        public static void LogFastPingRaw(string message)
+        {
+            string line =
+                $"{DateTime.Now:HH:mm:ss.fff} {message}";
+
+            WriteRawFastPingLine(line);
+        }
+
+        // =========================================================
+        // ANALYSIS LOGGING (compact + change-based + heartbeat)
+        // =========================================================
+
+        public static void LogAnalysis(UnifiedNetworkState s)
         {
             if (s == null)
                 return;
 
-            if ((DateTime.Now - lastAnalysisLog).TotalMilliseconds < 1000)
-                return;
+            DateTime now = DateTime.Now;
 
-            lastAnalysisLog = DateTime.Now;
+            double shownPing = s.DisplayedPingMs > 0 ? s.DisplayedPingMs : s.LatencyMs;
 
-            string ts = $"[{s.TimeUtc:yyyy-MM-dd HH:mm:ss}]";
+            lock (lockObj)
+            {
+                string health = SafeText(s.HealthState);
+                string natColor = SafeText(s.DisplayNatColorKey);
 
-            string columns =
-                $"LAT {s.LatencyMs,5:F1}ms | " +
-                $"JIT {s.Jitter,4:F1} | " +
-                $"Q {s.QueueDelayMs,5:F1} | " +
-                $"DRIFT {s.LatencyDrift,6:+0.0;-0.0;0.0} | " +
-                $"SCORE {s.CongestionScore,4:F1} | " +
-                $"LP {s.LagPressure,4:F2} | " +
-                $"AGG {s.AggressionFactor,4:F2} | " +
-                $"EVT {s.LagEventType} | " +
-                $"NET {s.NetworkState}";
+                bool stale = s.IsStale;
+                bool spike = s.SpikeDetected;
 
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] {ts}");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] {columns}");
+                int lossBucket = GetRateBucket(s.LossRate);
+                int badBucket = GetRateBucket(s.BadQualityRate);
+                int pingBucket = GetPingBucket(shownPing);
+                int jitterBucket = GetJitterBucket(s.JitterMs);
 
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] ╔════════════════ NETWORK ANALYSIS ════════════════╗");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] LATENCY       {s.LatencyMs,7:F1} ms");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] JITTER        {s.Jitter,7:F1} ms");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] DRIFT         {s.LatencyDrift,7:+0.0;-0.0;0.0} ms");
+                bool changed =
+                    health != lastAnalysisHealth ||
+                    natColor != lastAnalysisNatColor ||
+                    stale != lastAnalysisStale ||
+                    spike != lastAnalysisSpike ||
+                    lossBucket != lastAnalysisLossBucket ||
+                    badBucket != lastAnalysisBadBucket ||
+                    pingBucket != lastAnalysisPingBucket ||
+                    jitterBucket != lastAnalysisJitterBucket;
 
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] ");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] QUEUE DELAY   {s.QueueDelayMs,7:F1}");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] QUEUE GROWTH  {s.QueueGrowth,7:+0.0;-0.0;0.0}");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] QUEUE ACCEL   {s.QueueAcceleration,7:+0.0;-0.0;0.0}");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] QUEUE PRESS   {s.QueuePressure,7:F1}");
+                bool heartbeatDue =
+                    (now - lastAnalysisLog).TotalSeconds >= 15;
 
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] ");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] SCORE         {s.CongestionScore,7:F1}");
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] SOURCE        {s.IssueSource}");
+                bool tooSoon =
+                    (now - lastAnalysisLog).TotalMilliseconds < 1200;
 
-            WriteLine($"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [analysis] ╚══════════════════════════════════════════════════╝");
+                if ((!changed && !heartbeatDue) || (tooSoon && !heartbeatDue))
+                    return;
+
+                lastAnalysisLog = now;
+                lastAnalysisHealth = health;
+                lastAnalysisNatColor = natColor;
+                lastAnalysisStale = stale;
+                lastAnalysisSpike = spike;
+                lastAnalysisLossBucket = lossBucket;
+                lastAnalysisBadBucket = badBucket;
+                lastAnalysisPingBucket = pingBucket;
+                lastAnalysisJitterBucket = jitterBucket;
+            }
+
+            string line =
+                $"{now:HH:mm:ss} [a] " +
+                $"{ShortHealth(s.HealthState)} " +
+                $"p{ShortMs(shownPing)} " +
+                $"j{ShortMs(s.JitterMs)} " +
+                $"l{ShortPct(s.LossRate)} " +
+                $"b{ShortPct(s.BadQualityRate)} " +
+                $"c{Short01Compact(s.Confidence)} " +
+                $"{(s.SpikeDetected ? "!" : "-")}" +
+                $"{(s.IsStale ? "S" : "-")}" +
+                $"{ShortNat(s.DisplayNatColorKey)}";
+
+            WriteLine(line);
         }
 
         // =========================================================
         // INTERNAL WRITE
         // =========================================================
+
         private static void WriteLine(string line)
         {
             lock (lockObj)
@@ -179,6 +247,186 @@ namespace WTFnetApp
             }
 
             Debug.WriteLine(line);
+        }
+
+        private static void WriteRawFastPingLine(string line)
+        {
+            lock (rawFastPingLockObj)
+            {
+                try
+                {
+                    File.AppendAllText(rawFastPingLogFile, line + Environment.NewLine);
+                }
+                catch
+                {
+                }
+            }
+
+            Debug.WriteLine(line);
+        }
+
+        // =========================================================
+        // HELPERS
+        // =========================================================
+
+        private static int GetRateBucket(double value)
+        {
+            if (value < 0)
+                return -1;
+
+            if (value < 0.10)
+                return 0;
+
+            if (value < 0.20)
+                return 1;
+
+            if (value < 0.35)
+                return 2;
+
+            return 3;
+        }
+
+        private static int GetPingBucket(double value)
+        {
+            if (value <= 0)
+                return -1;
+
+            if (value < 25)
+                return 0;
+
+            if (value < 35)
+                return 1;
+
+            if (value < 50)
+                return 2;
+
+            if (value < 80)
+                return 3;
+
+            return 4;
+        }
+
+        private static int GetJitterBucket(double value)
+        {
+            if (value < 0)
+                return -1;
+
+            if (value < 5)
+                return 0;
+
+            if (value < 10)
+                return 1;
+
+            if (value < 18)
+                return 2;
+
+            return 3;
+        }
+
+        private static string FormatMs(double value)
+        {
+            if (value <= 0)
+                return "-1";
+
+            return value.ToString("0.0") + "ms";
+        }
+
+        private static string FormatPct(double value)
+        {
+            if (value < 0)
+                return "-1";
+
+            return (value * 100.0).ToString("0.0") + "%";
+        }
+
+        private static string Format01(double value)
+        {
+            if (value < 0)
+                return "-1";
+
+            return value.ToString("0.00");
+        }
+
+        private static string SafeText(object value)
+        {
+            if (value == null)
+                return "-";
+
+            string s = value.ToString();
+            return string.IsNullOrWhiteSpace(s) ? "-" : s;
+        }
+
+        private static string ShortHealth(object h)
+        {
+            string s = h?.ToString() ?? "-";
+
+            if (s.StartsWith("Healthy", StringComparison.OrdinalIgnoreCase)) return "OK";
+            if (s.StartsWith("OffBaseline", StringComparison.OrdinalIgnoreCase)) return "OB";
+            if (s.StartsWith("Warning", StringComparison.OrdinalIgnoreCase)) return "WRN";
+            if (s.StartsWith("Critical", StringComparison.OrdinalIgnoreCase)) return "CRIT";
+            if (s.StartsWith("Stale", StringComparison.OrdinalIgnoreCase)) return "STAL";
+
+            return s.Length > 4 ? s.Substring(0, 4).ToUpperInvariant() : s.ToUpperInvariant();
+        }
+
+        private static string ShortMs(double v)
+        {
+            if (v <= 0)
+                return "--";
+
+            return ((int)Math.Round(v)).ToString();
+        }
+
+        private static string ShortPct(double v)
+        {
+            if (v < 0)
+                return "--";
+
+            return ((int)Math.Round(v * 100)).ToString();
+        }
+
+        private static string Short01(double v)
+        {
+            if (v < 0)
+                return "--";
+
+            return v.ToString("0.00");
+        }
+
+        private static string Short01Compact(double v)
+        {
+            if (v < 0)
+                return "--";
+
+            return ((int)Math.Round(v * 100)).ToString();
+        }
+
+        private static string ShortNat(object color)
+        {
+            string c = color?.ToString()?.ToLowerInvariant();
+
+            if (string.IsNullOrWhiteSpace(c))
+                return "-";
+
+            switch (c)
+            {
+                case "green":
+                    return "G";
+
+                case "gold":
+                case "yellow":
+                    return "Y";
+
+                case "red":
+                    return "R";
+
+                case "gray":
+                case "grey":
+                    return "X";
+
+                default:
+                    return "?";
+            }
         }
     }
 }

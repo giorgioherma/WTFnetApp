@@ -11,18 +11,18 @@ namespace WTFnetApp
     {
         private string pingText = "-- ms";
         private string jitterText = "J --";
-        private string modeText = "NAT";
+        private string modeText = "NAT: --";
 
         private Color pingColor = Color.LimeGreen;
-        private Color jitterColor = Color.DeepSkyBlue;
+        private Color jitterColor = Color.Gray;
         private Color modeColor = Color.Gold;
 
         private string pendingPingText = "-- ms";
         private string pendingJitterText = "J --";
-        private string pendingModeText = "NAT";
+        private string pendingModeText = "NAT: --";
 
         private Color pendingPingColor = Color.LimeGreen;
-        private Color pendingJitterColor = Color.DeepSkyBlue;
+        private Color pendingJitterColor = Color.Gray;
         private Color pendingModeColor = Color.Gold;
 
         private string lastPaintedPingText = string.Empty;
@@ -155,27 +155,29 @@ namespace WTFnetApp
             RefreshTopMost();
         }
 
-        public void RenderOverlay(OverlayRenderState render)
+        public void RenderUnified(UnifiedNetworkState unified)
         {
-            if (render == null || IsDisposed)
+            if (unified == null || IsDisposed)
                 return;
 
-            string newPingText = render.PingText;
-            string newJitterText = render.JitterText;
-            string newModeText = render.NatText;
+            string newPingText = string.IsNullOrWhiteSpace(unified.DisplayPingText)
+                ? "-- ms"
+                : unified.DisplayPingText.Trim();
 
-            Color newPingColor = render.PingColor;
-            Color newJitterColor = render.JitterColor;
-            Color newModeColor = render.NatColor;
+            string newJitterText = string.IsNullOrWhiteSpace(unified.DisplayJitterText)
+                ? "J --"
+                : unified.DisplayJitterText.Trim();
 
-            if (string.IsNullOrWhiteSpace(newPingText))
-                newPingText = "-- ms";
+            string newModeText = string.IsNullOrWhiteSpace(unified.DisplayNatText)
+                ? "NAT: --"
+                : unified.DisplayNatText.Trim();
 
-            if (string.IsNullOrWhiteSpace(newJitterText))
-                newJitterText = "J --";
+            if (!newModeText.StartsWith("NAT:", StringComparison.OrdinalIgnoreCase))
+                newModeText = "NAT: " + newModeText;
 
-            if (string.IsNullOrWhiteSpace(newModeText))
-                newModeText = "NAT";
+            Color newPingColor = GetColorFromKey(unified.DisplayPingColorKey);
+            Color newJitterColor = GetColorFromKey(unified.DisplayJitterColorKey);
+            Color newModeColor = GetColorFromKey(unified.DisplayNatColorKey);
 
             lock (stateLock)
             {
@@ -340,6 +342,28 @@ namespace WTFnetApp
                 Width,
                 Height,
                 NativeMethods.SWP_NOACTIVATE);
+        }
+
+        private static Color GetColorFromKey(string key)
+        {
+            switch ((key ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "green":
+                    return Color.LimeGreen;
+
+                case "yellow":
+                    return Color.Orange;
+
+                case "gold":
+                    return Color.Gold;
+
+                case "red":
+                    return Color.Red;
+
+                case "gray":
+                default:
+                    return Color.Gray;
+            }
         }
 
         private static GraphicsPath CreateRoundedRect(Rectangle bounds, int radius)

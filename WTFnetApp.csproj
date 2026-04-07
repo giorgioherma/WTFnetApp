@@ -76,11 +76,14 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="legacy\NetworkMetricsEngine.cs" />
+    <Compile Include="runtime\Data\DataEngine\NetworkMetricsCalculator.cs" />
+    <Compile Include="runtime\Data\DataEngine\NetworkQualityEvaluator.cs" />
     <Compile Include="runtime\Data\DataEngine\NetworkSignalResolver.cs" />
     <Compile Include="runtime\Data\DataEngine\FastPingDeviationTracker.cs" />
-    <Compile Include="runtime\Data\DataEngine\DataSet.cs">
+    <None Include="legacy\DataSet.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
+    </None>
     <Compile Include="runtime\derGrosseGeneralstab.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
@@ -88,9 +91,6 @@
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <Compile Include="runtime\Data\RuntimeDataModels\SpeedifyTelemetryData\MetricsSnapshot.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Data\DataEngine\NetworkMetricsEngine.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\UnifiedNetworkState.cs" />
@@ -150,7 +150,7 @@
       <SubType>Form</SubType>
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="runtime\Data\RuntimeDataModels\WtfFastPingTelemetryData\WtfFastPing.cs">
+    <Compile Include="runtime\Data\RuntimeDataModels\WtfFastPingData\WtfFastPing.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <None Include="legacy\Form1.cs" />

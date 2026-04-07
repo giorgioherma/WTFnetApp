@@ -242,7 +242,9 @@ namespace WTFnetApp
 
         private TrackerState ClassifyState(FastPingState state)
         {
-            if (state.IsStale || state.HealthState == FastPingHealthState.Stale)
+            bool isStale = state.IsStale || state.HealthState == FastPingHealthState.Stale;
+
+            if (isStale)
                 return TrackerState.Critical;
 
             double baseline = state.BaselinePingMs > 0 ? state.BaselinePingMs : state.StablePingMs;
@@ -300,6 +302,7 @@ namespace WTFnetApp
 
         private string BuildMetricsTail(FastPingState state)
         {
+            bool isStale = state.IsStale || state.HealthState == FastPingHealthState.Stale;
             double baseline = state.BaselinePingMs > 0 ? state.BaselinePingMs : state.StablePingMs;
             double delta = (baseline > 0 && state.InstantPingMs > 0) ? state.InstantPingMs - baseline : 0;
 
@@ -314,7 +317,7 @@ namespace WTFnetApp
                 "loss=" + FormatPct(state.LossRate) + " | " +
                 "bad=" + FormatPct(state.BadQualityRate) + " | " +
                 "spike=" + (state.SpikeDetected ? "1" : "0") + " | " +
-                "stale=" + (state.IsStale ? "1" : "0") + " | " +
+                "stale=" + (isStale ? "1" : "0") + " | " +
                 "div=" + FormatMs(state.PrimarySecondaryDivergenceMs) + " | " +
                 "health=" + state.HealthState.ToString().ToLowerInvariant() + " | " +
                 "primary=" + SafeText(state.PrimaryTarget) + " | " +
@@ -438,7 +441,7 @@ namespace WTFnetApp
                 if (state.SpikeDetected)
                     SpikeCount++;
 
-                if (state.IsStale)
+                if (state.IsStale || state.HealthState == FastPingHealthState.Stale)
                     StaleCount++;
 
                 AvgInstantMs = instantSum / sampleCount;

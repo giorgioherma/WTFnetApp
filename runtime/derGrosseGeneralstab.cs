@@ -13,18 +13,41 @@ namespace WTFnetApp
 
         private UIOverlay overlay;
         private NatKeepAlive nat;
-        private readonly NetworkMetricsEngine networkMetricsEngine = new NetworkMetricsEngine();
         private SpeedifyTelemetryReader speedifyReader;
 
         private readonly WtfFastPing fastPing = new WtfFastPing();
         private readonly FastPingDeviationTracker fastPingDeviationTracker = new FastPingDeviationTracker();
         private readonly NetworkSignalResolver networkSignalResolver = new NetworkSignalResolver();
 
-        // Optional / legacy-ish pieces kept around for now
+        // =========================
+        // CURRENT STATE CACHE
+        // =========================
+
         private MetricsSnapshot lastSnapshot;
         private UnifiedNetworkState lastUnifiedState;
 
         private readonly object publishSync = new object();
+
+        // =========================
+        // FASTPING TARGET ORCHESTRATION
+        // =========================
+
+        private string lastFastPingPrimaryTarget;
+        private string lastFastPingSecondaryTarget;
+
+        private string lastValidTunnelProbeTarget;
+        private DateTime lastValidTunnelProbeTargetUtc = DateTime.MinValue;
+
+        private const int TunnelProbeTargetGraceSeconds = 8;
+
+        private ProbeTargetMode currentProbeTargetMode = ProbeTargetMode.Unknown;
+
+        private enum ProbeTargetMode
+        {
+            Unknown = 0,
+            ExternalOnly = 1,
+            TunnelAware = 2
+        }
 
         // =========================
         // CONSTRUCTOR
@@ -67,6 +90,11 @@ namespace WTFnetApp
         private void InitializeFastPing()
         {
             fastPing.StateUpdated += OnFastPingStateUpdated;
+
+            // Safe startup defaults even before Speedify gives anything useful.
+            UpdateFastPingTargetsIfChanged("1.1.1.1", "8.8.8.8");
+            LogProbeModeIfChanged(ProbeTargetMode.ExternalOnly, "startup default");
+
             fastPing.Start();
         }
 
@@ -105,24 +133,8 @@ namespace WTFnetApp
 
                 lastSnapshot = snapshot;
 
-                string primaryTarget = null;
-
-                if (!string.IsNullOrWhiteSpace(snapshot.ConnectedServerPublicIp))
-                    primaryTarget = snapshot.ConnectedServerPublicIp;
-                else if (!string.IsNullOrWhiteSpace(snapshot.PrimaryRemoteIp))
-                    primaryTarget = snapshot.PrimaryRemoteIp;
-                else if (!string.IsNullOrWhiteSpace(snapshot.SpeedifyRemoteIp))
-                    primaryTarget = snapshot.SpeedifyRemoteIp;
-
-                if (!string.IsNullOrWhiteSpace(primaryTarget))
-                    fastPing.UpdateTargets(primaryTarget, "1.1.1.1");
-
-                if (snapshot.AggregateLatencyMs > 0)
-                    fastPing.UpdateTunnelLatency(snapshot.AggregateLatencyMs);
-                else if (snapshot.LatencyMs > 0)
-                    fastPing.UpdateTunnelLatency(snapshot.LatencyMs);
-                else
-                    fastPing.UpdateTunnelLatency(-1);
+                UpdateFastPingTargetsFromSnapshot(snapshot);
+                UpdateFastPingTunnelLatency(snapshot);
 
                 FastPingState fastPingState = fastPing.GetState();
 
@@ -146,71 +158,195 @@ namespace WTFnetApp
 
             lock (publishSync)
             {
-                UnifiedNetworkState unifiedState =
-                    networkSignalResolver.Resolve(snapshot, fastPingState);
+                NatState natState = nat != null ? nat.CurrentNatState : NatState.Unknown;
 
-                unifiedState.RefreshDisplayState(nat != null ? nat.CurrentNatState : NatState.Unknown);
+                UnifiedNetworkState unifiedState =
+                    networkSignalResolver.Resolve(snapshot, fastPingState, natState);
 
                 lastUnifiedState = unifiedState;
 
-                MetricsSnapshot effectiveSnapshot = snapshot;
+                overlay?.RenderUnified(unifiedState);
 
-                if (effectiveSnapshot == null || !unifiedState.SpeedifyTelemetryFresh)
-                    effectiveSnapshot = BuildFallbackSnapshot(unifiedState);
-
-                networkMetricsEngine.Update(
-                    effectiveSnapshot,
-                    unifiedState,
-                    nat != null ? nat.CurrentNatState : NatState.Unknown);
-
-                overlay?.RenderOverlay(networkMetricsEngine.GetState().Overlay);
+                // Optional but useful if you want unified heartbeat logging.
+                Logger.LogAnalysis(unifiedState);
             }
         }
 
-        private MetricsSnapshot BuildFallbackSnapshot(UnifiedNetworkState unified)
+        // =========================
+        // FASTPING TARGET MANAGEMENT
+        // =========================
+
+        private void UpdateFastPingTargetsFromSnapshot(MetricsSnapshot snapshot)
         {
-            MetricsSnapshot snapshot = new MetricsSnapshot();
+            if (snapshot == null)
+                return;
 
-            snapshot.TimeUtc = DateTime.UtcNow;
+            string freshTunnelTarget = ChooseBestTunnelProbeTarget(snapshot);
 
-            snapshot.TunnelConnected = unified.TunnelConnected;
-            snapshot.ActiveConnectionCount = unified.ActiveConnectionCount;
-            snapshot.BackupConnectionCount = unified.BackupConnectionCount;
+            bool tunnelConnected = snapshot.TunnelConnected;
+            bool hasFreshTunnelTarget = IsUsableProbeTarget(freshTunnelTarget);
 
-            snapshot.AggregateLatencyMs = unified.AggregateLatencyMs > 0 ? unified.AggregateLatencyMs : unified.LatencyMs;
-            snapshot.AggregateJitterMs = unified.AggregateJitterMs > 0 ? unified.AggregateJitterMs : unified.JitterMs;
-            snapshot.AggregateRxBps = unified.AggregateRxBps;
-            snapshot.AggregateTxBps = unified.AggregateTxBps;
-            snapshot.AggregateTotalBps = unified.AggregateTotalBps;
-            snapshot.AggregateCongested = unified.AggregateCongested;
+            if (hasFreshTunnelTarget)
+            {
+                lastValidTunnelProbeTarget = freshTunnelTarget;
+                lastValidTunnelProbeTargetUtc = DateTime.UtcNow;
+            }
 
-            snapshot.PrimaryRemoteIp = unified.PrimaryRemoteIp;
-            snapshot.SpeedifyRemoteIp = unified.SpeedifyRemoteIp;
-            snapshot.ConnectedServerPublicIp = unified.ConnectedServerPublicIp;
-            snapshot.ConnectedServerName = unified.ConnectedServerName;
+            string primaryTarget;
+            string secondaryTarget;
+            ProbeTargetMode targetMode;
+            string reason;
 
-            snapshot.Adapter1Latency = unified.Adapter1Latency > 0 ? unified.Adapter1Latency : unified.LatencyMs;
-            snapshot.Adapter2Latency = unified.Adapter2Latency;
+            if (tunnelConnected)
+            {
+                if (hasFreshTunnelTarget)
+                {
+                    primaryTarget = freshTunnelTarget;
+                    secondaryTarget = "1.1.1.1";
+                    targetMode = ProbeTargetMode.TunnelAware;
+                    reason = "fresh tunnel target available";
+                }
+                else if (IsRecentTunnelProbeTargetAvailable())
+                {
+                    primaryTarget = lastValidTunnelProbeTarget;
+                    secondaryTarget = "1.1.1.1";
+                    targetMode = ProbeTargetMode.TunnelAware;
+                    reason = "reusing recent tunnel target during grace";
+                }
+                else
+                {
+                    primaryTarget = "1.1.1.1";
+                    secondaryTarget = "8.8.8.8";
+                    targetMode = ProbeTargetMode.ExternalOnly;
+                    reason = "tunnel connected but no usable tunnel target";
+                }
+            }
+            else
+            {
+                primaryTarget = "1.1.1.1";
+                secondaryTarget = "8.8.8.8";
+                targetMode = ProbeTargetMode.ExternalOnly;
+                reason = "tunnel not connected";
+            }
 
-            snapshot.Connected = unified.TunnelConnected;
-            snapshot.Congested = unified.AggregateCongested;
+            LogProbeModeIfChanged(targetMode, reason);
+            UpdateFastPingTargetsIfChanged(primaryTarget, secondaryTarget);
+        }
 
-            snapshot.LatencyMs = unified.LatencyMs;
-            snapshot.BaseLatencyMs = unified.BaselineLatencyMs;
-            snapshot.QueueDelayMs = unified.LatencyMs > 0 && unified.BaselineLatencyMs > 0
-                ? Math.Max(0, unified.LatencyMs - unified.BaselineLatencyMs)
-                : 0;
+        private void UpdateFastPingTunnelLatency(MetricsSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return;
 
-            snapshot.Recent = unified.LatencyMs;
-            snapshot.Average = unified.LatencyMs;
-            snapshot.Max = unified.LatencyMs;
-            snapshot.Jitter = unified.JitterMs;
-            snapshot.MicroJitter = 0;
-            snapshot.DynamicBase = unified.BaselineLatencyMs;
+            if (snapshot.TunnelConnected)
+            {
+                if (snapshot.AggregateLatencyMs > 0)
+                    fastPing.UpdateTunnelLatency(snapshot.AggregateLatencyMs);
+                else if (snapshot.LatencyMs > 0)
+                    fastPing.UpdateTunnelLatency(snapshot.LatencyMs);
+                else
+                    fastPing.UpdateTunnelLatency(-1);
+            }
+            else
+            {
+                fastPing.UpdateTunnelLatency(-1);
+            }
+        }
 
-            snapshot.PacketLoss = unified.LossRate;
+        private string ChooseBestTunnelProbeTarget(MetricsSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return null;
 
-            return snapshot;
+            if (IsUsableProbeTarget(snapshot.ConnectedServerPublicIp))
+                return NormalizeProbeTarget(snapshot.ConnectedServerPublicIp);
+
+            if (IsUsableProbeTarget(snapshot.PrimaryRemoteIp))
+                return NormalizeProbeTarget(snapshot.PrimaryRemoteIp);
+
+            if (IsUsableProbeTarget(snapshot.SpeedifyRemoteIp))
+                return NormalizeProbeTarget(snapshot.SpeedifyRemoteIp);
+
+            return null;
+        }
+
+        private bool IsRecentTunnelProbeTargetAvailable()
+        {
+            if (!IsUsableProbeTarget(lastValidTunnelProbeTarget))
+                return false;
+
+            if (lastValidTunnelProbeTargetUtc == DateTime.MinValue)
+                return false;
+
+            return (DateTime.UtcNow - lastValidTunnelProbeTargetUtc).TotalSeconds <= TunnelProbeTargetGraceSeconds;
+        }
+
+        private void UpdateFastPingTargetsIfChanged(string primaryTarget, string secondaryTarget)
+        {
+            primaryTarget = NormalizeProbeTarget(primaryTarget);
+            secondaryTarget = NormalizeProbeTarget(secondaryTarget);
+
+            if (!IsUsableProbeTarget(primaryTarget))
+            {
+                Logger.Log("fastping", "ignored invalid primary target: " + (primaryTarget ?? "<null>"));
+                return;
+            }
+
+            if (!IsUsableProbeTarget(secondaryTarget))
+            {
+                Logger.Log("fastping", "ignored invalid secondary target: " + (secondaryTarget ?? "<null>"));
+                return;
+            }
+
+            bool changed =
+                !string.Equals(lastFastPingPrimaryTarget, primaryTarget, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(lastFastPingSecondaryTarget, secondaryTarget, StringComparison.OrdinalIgnoreCase);
+
+            if (!changed)
+                return;
+
+            Logger.Log("fastping", "target handoff | primary=" + primaryTarget + " | secondary=" + secondaryTarget);
+
+            fastPing.UpdateTargets(primaryTarget, secondaryTarget);
+
+            lastFastPingPrimaryTarget = primaryTarget;
+            lastFastPingSecondaryTarget = secondaryTarget;
+        }
+
+        private void LogProbeModeIfChanged(ProbeTargetMode newMode, string reason)
+        {
+            if (currentProbeTargetMode == newMode)
+                return;
+
+            currentProbeTargetMode = newMode;
+            Logger.Log("fastping", "probe mode -> " + newMode.ToString().ToLowerInvariant() + " | " + reason);
+        }
+
+        private static string NormalizeProbeTarget(string host)
+        {
+            return string.IsNullOrWhiteSpace(host) ? null : host.Trim();
+        }
+
+        private static bool IsUsableProbeTarget(string host)
+        {
+            if (string.IsNullOrWhiteSpace(host))
+                return false;
+
+            host = host.Trim();
+
+            if (string.Equals(host, "speedify", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (string.Equals(host, "unknown", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (string.Equals(host, "none", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (host.IndexOf(' ') >= 0)
+                return false;
+
+            return true;
         }
 
         // =========================
@@ -277,16 +413,6 @@ namespace WTFnetApp
         // ACCESSORS
         // =========================
 
-        public DataSet GetDataSet()
-        {
-            return networkMetricsEngine.GetDataSet();
-        }
-
-        public NetworkEngineState GetNetworkState()
-        {
-            return networkMetricsEngine.GetState();
-        }
-
         public FastPingState GetFastPingState()
         {
             return fastPing.GetState();
@@ -295,6 +421,11 @@ namespace WTFnetApp
         public UnifiedNetworkState GetUnifiedNetworkState()
         {
             return lastUnifiedState != null ? lastUnifiedState.Clone() : null;
+        }
+
+        public MetricsSnapshot GetLastSnapshot()
+        {
+            return lastSnapshot;
         }
 
         // =========================
@@ -352,15 +483,6 @@ namespace WTFnetApp
             catch (Exception ex)
             {
                 Logger.Log("engine", "nat stop error: " + ex.Message);
-            }
-
-            try
-            {
-                await networkMetricsEngine.StopAsync();
-            }
-            catch (Exception ex)
-            {
-                Logger.Log("engine", "metrics engine stop error: " + ex.Message);
             }
         }
     }

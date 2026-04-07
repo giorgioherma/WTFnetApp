@@ -6,7 +6,7 @@ namespace WTFnetApp
     {
         private const int SpeedifyFreshnessMs = 1500;
 
-        public UnifiedNetworkState Resolve(MetricsSnapshot snapshot, FastPingState fastPing)
+        public UnifiedNetworkState Resolve(MetricsSnapshot snapshot, FastPingState fastPing, NatState natState)
         {
             UnifiedNetworkState state = new UnifiedNetworkState();
             state.TimeUtc = DateTime.UtcNow;
@@ -20,7 +20,11 @@ namespace WTFnetApp
             bool speedifyFresh = IsSpeedifyFresh(snapshot);
             state.SpeedifyTelemetryFresh = speedifyFresh;
 
-            bool speedifyUsable = hasSpeedify && speedifyFresh;
+            bool speedifyUsable =
+                hasSpeedify &&
+                speedifyFresh &&
+                snapshot.TunnelConnected &&
+                ChoosePositive(snapshot.AggregateLatencyMs, snapshot.LatencyMs, snapshot.Adapter1Latency) > 0;
             state.SpeedifyAvailable = speedifyUsable;
 
             if (hasSpeedify)
@@ -31,11 +35,23 @@ namespace WTFnetApp
 
             if (speedifyUsable)
             {
-                ResolveSpeedifyOnly(state, snapshot);
+                state.SourceKind = UnifiedNetworkSourceKind.Speedify;
+
+                NetworkMetricsCalculator.ResolveFromSpeedify(state, snapshot);
+                NetworkQualityEvaluator.ClassifySpeedify(state, snapshot);
+
+                state.HealthReason = "Resolved from Speedify only";
+                state.Notes = "FastPing ignored while fresh Speedify telemetry is available.";
             }
             else if (hasFastPing)
             {
-                ResolveFastPingOnly(state, fastPing);
+                state.SourceKind = UnifiedNetworkSourceKind.FastPing;
+
+                NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing);
+                NetworkQualityEvaluator.ClassifyFastPing(state);
+
+                state.HealthReason = "Resolved from FastPing only";
+                state.Notes = "Speedify telemetry unavailable or stale; using probe-derived metrics only.";
             }
             else
             {
@@ -43,6 +59,8 @@ namespace WTFnetApp
             }
 
             state.JitterPressure = ComputeJitterPressure(state.JitterMs);
+            state.RefreshDisplayState(natState);
+
             return state;
         }
 
@@ -142,7 +160,7 @@ namespace WTFnetApp
             state.Notes = "No Speedify snapshot and no FastPing state were available.";
         }
 
-        private static void ResolveFastPingOnly(UnifiedNetworkState state, FastPingState fastPing)
+        private static void ResolveUsingFastPing(UnifiedNetworkState state, FastPingState fastPing)
         {
             state.SourceKind = UnifiedNetworkSourceKind.FastPing;
 
@@ -162,7 +180,7 @@ namespace WTFnetApp
             state.BadQualityRate = fastPing.BadQualityRate;
 
             state.SpikeDetected = fastPing.SpikeDetected;
-            state.IsStale = fastPing.IsStale && resolvedPing <= 0;
+            state.IsStale = fastPing.IsStale;
 
             state.TunnelConnected = false;
             state.ActiveConnectionCount = 0;
@@ -177,7 +195,7 @@ namespace WTFnetApp
             state.Notes = "Speedify telemetry unavailable or stale; using probe-derived metrics only.";
         }
 
-        private static void ResolveSpeedifyOnly(UnifiedNetworkState state, MetricsSnapshot snapshot)
+        private static void ResolveUsingSpeedify(UnifiedNetworkState state, MetricsSnapshot snapshot)
         {
             state.SourceKind = UnifiedNetworkSourceKind.Speedify;
 
@@ -213,7 +231,15 @@ namespace WTFnetApp
             state.LossRate = snapshot.PacketLoss > 0 ? snapshot.PacketLoss : 0;
             state.BadQualityRate = 0;
 
-            state.SpikeDetected = false;
+            state.SpikeDetected =
+                (state.LatencyMs > 0 &&
+                 state.BaselineLatencyMs > 0 &&
+                 state.LatencyMs > state.BaselineLatencyMs + 25)
+                ||
+                state.JitterMs > 22
+                ||
+                snapshot.AggregateCongested;
+
             state.IsStale = false;
 
             state.PrimaryLatencySource = "speedify";
@@ -247,6 +273,7 @@ namespace WTFnetApp
 
             if (confidence < 0)
                 confidence = 0;
+
             if (confidence > 1)
                 confidence = 1;
 

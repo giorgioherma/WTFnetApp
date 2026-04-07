@@ -6,12 +6,12 @@ namespace WTFnetApp
 {
     public sealed class WtfFastPing
     {
-        private const int ProbeIntervalMs = 125;
-        private const int PerTargetPeriodMs = 250;
-        private const int BaseProbeTimeoutMs = 300;
-        private const int MaxProbeTimeoutMs = 450;
+        private const int ProbeIntervalMs = 200;
+        private const int PerTargetPeriodMs = 400;
+        private const int BaseProbeTimeoutMs = 500;
+        private const int MaxProbeTimeoutMs = 600;
         private const int StaleAfterMs = 1200;
-        private const int MissesBeforeDegrade = 3;
+        private const int MissesBeforeDegrade = 4;
 
         private const double StableAlpha = 0.35;
         private const double HugeSpikeStableAlpha = 0.10;
@@ -245,20 +245,29 @@ namespace WTFnetApp
                 {
                     if (reply.Status == IPStatus.Success)
                     {
+                        // 🔥 RAW LOG SUCCESS
+                        Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host);
+
                         RegisterSuccess_NoLock(target, reply.RoundtripTime);
                     }
                     else
                     {
+                        // 🔥 RAW LOG FAIL (non-success status)
+                        Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host);
+
                         RegisterMiss_NoLock(target);
                     }
 
                     RecomputeState_NoLock();
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 lock (sync)
                 {
+                    // 🔥 RAW LOG EXCEPTION FAIL
+                    Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ") | " + host);
+
                     RegisterMiss_NoLock(target);
                     RecomputeState_NoLock();
                 }
@@ -312,7 +321,6 @@ namespace WTFnetApp
 
             UpdateJitter_NoLock(target, sample);
 
-            // Update loss before baseline quality decisions.
             target.LossRate = ComputeLossRate_NoLock(target);
 
             UpdateBaseline_NoLock(target);
@@ -458,25 +466,10 @@ namespace WTFnetApp
             if (target.SuccessCount == 0)
                 return -1;
 
-            double best = double.MaxValue;
-            int found = 0;
+            int idx = (target.SuccessIndex - 1 + target.SuccessRtts.Length) % target.SuccessRtts.Length;
+            double value = target.SuccessRtts[idx];
 
-            for (int i = 0; i < target.SuccessCount; i++)
-            {
-                int idx = (target.SuccessIndex - 1 - i + target.SuccessRtts.Length) % target.SuccessRtts.Length;
-                double value = target.SuccessRtts[idx];
-                if (value <= 0)
-                    continue;
-
-                if (value < best)
-                    best = value;
-
-                found++;
-                if (found == 2)
-                    break;
-            }
-
-            return best == double.MaxValue ? -1 : best;
+            return value > 0 ? value : -1;
         }
 
         private double ComputeFloor_NoLock(ProbeTargetState target)
@@ -535,23 +528,27 @@ namespace WTFnetApp
                 return 0.0;
 
             double ageMs = (DateTime.UtcNow - target.LastSuccessUtc).TotalMilliseconds;
-            if (ageMs > 250) confidence -= 0.10;
-            if (ageMs > 500) confidence -= 0.20;
-            if (ageMs > 900) confidence -= 0.25;
-            if (ageMs > StaleAfterMs) confidence -= 0.30;
+            if (ageMs > 300) confidence -= 0.06;
+            if (ageMs > 600) confidence -= 0.10;
+            if (ageMs > 1000) confidence -= 0.14;
+            if (ageMs > StaleAfterMs) confidence -= 0.25;
 
-            confidence -= target.LossRate * 0.60;
-            confidence -= target.BadQualityRate * 0.30;
+            confidence -= target.LossRate * 0.35;
+            confidence -= target.BadQualityRate * 0.20;
 
             if (target.JitterMs > 8.0)
-                confidence -= 0.08;
+                confidence -= 0.05;
             if (target.JitterMs > 14.0)
-                confidence -= 0.10;
+                confidence -= 0.07;
             if (target.JitterMs > 22.0)
-                confidence -= 0.12;
+                confidence -= 0.10;
 
             if (target.ConsecutiveMisses >= MissesBeforeDegrade)
                 confidence -= 0.25;
+            else if (target.ConsecutiveMisses == 3)
+                confidence -= 0.12;
+            else if (target.ConsecutiveMisses == 2)
+                confidence -= 0.05;
 
             if (confidence < 0)
                 confidence = 0;
@@ -647,30 +644,45 @@ namespace WTFnetApp
             if (s.BaselinePingMs <= 0 || s.InstantPingMs <= 0)
                 return false;
 
-            if (s.InstantPingMs > s.BaselinePingMs + 15.0)
+            if (s.InstantPingMs > s.BaselinePingMs + 12.0)
                 return true;
 
             if (s.JitterMs > 10.0)
                 return true;
 
-            if (s.LossRate > 0.12)
+            if (s.LossRate > 0.15)
+                return true;
+
+            if (s.BadQualityRate > 0.18)
                 return true;
 
             return false;
         }
 
+        private bool HasHardDegrade_NoLock()
+        {
+            return
+                primary.ConsecutiveMisses >= MissesBeforeDegrade ||
+                secondary.ConsecutiveMisses >= MissesBeforeDegrade;
+        }
+
         private FastPingHealthState ComputeHealthState_NoLock(FastPingState s)
         {
+            bool hardDegrade = HasHardDegrade_NoLock();
+
             if (s.IsStale || s.Confidence < 0.20)
                 return FastPingHealthState.Stale;
+
+            if (hardDegrade)
+                return FastPingHealthState.Critical;
 
             if (s.LossRate >= 0.30 || s.BadQualityRate >= 0.45)
                 return FastPingHealthState.Critical;
 
             if ((s.SpikeDetected && s.JitterMs >= 12.0) ||
-                s.InstantPingMs > 0 && s.BaselinePingMs > 0 && s.InstantPingMs > s.BaselinePingMs + 35.0 ||
+                (s.InstantPingMs > 0 && s.BaselinePingMs > 0 && s.InstantPingMs > s.BaselinePingMs + 35.0) ||
                 s.JitterMs >= 18.0 ||
-                s.LossRate >= 0.18)
+                s.LossRate >= 0.22)
                 return FastPingHealthState.Warning;
 
             if (s.OffBaseline)

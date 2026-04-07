@@ -197,9 +197,13 @@ namespace WTFnetApp
 
         public string DisplayPingText = "-- ms";
         public string DisplayPingColorKey = "gray";
+
+        public string DisplayJitterText = "J --";
+        public string DisplayJitterColorKey = "gray";
+
         public string DisplayTunnelState = "Unknown";
 
-        public string DisplayNatText = "Unknown";
+        public string DisplayNatText = "UNKNOWN";
         public string DisplayNatColorKey = "gray";
 
         // =========================================================
@@ -271,9 +275,13 @@ namespace WTFnetApp
 
             DisplayPingText = FormatPingText(ping);
             DisplayPingColorKey = GetPingColorKey(ping);
+
+            DisplayJitterText = FormatJitterText(JitterMs);
+            DisplayJitterColorKey = GetJitterColorKey(JitterMs);
+
             DisplayTunnelState = BuildTunnelState();
 
-            DisplayNatText = natState.ToString();
+            DisplayNatText = GetNatText(natState);
             DisplayNatColorKey = GetNatColorKey(natState);
         }
 
@@ -297,6 +305,14 @@ namespace WTFnetApp
                 return "-- ms";
 
             return ((int)Math.Round(pingMs)).ToString() + " ms";
+        }
+
+        private string FormatJitterText(double jitterMs)
+        {
+            if (jitterMs < 0)
+                return "J --";
+
+            return "J " + ((int)Math.Round(jitterMs)).ToString();
         }
 
         private string GetPingColorKey(double pingMs)
@@ -349,6 +365,47 @@ namespace WTFnetApp
                 return "yellow";
 
             return "red";
+        }
+
+        private string GetJitterColorKey(double jitterMs)
+        {
+            if (IsStale || jitterMs < 0)
+                return "gray";
+
+            if (jitterMs <= 5)
+                return "green";
+
+            if (jitterMs <= 10)
+                return "green";
+
+            if (jitterMs <= 18)
+                return "gold";
+
+            if (jitterMs <= 28)
+                return "yellow";
+
+            return "red";
+        }
+
+        private string GetNatText(NatState natState)
+        {
+            switch (natState)
+            {
+                case NatState.Stable:
+                    return "STABLE";
+
+                case NatState.GracePeriod:
+                    return "GRACE";
+
+                case NatState.Unstable:
+                    return "UNSTABLE";
+
+                case NatState.Lost:
+                    return "LOST";
+
+                default:
+                    return "UNKNOWN";
+            }
         }
 
         private string GetNatColorKey(NatState natState)
