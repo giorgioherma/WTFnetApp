@@ -424,7 +424,7 @@ namespace WTFnetApp
 
         public UnifiedNetworkState GetUnifiedNetworkState()
         {
-            return lastUnifiedState != null ? lastUnifiedState.Clone() : null;
+            return GetLastUnifiedState();
         }
 
         public UnifiedNetworkState GetLastUnifiedState()
