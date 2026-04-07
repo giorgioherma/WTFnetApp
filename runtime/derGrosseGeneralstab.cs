@@ -163,12 +163,16 @@ namespace WTFnetApp
                 UnifiedNetworkState unifiedState =
                     networkSignalResolver.Resolve(snapshot, fastPingState, natState);
 
-                lastUnifiedState = unifiedState;
+                // Store immutable snapshot
+                lastUnifiedState = unifiedState?.Clone();
 
-                overlay?.RenderUnified(unifiedState);
+                // Use SAME immutable version everywhere
+                var safeState = lastUnifiedState;
 
-                // Optional but useful if you want unified heartbeat logging.
-                Logger.LogAnalysis(unifiedState);
+                overlay?.RenderUnified(safeState);
+
+                // Optional logging
+                Logger.LogAnalysis(safeState);
             }
         }
 
@@ -423,9 +427,11 @@ namespace WTFnetApp
             return lastUnifiedState != null ? lastUnifiedState.Clone() : null;
         }
 
-        public MetricsSnapshot GetLastSnapshot()
+        public UnifiedNetworkState GetLastUnifiedState()
         {
-            return lastSnapshot;
+            return lastUnifiedState != null
+                ? lastUnifiedState.Clone()
+                : null;
         }
 
         // =========================
