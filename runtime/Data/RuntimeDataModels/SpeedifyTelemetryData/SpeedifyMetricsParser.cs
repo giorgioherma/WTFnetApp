@@ -108,7 +108,10 @@ namespace WTFnetApp
                     link.Name = FirstNonEmpty(link.Name, ReadString(row, "name"));
                     link.Isp = FirstNonEmpty(link.Isp, ReadString(row, "isp"));
                     link.IspType = FirstNonEmpty(link.IspType, ReadString(row, "ispType"));
-                    link.Description = FirstNonEmpty(link.Description, ReadString(row, "desc"));
+                    link.Description = FirstNonEmpty(
+                        link.Description,
+                        ReadString(row, "description"),
+                        ReadString(row, "desc"));
                     link.Protocol = FirstNonEmpty(link.Protocol, protocol);
                     link.Type = FirstNonEmpty(link.Type, ReadString(row, "type"));
 
@@ -194,7 +197,10 @@ namespace WTFnetApp
                 link.Name = FirstNonEmpty(link.Name, ReadString(row, "name"));
                 link.Isp = FirstNonEmpty(link.Isp, ReadString(row, "isp"));
                 link.IspType = FirstNonEmpty(link.IspType, ReadString(row, "ispType"));
-                link.Description = FirstNonEmpty(link.Description, ReadString(row, "desc"));
+                link.Description = FirstNonEmpty(
+                    link.Description,
+                    ReadString(row, "description"),
+                    ReadString(row, "desc"));
                 link.Protocol = FirstNonEmpty(link.Protocol, ReadString(row, "protocol"));
                 link.Type = FirstNonEmpty(link.Type, ReadString(row, "type"));
 
@@ -614,16 +620,19 @@ namespace WTFnetApp
 
         private static bool TryGetNetworksArray(JsonElement root, out JsonElement networks)
         {
-            if (root.TryGetProperty("networks", out networks) && networks.ValueKind == JsonValueKind.Array)
-                return true;
-
-            if (root.TryGetProperty("connections", out networks) && networks.ValueKind == JsonValueKind.Array)
-                return true;
-
             if (root.ValueKind == JsonValueKind.Array)
             {
                 networks = root;
                 return true;
+            }
+
+            if (root.ValueKind == JsonValueKind.Object)
+            {
+                if (root.TryGetProperty("networks", out networks) && networks.ValueKind == JsonValueKind.Array)
+                    return true;
+
+                if (root.TryGetProperty("connections", out networks) && networks.ValueKind == JsonValueKind.Array)
+                    return true;
             }
 
             networks = default(JsonElement);
