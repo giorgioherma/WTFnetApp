@@ -70,6 +70,10 @@ namespace WTFnetApp
         public string Protocol;
         public string Type;
 
+        // refresh tracking (VERY IMPORTANT)
+        public int LastSeenGeneration { get; set; }
+        public bool SeenInCurrentRefresh { get; set; }
+
         public bool Connected;
         public bool IsProxy;
         public bool IsAggregate;
@@ -104,7 +108,7 @@ namespace WTFnetApp
         public string PrivateIp;
         public string RemoteIp;
 
-        public string[] IpList;
+        public string[] IpList = Array.Empty<string>();
     }
 
     public sealed class SpeedifySessionWindowStats

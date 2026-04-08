@@ -9,6 +9,7 @@ namespace WTFnetApp
         private double smoothJitter = 0;
         private double previousLatency = 0;
         private double dynamicBase = 0;
+        private int linkRefreshGeneration = 0;
 
         private readonly Queue<double> latencyWindow = new Queue<double>();
         private const int LatencyWindowSize = 8;
@@ -72,9 +73,14 @@ namespace WTFnetApp
 
         private void ParseConnectionStatsIntoStructured(JsonElement root)
         {
-            structuredState.TimeUtc = DateTime.UtcNow;
+            DateTime nowUtc = DateTime.UtcNow;
+            structuredState.TimeUtc = nowUtc;
             structuredState.HasConnectionStats = true;
-            structuredState.LastConnectionStatsUtc = DateTime.UtcNow;
+            structuredState.LastConnectionStatsUtc = nowUtc;
+
+            structuredState.ParseWarnings.Clear();
+
+            int generation = BeginLinkRefresh();
 
             structuredState.Tunnel.ActiveConnectionCount = ReadIntProperty(root, "numActive");
             structuredState.Tunnel.BackupConnectionCount = ReadIntProperty(root, "numBackup");
@@ -102,6 +108,7 @@ namespace WTFnetApp
                     }
 
                     SpeedifyLinkState link = GetOrCreateLink(key);
+                    MarkLinkSeen(link, generation);
 
                     link.Guid = FirstNonEmpty(link.Guid, guid);
                     link.Key = key;
@@ -141,8 +148,8 @@ namespace WTFnetApp
                     link.ReceiveBytes = ReadLongOrDefault(row, "rcvBytes", link.ReceiveBytes);
                     link.SendBytes = ReadLongOrDefault(row, "sndBytes", link.SendBytes);
 
-                    link.RcvEstMbps = ReadDoubleOrDefault(row, "rcvEst", link.RcvEstMbps);
-                    link.SndEstMbps = ReadDoubleOrDefault(row, "sndEst", link.SndEstMbps);
+                    link.RcvEstMbps = ReadDoubleOrDefaultEither(row, "rcvEstMbps", "rcvEst", link.RcvEstMbps);
+                    link.SndEstMbps = ReadDoubleOrDefaultEither(row, "sndEstMbps", "sndEst", link.SndEstMbps);
 
                     link.Ip = FirstNonEmpty(link.Ip, ReadString(row, "ip"));
                     link.LocalIp = FirstNonEmpty(link.LocalIp, ReadString(row, "localIp"));
@@ -152,6 +159,8 @@ namespace WTFnetApp
                     link.IpList = ReadStringArray(row, "ipList", link.IpList);
                 }
             }
+
+            RemoveLinksNotSeenInGeneration(generation, keepAggregateRows: false);
 
             if (!hasAggregate)
                 AddWarningOnce("connection_stats_missing_aggregate");
@@ -273,13 +282,13 @@ namespace WTFnetApp
             structuredState.LastCurrentStateUtc = DateTime.UtcNow;
 
             structuredState.Tunnel.CurrentState = FirstNonEmpty(
-                ReadString(root, "state"),
-                ReadString(root, "currentState"),
+                ReadAnyAsString(root, "state"),
+                ReadAnyAsString(root, "currentState"),
                 structuredState.Tunnel.CurrentState);
 
             structuredState.Tunnel.CurrentMode = FirstNonEmpty(
-                ReadString(root, "mode"),
-                ReadString(root, "connectionMode"),
+                ReadAnyAsString(root, "mode"),
+                ReadAnyAsString(root, "connectionMode"),
                 structuredState.Tunnel.CurrentMode);
 
             bool? connected = ReadNullableBool(root, "connected");
@@ -294,12 +303,15 @@ namespace WTFnetApp
             structuredState.LastConnectedServerUtc = DateTime.UtcNow;
 
             structuredState.Tunnel.ConnectedServerName = FirstNonEmpty(
+                ReadString(root, "longName"),
                 ReadString(root, "name"),
                 ReadString(root, "serverName"),
                 ReadString(root, "displayName"),
                 structuredState.Tunnel.ConnectedServerName);
 
             structuredState.Tunnel.ConnectedServerPublicIp = FirstNonEmpty(
+                ReadFirstStringFromArray(root, "publicIP"),
+                ReadFirstStringFromArray(root, "publicIp"),
                 ReadString(root, "publicIp"),
                 ReadString(root, "ip"),
                 ReadString(root, "serverIp"),
@@ -309,7 +321,9 @@ namespace WTFnetApp
         private MetricsSnapshot BuildMetricsSnapshotFromStructured()
         {
             MetricsSnapshot snapshot = new MetricsSnapshot();
-            snapshot.TimeUtc = DateTime.UtcNow;
+            snapshot.TimeUtc = structuredState.TimeUtc != DateTime.MinValue
+                ? structuredState.TimeUtc
+                : DateTime.UtcNow;
 
             snapshot.TunnelConnected = structuredState.Tunnel.Connected;
             snapshot.ActiveConnectionCount = structuredState.Tunnel.ActiveConnectionCount;
@@ -338,8 +352,8 @@ namespace WTFnetApp
                 ? structuredState.ParseWarnings.Count
                 : 0;
 
-            SpeedifyLinkState firstReal = GetFirstUsableConnectedLink();
-            SpeedifyLinkState secondReal = GetSecondUsableConnectedLink(firstReal);
+            SpeedifyLinkState firstReal = GetBestLinkByJitterStability();
+            SpeedifyLinkState secondReal = GetSecondBestLinkByJitterStability(firstReal);
 
             if (firstReal != null)
             {
@@ -497,26 +511,10 @@ namespace WTFnetApp
             return snapshot;
         }
 
-        private SpeedifyLinkState GetFirstUsableConnectedLink()
+        private SpeedifyLinkState GetBestLinkByJitterStability()
         {
-            foreach (SpeedifyLinkState link in structuredState.Links)
-            {
-                if (link == null)
-                    continue;
-
-                if (link.IsAggregate || link.IsProxy)
-                    continue;
-
-                if (link.Connected)
-                    return link;
-            }
-
-            return null;
-        }
-
-        private SpeedifyLinkState GetSecondUsableConnectedLink(SpeedifyLinkState first)
-        {
-            bool seenFirst = false;
+            SpeedifyLinkState best = null;
+            double bestScore = double.MaxValue;
 
             foreach (SpeedifyLinkState link in structuredState.Links)
             {
@@ -529,18 +527,68 @@ namespace WTFnetApp
                 if (!link.Connected)
                     continue;
 
-                if (!seenFirst)
+                double score = ComputeLinkJitterStabilityScore(link);
+
+                if (score < bestScore)
                 {
-                    if (ReferenceEquals(link, first))
-                        seenFirst = true;
-
-                    continue;
+                    bestScore = score;
+                    best = link;
                 }
-
-                return link;
             }
 
-            return null;
+            return best;
+        }
+
+        private SpeedifyLinkState GetSecondBestLinkByJitterStability(SpeedifyLinkState first)
+        {
+            SpeedifyLinkState best = null;
+            double bestScore = double.MaxValue;
+
+            foreach (SpeedifyLinkState link in structuredState.Links)
+            {
+                if (link == null)
+                    continue;
+
+                if (ReferenceEquals(link, first))
+                    continue;
+
+                if (link.IsAggregate || link.IsProxy)
+                    continue;
+
+                if (!link.Connected)
+                    continue;
+
+                double score = ComputeLinkJitterStabilityScore(link);
+
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = link;
+                }
+            }
+
+            return best;
+        }
+
+        private double ComputeLinkJitterStabilityScore(SpeedifyLinkState link)
+        {
+            if (link == null)
+                return double.MaxValue;
+
+            double latency = link.LatencyMs > 0 ? link.LatencyMs : 999;
+            double jitter = link.JitterMs > 0 ? link.JitterMs : 999;
+            double mosPenalty = link.Mos > 0 ? (5.0 - link.Mos) * 10.0 : 10.0;
+
+            double congestionPenalty = 0.0;
+            if (link.Congested) congestionPenalty += 25.0;
+            if (link.DownloadCongested) congestionPenalty += 12.0;
+            if (link.UploadCongested) congestionPenalty += 12.0;
+
+            return
+                (jitter * 2.8) +
+                (latency * 0.30) +
+                mosPenalty +
+                congestionPenalty;
         }
 
         private SpeedifyLinkState GetOrCreateLink(string key)
@@ -565,43 +613,43 @@ namespace WTFnetApp
             SpeedifySessionWindowStats window = new SpeedifySessionWindowStats();
             window.WindowKey = windowKey;
 
-            window.BytesRecv = ReadLongProperty(root, "bytesRecv");
-            window.BytesSent = ReadLongProperty(root, "bytesSent");
-            window.EncryptedBytesRecv = ReadLongProperty(root, "encryptedBytesRecv");
-            window.EncryptedBytesSent = ReadLongProperty(root, "encryptedBytesSent");
+            window.BytesRecv = ReadLongPropertyEither(root, "bytes_recv", "bytesRecv");
+            window.BytesSent = ReadLongPropertyEither(root, "bytes_sent", "bytesSent");
+            window.EncryptedBytesRecv = ReadLongPropertyEither(root, "encrypted_bytes_recv", "encryptedBytesRecv");
+            window.EncryptedBytesSent = ReadLongPropertyEither(root, "encrypted_bytes_sent", "encryptedBytesSent");
 
-            window.MaxDownloadMbps = ReadDoubleProperty(root, "maxDownloadMbps");
-            window.MaxUploadMbps = ReadDoubleProperty(root, "maxUploadMbps");
+            window.MaxDownloadMbps = ReadDoublePropertyEither(root, "max_download_mbps", "maxDownloadMbps");
+            window.MaxUploadMbps = ReadDoublePropertyEither(root, "max_upload_mbps", "maxUploadMbps");
 
-            window.NumFailovers = ReadIntProperty(root, "numFailovers");
-            window.NumSessions = ReadIntProperty(root, "numSessions");
-            window.RetransBytes = ReadLongProperty(root, "retransBytes");
-            window.TotalConnectedMinutes = ReadLongProperty(root, "totalConnectedMinutes");
+            window.NumFailovers = ReadIntPropertyEither(root, "num_failovers", "numFailovers");
+            window.NumSessions = ReadIntPropertyEither(root, "num_sessions", "numSessions");
+            window.RetransBytes = ReadLongPropertyEither(root, "retrans_bytes", "retransBytes");
+            window.TotalConnectedMinutes = ReadLongPropertyEither(root, "total_connected_minutes", "totalConnectedMinutes");
 
-            window.DownBenefitNumConnections = ReadNestedInt(root, "downBenefit", "numConnections");
-            window.DownBenefitCombinedMbps = ReadNestedDouble(root, "downBenefit", "combinedMbps");
-            window.DownBenefitFastestConnMbps = ReadNestedDouble(root, "downBenefit", "fastestConnMbps");
+            window.DownBenefitNumConnections = ReadNestedIntEither(root, "down_benefit", "downBenefit", "num_connections", "numConnections");
+            window.DownBenefitCombinedMbps = ReadNestedDoubleEither(root, "down_benefit", "downBenefit", "combined_mbps", "combinedMbps");
+            window.DownBenefitFastestConnMbps = ReadNestedDoubleEither(root, "down_benefit", "downBenefit", "fastest_conn_mbps", "fastestConnMbps");
 
-            window.UpBenefitNumConnections = ReadNestedInt(root, "upBenefit", "numConnections");
-            window.UpBenefitCombinedMbps = ReadNestedDouble(root, "upBenefit", "combinedMbps");
-            window.UpBenefitFastestConnMbps = ReadNestedDouble(root, "upBenefit", "fastestConnMbps");
+            window.UpBenefitNumConnections = ReadNestedIntEither(root, "up_benefit", "upBenefit", "num_connections", "numConnections");
+            window.UpBenefitCombinedMbps = ReadNestedDoubleEither(root, "up_benefit", "upBenefit", "combined_mbps", "combinedMbps");
+            window.UpBenefitFastestConnMbps = ReadNestedDoubleEither(root, "up_benefit", "upBenefit", "fastest_conn_mbps", "fastestConnMbps");
 
-            window.TunBytesIn = ReadNestedLong(root, "tun", "bytesIn");
-            window.TunBytesOut = ReadNestedLong(root, "tun", "bytesOut");
-            window.TunDroppedIncoming = ReadNestedInt(root, "tun", "droppedIncoming");
-            window.TunPacketWaits = ReadNestedInt(root, "tun", "packetWaits");
-            window.TunReadQueue = ReadNestedInt(root, "tun", "readQueue");
+            window.TunBytesIn = ReadNestedLongEither(root, "tun", "tun", "bytes_in", "bytesIn");
+            window.TunBytesOut = ReadNestedLongEither(root, "tun", "tun", "bytes_out", "bytesOut");
+            window.TunDroppedIncoming = ReadNestedIntEither(root, "tun", "tun", "dropped_incoming", "droppedIncoming");
+            window.TunPacketWaits = ReadNestedIntEither(root, "tun", "tun", "packet_waits", "packetWaits");
+            window.TunReadQueue = ReadNestedIntEither(root, "tun", "tun", "read_queue", "readQueue");
 
-            window.PacketHandlerBytesIn = ReadNestedLong(root, "packetHandler", "bytesIn");
-            window.PacketHandlerBytesOut = ReadNestedLong(root, "packetHandler", "bytesOut");
-            window.PacketHandlerDroppedOut = ReadNestedInt(root, "packetHandler", "droppedOut");
-            window.PacketHandlerRetries = ReadNestedInt(root, "packetHandler", "retries");
+            window.PacketHandlerBytesIn = ReadNestedLongEither(root, "packet_handler", "packetHandler", "bytes_in", "bytesIn");
+            window.PacketHandlerBytesOut = ReadNestedLongEither(root, "packet_handler", "packetHandler", "bytes_out", "bytesOut");
+            window.PacketHandlerDroppedOut = ReadNestedIntEither(root, "packet_handler", "packetHandler", "dropped_out", "droppedOut");
+            window.PacketHandlerRetries = ReadNestedIntEither(root, "packet_handler", "packetHandler", "retries", "retries");
 
-            window.TotalFailoverSaves = ReadNestedInt(root, "streaming", "totalFailoverSaves");
-            window.TotalRedundantSaves = ReadNestedInt(root, "streaming", "totalRedundantSaves");
-            window.TotalSpeedSaves = ReadNestedInt(root, "streaming", "totalSpeedSaves");
-            window.TotalStreams = ReadNestedInt(root, "streaming", "totalStreams");
-            window.UniqueSaves = ReadNestedInt(root, "streaming", "uniqueSaves");
+            window.TotalFailoverSaves = ReadNestedIntEither(root, "streaming", "streaming", "total_failover_saves", "totalFailoverSaves");
+            window.TotalRedundantSaves = ReadNestedIntEither(root, "streaming", "streaming", "total_redundant_saves", "totalRedundantSaves");
+            window.TotalSpeedSaves = ReadNestedIntEither(root, "streaming", "streaming", "total_speed_saves", "totalSpeedSaves");
+            window.TotalStreams = ReadNestedIntEither(root, "streaming", "streaming", "total_streams", "totalStreams");
+            window.UniqueSaves = ReadNestedIntEither(root, "streaming", "streaming", "unique_saves", "uniqueSaves");
 
             return window;
         }
@@ -610,6 +658,9 @@ namespace WTFnetApp
         {
             foreach (SpeedifyLinkState link in structuredState.Links)
             {
+                if (link == null)
+                    continue;
+
                 if (link.IsAggregate)
                     continue;
 
@@ -682,6 +733,53 @@ namespace WTFnetApp
             Logger.Log("speedify-parser", warning);
         }
 
+        private int BeginLinkRefresh()
+        {
+            linkRefreshGeneration++;
+
+            if (linkRefreshGeneration == int.MaxValue)
+                linkRefreshGeneration = 1;
+
+            foreach (SpeedifyLinkState link in structuredState.Links)
+            {
+                if (link == null)
+                    continue;
+
+                link.SeenInCurrentRefresh = false;
+            }
+
+            return linkRefreshGeneration;
+        }
+
+        private void MarkLinkSeen(SpeedifyLinkState link, int generation)
+        {
+            if (link == null)
+                return;
+
+            link.LastSeenGeneration = generation;
+            link.SeenInCurrentRefresh = true;
+        }
+
+        private void RemoveLinksNotSeenInGeneration(int generation, bool keepAggregateRows)
+        {
+            for (int i = structuredState.Links.Count - 1; i >= 0; i--)
+            {
+                SpeedifyLinkState link = structuredState.Links[i];
+
+                if (link == null)
+                {
+                    structuredState.Links.RemoveAt(i);
+                    continue;
+                }
+
+                if (keepAggregateRows && link.IsAggregate)
+                    continue;
+
+                if (link.LastSeenGeneration != generation)
+                    structuredState.Links.RemoveAt(i);
+            }
+        }
+
         private static bool TryGetNetworksArray(JsonElement root, out JsonElement networks)
         {
             if (root.ValueKind == JsonValueKind.Array)
@@ -709,22 +807,31 @@ namespace WTFnetApp
                 return false;
 
             return value.TryGetProperty("bytesRecv", out _) ||
+                   value.TryGetProperty("bytes_recv", out _) ||
                    value.TryGetProperty("numFailovers", out _) ||
+                   value.TryGetProperty("num_failovers", out _) ||
                    value.TryGetProperty("totalConnectedMinutes", out _) ||
+                   value.TryGetProperty("total_connected_minutes", out _) ||
                    value.TryGetProperty("tun", out _) ||
                    value.TryGetProperty("packetHandler", out _) ||
+                   value.TryGetProperty("packet_handler", out _) ||
                    value.TryGetProperty("streaming", out _);
         }
 
         private static string BuildLinkKey(JsonElement row)
         {
-            string guid = ReadString(row, "guid");
-            if (!string.IsNullOrWhiteSpace(guid))
-                return guid;
-
             string key = ReadString(row, "key");
             if (!string.IsNullOrWhiteSpace(key))
                 return key;
+
+            string guid = ReadString(row, "guid");
+            string protocol = ReadString(row, "protocol");
+
+            if (!string.IsNullOrWhiteSpace(guid) && !string.IsNullOrWhiteSpace(protocol))
+                return guid + "|" + protocol;
+
+            if (!string.IsNullOrWhiteSpace(guid))
+                return guid;
 
             string name = ReadString(row, "name");
             string localIp = ReadString(row, "localIp");
@@ -771,6 +878,27 @@ namespace WTFnetApp
                 return value.GetString();
 
             return null;
+        }
+
+        private static string ReadAnyAsString(JsonElement parent, string name)
+        {
+            JsonElement value;
+            if (!parent.TryGetProperty(name, out value))
+                return null;
+
+            switch (value.ValueKind)
+            {
+                case JsonValueKind.String:
+                    return value.GetString();
+
+                case JsonValueKind.Number:
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    return value.ToString();
+
+                default:
+                    return null;
+            }
         }
 
         private static bool ReadBool(JsonElement parent, string name)
@@ -922,6 +1050,216 @@ namespace WTFnetApp
                 try { return (int)value.GetDouble(); }
                 catch { return 0; }
             }
+        }
+
+        private static string ReadFirstStringFromArray(JsonElement parent, string name)
+        {
+            JsonElement value;
+            if (!parent.TryGetProperty(name, out value))
+                return null;
+
+            if (value.ValueKind != JsonValueKind.Array)
+                return null;
+
+            foreach (JsonElement item in value.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String)
+                    return item.GetString();
+            }
+
+            return null;
+        }
+
+        private static int ReadIntPropertyEither(JsonElement parent, string firstName, string secondName)
+        {
+            JsonElement value;
+            if (parent.TryGetProperty(firstName, out value))
+                return ReadInt(value);
+
+            if (parent.TryGetProperty(secondName, out value))
+                return ReadInt(value);
+
+            return 0;
+        }
+
+        private static long ReadLongPropertyEither(JsonElement parent, string firstName, string secondName)
+        {
+            JsonElement value;
+            if (parent.TryGetProperty(firstName, out value))
+            {
+                try { return value.GetInt64(); }
+                catch
+                {
+                    try { return (long)value.GetDouble(); }
+                    catch { return 0; }
+                }
+            }
+
+            if (parent.TryGetProperty(secondName, out value))
+            {
+                try { return value.GetInt64(); }
+                catch
+                {
+                    try { return (long)value.GetDouble(); }
+                    catch { return 0; }
+                }
+            }
+
+            return 0;
+        }
+
+        private static double ReadDoublePropertyEither(JsonElement parent, string firstName, string secondName)
+        {
+            JsonElement value;
+            if (parent.TryGetProperty(firstName, out value) && value.ValueKind == JsonValueKind.Number)
+            {
+                try { return value.GetDouble(); }
+                catch { }
+            }
+
+            if (parent.TryGetProperty(secondName, out value) && value.ValueKind == JsonValueKind.Number)
+            {
+                try { return value.GetDouble(); }
+                catch { }
+            }
+
+            return 0;
+        }
+
+        private static double ReadDoubleOrDefaultEither(JsonElement parent, string firstName, string secondName, double fallback)
+        {
+            JsonElement value;
+            if (parent.TryGetProperty(firstName, out value) && value.ValueKind == JsonValueKind.Number)
+            {
+                try { return value.GetDouble(); }
+                catch { return fallback; }
+            }
+
+            if (parent.TryGetProperty(secondName, out value) && value.ValueKind == JsonValueKind.Number)
+            {
+                try { return value.GetDouble(); }
+                catch { return fallback; }
+            }
+
+            return fallback;
+        }
+
+        private static int ReadNestedIntEither(JsonElement parent, string firstObjectName, string secondObjectName, string firstChildName, string secondChildName)
+        {
+            JsonElement obj;
+            JsonElement child;
+
+            if (parent.TryGetProperty(firstObjectName, out obj))
+            {
+                if (obj.TryGetProperty(firstChildName, out child))
+                    return ReadInt(child);
+
+                if (obj.TryGetProperty(secondChildName, out child))
+                    return ReadInt(child);
+            }
+
+            if (parent.TryGetProperty(secondObjectName, out obj))
+            {
+                if (obj.TryGetProperty(firstChildName, out child))
+                    return ReadInt(child);
+
+                if (obj.TryGetProperty(secondChildName, out child))
+                    return ReadInt(child);
+            }
+
+            return 0;
+        }
+
+        private static long ReadNestedLongEither(JsonElement parent, string firstObjectName, string secondObjectName, string firstChildName, string secondChildName)
+        {
+            JsonElement obj;
+            JsonElement child;
+
+            if (parent.TryGetProperty(firstObjectName, out obj))
+            {
+                if (obj.TryGetProperty(firstChildName, out child))
+                {
+                    try { return child.GetInt64(); }
+                    catch
+                    {
+                        try { return (long)child.GetDouble(); }
+                        catch { return 0; }
+                    }
+                }
+
+                if (obj.TryGetProperty(secondChildName, out child))
+                {
+                    try { return child.GetInt64(); }
+                    catch
+                    {
+                        try { return (long)child.GetDouble(); }
+                        catch { return 0; }
+                    }
+                }
+            }
+
+            if (parent.TryGetProperty(secondObjectName, out obj))
+            {
+                if (obj.TryGetProperty(firstChildName, out child))
+                {
+                    try { return child.GetInt64(); }
+                    catch
+                    {
+                        try { return (long)child.GetDouble(); }
+                        catch { return 0; }
+                    }
+                }
+
+                if (obj.TryGetProperty(secondChildName, out child))
+                {
+                    try { return child.GetInt64(); }
+                    catch
+                    {
+                        try { return (long)child.GetDouble(); }
+                        catch { return 0; }
+                    }
+                }
+            }
+
+            return 0;
+        }
+
+        private static double ReadNestedDoubleEither(JsonElement parent, string firstObjectName, string secondObjectName, string firstChildName, string secondChildName)
+        {
+            JsonElement obj;
+            JsonElement child;
+
+            if (parent.TryGetProperty(firstObjectName, out obj))
+            {
+                if (obj.TryGetProperty(firstChildName, out child))
+                {
+                    try { return child.GetDouble(); }
+                    catch { }
+                }
+
+                if (obj.TryGetProperty(secondChildName, out child))
+                {
+                    try { return child.GetDouble(); }
+                    catch { }
+                }
+            }
+
+            if (parent.TryGetProperty(secondObjectName, out obj))
+            {
+                if (obj.TryGetProperty(firstChildName, out child))
+                {
+                    try { return child.GetDouble(); }
+                    catch { }
+                }
+
+                if (obj.TryGetProperty(secondChildName, out child))
+                {
+                    try { return child.GetDouble(); }
+                    catch { }
+                }
+            }
+
+            return 0;
         }
 
         private static string FirstNonEmpty(params string[] values)

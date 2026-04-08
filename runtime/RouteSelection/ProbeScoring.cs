@@ -133,8 +133,9 @@ namespace WTFnetApp
         private const double BorderlineSpikeDensity = 4.0;
         private const double RiskySpikeDensity = 8.0;
 
-        private const double BorderlineLossRate = 0.03;
-        private const double RiskyLossRate = 0.08;
+        // loss thresholds relaxed because LTE + probe timing creates fake mini-loss
+        private const double BorderlineLossRate = 0.08;
+        private const double RiskyLossRate = 0.18;
 
         private const double BorderlineStaleRate = 0.05;
         private const double RiskyStaleRate = 0.15;
@@ -178,7 +179,7 @@ namespace WTFnetApp
             double jitterRange = Safe(ComputeJitterRange(runtime));
             double p95Ping = Safe(runtime.P95PingMs);
             double spikeDensity = Safe(runtime.SpikeDensityPerMinute);
-            double lossRate = Safe(runtime.AvgLossRate);
+            double lossRate = EffectiveLossRate(runtime.AvgLossRate);
             double staleRate = Safe(runtime.StaleRate);
             double badRate = Safe(runtime.AvgBadQualityRate);
 
@@ -187,17 +188,20 @@ namespace WTFnetApp
             // Smoothness metric only. Lower is better.
             result.JitterStabilityScore =
                 avgJitter +
-                (jitterRange * 0.60);
+                (jitterRange * 0.65) +
+                (spikeDensity * 0.45) +
+                (badRate * 12.0);
 
-            // Full candidate comparison metric. Still lower is better.
+            // Full comparison metric.
+            // Jitter and spike behavior dominate. Loss is only a secondary penalty now.
             result.OverallStabilityScore =
-                (avgJitter * 1.60) +
-                (jitterRange * 0.90) +
-                (p95Ping * 0.18) +
-                (spikeDensity * 2.20) +
-                (lossRate * 180.0) +
-                (staleRate * 120.0) +
-                (badRate * 90.0) +
+                (avgJitter * 1.90) +
+                (jitterRange * 1.15) +
+                (p95Ping * 0.16) +
+                (spikeDensity * 2.80) +
+                (badRate * 120.0) +
+                (lossRate * 45.0) +
+                (staleRate * 110.0) +
                 ConfidencePenalty(runtime.AvgConfidence) +
                 SpeedifyPenalty(runtime);
 
@@ -256,13 +260,13 @@ namespace WTFnetApp
 
             if (baseline != null &&
                 baseline.WarningLevel != ProbeWarningLevel.Risky &&
-                candidate.OverallStabilityScore > baseline.OverallStabilityScore + 18.0)
+                candidate.OverallStabilityScore > baseline.OverallStabilityScore + 28.0)
             {
                 return true;
             }
 
             if (currentLeader != null &&
-                candidate.OverallStabilityScore > currentLeader.OverallStabilityScore + 22.0)
+                candidate.OverallStabilityScore > currentLeader.OverallStabilityScore + 30.0)
             {
                 return true;
             }
@@ -316,6 +320,7 @@ namespace WTFnetApp
             double p95Ping = shortWindow.P95PingMs;
             double spikeDensity = shortWindow.SpikeDensityPerMinute;
             double jitterRange = ComputeJitterRange(shortWindow);
+            double effectiveLoss = EffectiveLossRate(shortWindow.AvgLossRate);
 
             if (learned != null && learned.HasUsefulLearning)
             {
@@ -355,7 +360,7 @@ namespace WTFnetApp
                 fastPingState.JitterMs >= 0 &&
                 fastPingState.JitterMs <= 12 &&
                 shortWindow.SpikeDensityPerMinute <= 4.0 &&
-                shortWindow.AvgLossRate <= 0.04;
+                effectiveLoss <= 0.08;
 
             if (fixedGood)
             {
@@ -370,7 +375,7 @@ namespace WTFnetApp
                 shortWindow.AvgJitterMs >= 16.0 ||
                 shortWindow.P95PingMs >= 110.0 ||
                 shortWindow.SpikeDensityPerMinute >= 7.0 ||
-                shortWindow.AvgLossRate >= 0.08;
+                effectiveLoss >= 0.18;
 
             if (fixedBadStable)
             {
@@ -416,7 +421,7 @@ namespace WTFnetApp
             double jitterRange = Safe(ComputeJitterRange(runtime));
             double p95Ping = Safe(runtime.P95PingMs);
             double spikeDensity = Safe(runtime.SpikeDensityPerMinute);
-            double lossRate = Safe(runtime.AvgLossRate);
+            double lossRate = EffectiveLossRate(runtime.AvgLossRate);
             double staleRate = Safe(runtime.StaleRate);
             double badRate = Safe(runtime.AvgBadQualityRate);
 
@@ -497,6 +502,19 @@ namespace WTFnetApp
             return -1;
         }
 
+        private static double EffectiveLossRate(double lossRate)
+        {
+            double safeLoss = Safe(lossRate);
+
+            if (safeLoss <= 0.00) return 0.0;
+            if (safeLoss <= 0.03) return 0.0;     // ignore tiny probe noise
+            if (safeLoss <= 0.06) return 0.02;    // very light penalty
+            if (safeLoss <= 0.10) return 0.05;    // moderate
+            if (safeLoss <= 0.15) return 0.10;    // more serious
+
+            return safeLoss;                      // real sustained loss
+        }
+
         private static double ConfidencePenalty(double confidence)
         {
             if (confidence < 0)
@@ -522,7 +540,7 @@ namespace WTFnetApp
                 " jr=" + F(result.JitterRangeMs) +
                 " p95=" + F(runtime.P95PingMs) +
                 " spkD=" + F(runtime.SpikeDensityPerMinute) +
-                " loss=" + F(runtime.AvgLossRate * 100.0);
+                " loss=" + F(EffectiveLossRate(runtime.AvgLossRate) * 100.0);
         }
 
         private static double Safe(double value)

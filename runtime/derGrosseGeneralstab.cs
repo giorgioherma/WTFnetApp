@@ -304,7 +304,7 @@ namespace WTFnetApp
         {
             if (startupEvaluationRunning)
             {
-                Logger.Log("startup", "startup evaluation already running");
+                Logger.Log("startup", "startup evaluation already running | recheck ignored");
                 return;
             }
 
@@ -679,6 +679,7 @@ namespace WTFnetApp
                 runtime.AggregateCongested = false;
                 runtime.ActiveConnectionCount = 0;
                 runtime.BackupConnectionCount = 0;
+                runtime.Notes = "Raw baseline capture";
             }
 
             Logger.Log("startup",

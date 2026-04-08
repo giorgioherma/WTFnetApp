@@ -7,15 +7,19 @@ namespace WTFnetApp
         public static void ResolveFromFastPing(UnifiedNetworkState state, FastPingState fastPing)
         {
             double resolvedPing = ChoosePositive(
-                fastPing.DisplayedPingMs,
                 fastPing.StablePingMs,
+                fastPing.DisplayedPingMs,
                 fastPing.InstantPingMs);
 
             state.LatencyMs = resolvedPing;
             state.JitterMs = fastPing.JitterMs;
             state.BaselineLatencyMs = fastPing.BaselinePingMs;
             state.FloorLatencyMs = fastPing.FloorPingMs;
-            state.DisplayedPingMs = resolvedPing;
+
+            state.DisplayedPingMs = ChoosePositive(
+                fastPing.DisplayedPingMs,
+                fastPing.StablePingMs,
+                fastPing.InstantPingMs);
 
             state.Confidence = fastPing.Confidence;
             state.LossRate = fastPing.LossRate;
@@ -57,7 +61,7 @@ namespace WTFnetApp
 
             state.DisplayedPingMs = state.LatencyMs;
 
-            state.LossRate = snapshot.PacketLoss > 0 ? snapshot.PacketLoss : 0;
+            state.LossRate = snapshot.PacketLoss >= 0 ? snapshot.PacketLoss : -1;
             state.BadQualityRate = 0;
 
             state.SpikeDetected =
@@ -65,9 +69,12 @@ namespace WTFnetApp
                  state.BaselineLatencyMs > 0 &&
                  state.LatencyMs > state.BaselineLatencyMs + 25)
                 ||
-                state.JitterMs > 22
+                (state.JitterMs > 22 &&
+                 state.LatencyMs > 0 &&
+                 state.BaselineLatencyMs > 0 &&
+                 state.LatencyMs > state.BaselineLatencyMs + 12)
                 ||
-                snapshot.AggregateCongested;
+                (snapshot.AggregateCongested && state.JitterMs > 14);
 
             state.IsStale = false;
 

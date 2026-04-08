@@ -60,7 +60,17 @@ namespace WTFnetApp
 
             cancellationToken.ThrowIfCancellationRequested();
 
-            await disableSpeedifyAsync();
+            bool rawDisabled = await disableSpeedifyAsync();
+            if (!rawDisabled)
+            {
+                StartupProbeResult failed = new StartupProbeResult
+                {
+                    SummaryText = "startup-probe | raw baseline failed | speedify did not disable cleanly"
+                };
+
+                Log(failed.SummaryText);
+                return failed;
+            }
 
             ProbeReadinessResult readiness =
                 await WaitForReadinessAsync(
@@ -150,10 +160,11 @@ namespace WTFnetApp
                 score.IsShortlisted = true;
                 output.Shortlist.Add(score);
 
-                if (score.OverallStabilityScore < leader.OverallStabilityScore)
-                    leader = score;
-
                 TrimShortlist(output.Shortlist, 3);
+
+                leader = output.Shortlist
+                    .OrderBy(x => x.OverallStabilityScore)
+                    .FirstOrDefault() ?? rawScore;
 
                 Log("startup-probe | keep | " + candidate +
                     " | " + ProbeScoring.BuildShortText(score) +
@@ -262,12 +273,14 @@ namespace WTFnetApp
                 ? result.Winner.Candidate + " (" + ProbeScoring.BuildShortText(result.Winner) + ")"
                 : "none";
 
-            string shortlist = string.Join(" | ",
-                result.Shortlist.Select(x =>
-                    x.Candidate + " => " +
-                    ProbeScoring.BuildShortText(x) +
-                    " | overall=" + x.OverallStabilityScore.ToString("0.0") +
-                    " | jitterScore=" + x.JitterStabilityScore.ToString("0.0")));
+            string shortlist = result.Shortlist != null && result.Shortlist.Count > 0
+                ? string.Join(" | ",
+                    result.Shortlist.Select(x =>
+                        x.Candidate + " => " +
+                        ProbeScoring.BuildShortText(x) +
+                        " | overall=" + x.OverallStabilityScore.ToString("0.0") +
+                        " | jitterScore=" + x.JitterStabilityScore.ToString("0.0")))
+                : "none";
 
             return "startup-probe | winner=" + winner + " | shortlist=" + shortlist;
         }

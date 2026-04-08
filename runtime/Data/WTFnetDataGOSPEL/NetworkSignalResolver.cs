@@ -41,8 +41,12 @@ namespace WTFnetApp
                 NetworkMetricsCalculator.ResolveFromSpeedify(state, snapshot);
                 NetworkQualityEvaluator.ClassifySpeedify(state, snapshot);
 
-                state.HealthReason = "Resolved from Speedify only";
-                state.Notes = "FastPing ignored while fresh Speedify telemetry is available.";
+                state.HealthReason = "Resolved from Speedify";
+                state.Notes = "Primary source: fresh Speedify telemetry.";
+
+                // let FastPing still influence interpretation a bit
+                if (hasFastPing)
+                    ApplyFastPingOverlaySignals(state, fastPing);
             }
             else if (hasFastPing)
             {
@@ -51,18 +55,70 @@ namespace WTFnetApp
                 NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing);
                 NetworkQualityEvaluator.ClassifyFastPing(state);
 
-                state.HealthReason = "Resolved from FastPing only";
-                state.Notes = "Speedify telemetry unavailable or stale; using probe-derived metrics only.";
+                state.HealthReason = "Resolved from FastPing";
+                state.Notes = "Speedify telemetry unavailable or stale; using probe-derived metrics.";
             }
             else
             {
                 ResolveEmpty(state);
             }
 
-            state.JitterPressure = ComputeJitterPressure(state.JitterMs);
-            state.RefreshDisplayState(natState);
+            state.JitterPressure = Math.Max(
+                state.JitterPressure,
+                ComputeJitterPressure(state.JitterMs));
 
+            state.RefreshDisplayState(natState);
             return state;
+        }
+
+        private static void ApplyFastPingOverlaySignals(UnifiedNetworkState state, FastPingState fastPing)
+        {
+            if (state == null || fastPing == null)
+                return;
+
+            bool fastPingLooksBad =
+                fastPing.SpikeDetected ||
+                fastPing.IsStale ||
+                fastPing.Confidence < 0.60 ||
+                fastPing.LossRate >= 0.20 ||
+                fastPing.BadQualityRate >= 0.30 ||
+                (fastPing.BaselinePingMs > 0 && fastPing.DisplayedPingMs > fastPing.BaselinePingMs + 20);
+
+            bool fastPingLooksVeryBad =
+                fastPing.IsStale ||
+                fastPing.LossRate >= 0.35 ||
+                (fastPing.BaselinePingMs > 0 && fastPing.DisplayedPingMs > fastPing.BaselinePingMs + 35);
+
+            // keep Speedify as source, but raise awareness if probe sees trouble
+            if (fastPingLooksBad)
+            {
+                state.Notes =
+                    AppendNote(state.Notes,
+                    "FastPing indicates instability while Speedify is active.");
+
+                if (state.HealthState == UnifiedNetworkHealthState.Healthy)
+                    state.HealthState = UnifiedNetworkHealthState.OffBaseline;
+            }
+
+            if (fastPingLooksVeryBad)
+            {
+                state.Notes =
+                    AppendNote(state.Notes,
+                    "FastPing indicates severe instability while Speedify is active.");
+
+                if (state.HealthState == UnifiedNetworkHealthState.Healthy ||
+                    state.HealthState == UnifiedNetworkHealthState.OffBaseline)
+                {
+                    state.HealthState = UnifiedNetworkHealthState.Warning;
+                }
+            }
+
+            state.JitterPressure = Math.Max(
+                state.JitterPressure,
+                ComputeJitterPressure(fastPing.JitterMs));
+
+            if (fastPing.SpikeDetected)
+                state.JitterPressure = Math.Max(state.JitterPressure, 0.75);
         }
 
         private static bool IsSpeedifyFresh(MetricsSnapshot snapshot)
@@ -174,39 +230,31 @@ namespace WTFnetApp
                 state.SpeedifySessionWindows.Add(new SpeedifySessionWindowStats
                 {
                     WindowKey = src.WindowKey,
-
                     BytesRecv = src.BytesRecv,
                     BytesSent = src.BytesSent,
                     EncryptedBytesRecv = src.EncryptedBytesRecv,
                     EncryptedBytesSent = src.EncryptedBytesSent,
-
                     MaxDownloadMbps = src.MaxDownloadMbps,
                     MaxUploadMbps = src.MaxUploadMbps,
-
                     NumFailovers = src.NumFailovers,
                     NumSessions = src.NumSessions,
                     RetransBytes = src.RetransBytes,
                     TotalConnectedMinutes = src.TotalConnectedMinutes,
-
                     DownBenefitNumConnections = src.DownBenefitNumConnections,
                     DownBenefitCombinedMbps = src.DownBenefitCombinedMbps,
                     DownBenefitFastestConnMbps = src.DownBenefitFastestConnMbps,
-
                     UpBenefitNumConnections = src.UpBenefitNumConnections,
                     UpBenefitCombinedMbps = src.UpBenefitCombinedMbps,
                     UpBenefitFastestConnMbps = src.UpBenefitFastestConnMbps,
-
                     TunBytesIn = src.TunBytesIn,
                     TunBytesOut = src.TunBytesOut,
                     TunDroppedIncoming = src.TunDroppedIncoming,
                     TunPacketWaits = src.TunPacketWaits,
                     TunReadQueue = src.TunReadQueue,
-
                     PacketHandlerBytesIn = src.PacketHandlerBytesIn,
                     PacketHandlerBytesOut = src.PacketHandlerBytesOut,
                     PacketHandlerDroppedOut = src.PacketHandlerDroppedOut,
                     PacketHandlerRetries = src.PacketHandlerRetries,
-
                     TotalFailoverSaves = src.TotalFailoverSaves,
                     TotalRedundantSaves = src.TotalRedundantSaves,
                     TotalSpeedSaves = src.TotalSpeedSaves,
@@ -229,23 +277,18 @@ namespace WTFnetApp
                     Name = src.Name,
                     Isp = src.Isp,
                     Protocol = src.Protocol,
-
                     Connected = src.Connected,
                     IsProxy = src.IsProxy,
                     IsAggregate = src.IsAggregate,
-
                     Congested = src.Congested,
                     DownloadCongested = src.DownloadCongested,
                     UploadCongested = src.UploadCongested,
-
                     LatencyMs = src.LatencyMs,
                     JitterMs = src.JitterMs,
                     Mos = src.Mos,
-
                     RxBps = src.RxBps,
                     TxBps = src.TxBps,
                     TotalBps = src.TotalBps,
-
                     LocalIp = src.LocalIp,
                     PrivateIp = src.PrivateIp,
                     RemoteIp = src.RemoteIp
@@ -372,6 +415,17 @@ namespace WTFnetApp
                 default:
                     return -1;
             }
+        }
+
+        private static string AppendNote(string existing, string extra)
+        {
+            if (string.IsNullOrWhiteSpace(existing))
+                return extra ?? string.Empty;
+
+            if (string.IsNullOrWhiteSpace(extra))
+                return existing;
+
+            return existing + " " + extra;
         }
     }
 }

@@ -8,17 +8,17 @@ namespace WTFnetApp
     {
         private const int NormalProbeIntervalMs = 250;
         private const int NormalPerTargetPeriodMs = 500;
-        private const int NormalBaseProbeTimeoutMs = 450;
-        private const int NormalMaxProbeTimeoutMs = 700;
-        private const int NormalStaleAfterMs = 2200;
-        private const int NormalMissesBeforeDegrade = 4;
+        private const int NormalBaseProbeTimeoutMs = 500;
+        private const int NormalMaxProbeTimeoutMs = 900;
+        private const int NormalStaleAfterMs = 2400;
+        private const int NormalMissesBeforeDegrade = 5;
 
-        private const int EvaluationProbeIntervalMs = 600;
-        private const int EvaluationPerTargetPeriodMs = 1200;
-        private const int EvaluationBaseProbeTimeoutMs = 800;
-        private const int EvaluationMaxProbeTimeoutMs = 1200;
-        private const int EvaluationStaleAfterMs = 4500;
-        private const int EvaluationMissesBeforeDegrade = 3;
+        private const int EvaluationProbeIntervalMs = 650;
+        private const int EvaluationPerTargetPeriodMs = 1300;
+        private const int EvaluationBaseProbeTimeoutMs = 900;
+        private const int EvaluationMaxProbeTimeoutMs = 1500;
+        private const int EvaluationStaleAfterMs = 5000;
+        private const int EvaluationMissesBeforeDegrade = 4;
 
         private const double StableAlpha = 0.35;
         private const double HugeSpikeStableAlpha = 0.10;
@@ -726,10 +726,15 @@ namespace WTFnetApp
         private int ComputeProbeTimeout_NoLock()
         {
             double basis = tunnelLatencyMs > 0 ? tunnelLatencyMs : state.StablePingMs;
+
             if (basis <= 0)
                 return GetBaseProbeTimeoutMs();
 
-            int timeout = (int)Math.Round(basis * 2.8 + 80.0);
+            // More forgiving for LTE / transient radio delay
+            int timeout = (int)Math.Round(basis * 3.4 + 120.0);
+
+            if (state.JitterMs > 0)
+                timeout += (int)Math.Round(Math.Min(180.0, state.JitterMs * 4.0));
 
             if (timeout < GetBaseProbeTimeoutMs())
                 timeout = GetBaseProbeTimeoutMs();
@@ -846,47 +851,66 @@ namespace WTFnetApp
 
         private void UpdateBadQualityRate_NoLock(ProbeTargetState target)
         {
-            if (target.OutcomeCount == 0)
+            if (target == null)
+            {
+                return;
+            }
+
+            double reference = target.BaselinePingMs > 0 ? target.BaselinePingMs : target.StablePingMs;
+            if (reference <= 0)
             {
                 target.BadQualityRate = 0;
                 return;
             }
 
-            int bad = 0;
-            int total = 0;
+            double weightedBad = 0.0;
+            double weightedTotal = 0.0;
 
-            double reference = target.BaselinePingMs > 0 ? target.BaselinePingMs : target.StablePingMs;
-
-            for (int i = 0; i < target.SuccessCount; i++)
+            // weigh recent successful RTTs more
+            for (int age = 0; age < target.SuccessCount; age++)
             {
-                double value = target.SuccessRtts[i];
+                int idx = (target.SuccessIndex - 1 - age + target.SuccessRtts.Length) % target.SuccessRtts.Length;
+                double value = target.SuccessRtts[idx];
                 if (value <= 0)
                     continue;
 
-                total++;
+                double weight;
+                if (age < 3) weight = 1.00;
+                else if (age < 6) weight = 0.65;
+                else if (age < 9) weight = 0.35;
+                else weight = 0.15;
 
                 bool badSuccess =
-                    reference > 0 &&
-                    (value > reference + 25.0 || value > reference * 1.45);
+                    value > reference + 30.0 ||
+                    value > reference * 1.55;
 
+                weightedTotal += weight;
                 if (badSuccess)
-                    bad++;
+                    weightedBad += weight;
             }
 
-            int misses = 0;
-            for (int i = 0; i < target.OutcomeCount; i++)
+            // misses count, but not as brutally as before
+            for (int age = 0; age < target.OutcomeCount; age++)
             {
-                if (target.Outcomes[i] == 0)
-                    misses++;
+                int idx = (target.OutcomeIndex - 1 - age + target.Outcomes.Length) % target.Outcomes.Length;
+                byte outcome = target.Outcomes[idx];
+
+                if (outcome != 0)
+                    continue;
+
+                double weight;
+                if (age < 4) weight = 0.90;
+                else if (age < 8) weight = 0.50;
+                else if (age < 12) weight = 0.25;
+                else weight = 0.10;
+
+                weightedTotal += weight;
+                weightedBad += weight;
             }
 
-            bad += misses;
-            total += (target.OutcomeCount - target.SuccessCount);
-
-            if (total <= 0)
-                target.BadQualityRate = 0;
-            else
-                target.BadQualityRate = (double)bad / total;
+            target.BadQualityRate = weightedTotal > 0
+                ? weightedBad / weightedTotal
+                : 0.0;
         }
 
         private void PushSuccessRtt_NoLock(ProbeTargetState target, double sample)
@@ -954,17 +978,34 @@ namespace WTFnetApp
 
         private double ComputeLossRate_NoLock(ProbeTargetState target)
         {
-            if (target.OutcomeCount == 0)
+            if (target == null || target.OutcomeCount == 0)
                 return 0;
 
-            int misses = 0;
-            for (int i = 0; i < target.OutcomeCount; i++)
+            double weightedMisses = 0.0;
+            double weightedTotal = 0.0;
+
+            // newest samples should matter more than old ones
+            for (int age = 0; age < target.OutcomeCount; age++)
             {
-                if (target.Outcomes[i] == 0)
-                    misses++;
+                int idx = (target.OutcomeIndex - 1 - age + target.Outcomes.Length) % target.Outcomes.Length;
+                byte outcome = target.Outcomes[idx];
+
+                double weight;
+                if (age < 4) weight = 1.00;
+                else if (age < 8) weight = 0.65;
+                else if (age < 12) weight = 0.35;
+                else weight = 0.15;
+
+                weightedTotal += weight;
+
+                if (outcome == 0)
+                    weightedMisses += weight;
             }
 
-            return (double)misses / target.OutcomeCount;
+            if (weightedTotal <= 0.0)
+                return 0.0;
+
+            return weightedMisses / weightedTotal;
         }
 
         private double ComputeConfidence_NoLock(ProbeTargetState target)
@@ -975,27 +1016,27 @@ namespace WTFnetApp
                 return 0.0;
 
             double ageMs = (DateTime.UtcNow - target.LastSuccessUtc).TotalMilliseconds;
-            if (ageMs > 300) confidence -= 0.06;
-            if (ageMs > 600) confidence -= 0.10;
-            if (ageMs > 1000) confidence -= 0.14;
-            if (ageMs > GetStaleAfterMs()) confidence -= 0.25;
+            if (ageMs > 350) confidence -= 0.04;
+            if (ageMs > 700) confidence -= 0.07;
+            if (ageMs > 1200) confidence -= 0.10;
+            if (ageMs > GetStaleAfterMs()) confidence -= 0.22;
 
-            confidence -= target.LossRate * 0.35;
-            confidence -= target.BadQualityRate * 0.20;
+            confidence -= target.LossRate * 0.28;
+            confidence -= target.BadQualityRate * 0.16;
 
-            if (target.JitterMs > 8.0)
-                confidence -= 0.05;
-            if (target.JitterMs > 14.0)
-                confidence -= 0.07;
-            if (target.JitterMs > 22.0)
-                confidence -= 0.10;
+            if (target.JitterMs > 10.0)
+                confidence -= 0.04;
+            if (target.JitterMs > 16.0)
+                confidence -= 0.06;
+            if (target.JitterMs > 24.0)
+                confidence -= 0.08;
 
             if (target.ConsecutiveMisses >= GetMissesBeforeDegrade())
-                confidence -= 0.25;
+                confidence -= 0.22;
+            else if (target.ConsecutiveMisses == 4)
+                confidence -= 0.10;
             else if (target.ConsecutiveMisses == 3)
-                confidence -= 0.12;
-            else if (target.ConsecutiveMisses == 2)
-                confidence -= 0.05;
+                confidence -= 0.06;
 
             if (confidence < 0)
                 confidence = 0;
@@ -1052,9 +1093,9 @@ namespace WTFnetApp
             next.SpikeDetected = !IsEvaluationWarmupActive_NoLock() &&
                                  IsSpike_NoLock(bestInstantProbe, bestStableProbe, bestFloorProbe);
 
-            next.LossRate = Math.Max(primary.LossRate, secondary.LossRate);
-            next.BadQualityRate = Math.Max(primary.BadQualityRate, secondary.BadQualityRate);
-            next.Confidence = Math.Max(primary.Confidence, secondary.Confidence);
+            next.LossRate = ComputeCombinedLoss_NoLock(primaryFresh, secondaryFresh);
+            next.BadQualityRate = ComputeCombinedBadQuality_NoLock(primaryFresh, secondaryFresh);
+            next.Confidence = ComputeCombinedConfidence_NoLock(primaryFresh, secondaryFresh);
 
             next.IsStale = !primaryFresh && !secondaryFresh;
             next.PrimaryFresh = primaryFresh;
@@ -1131,19 +1172,19 @@ namespace WTFnetApp
 
             bool hardDegrade = HasHardDegrade_NoLock();
 
-            if (s.IsStale || s.Confidence < 0.20)
+            if (s.IsStale || s.Confidence < 0.18)
                 return FastPingHealthState.Stale;
 
-            if (hardDegrade)
+            if (hardDegrade && s.LossRate >= 0.22)
                 return FastPingHealthState.Critical;
 
-            if (s.LossRate >= 0.30 || s.BadQualityRate >= 0.45)
+            if (s.LossRate >= 0.38 || s.BadQualityRate >= 0.52)
                 return FastPingHealthState.Critical;
 
-            if ((s.SpikeDetected && s.JitterMs >= 12.0) ||
-                (s.InstantPingMs > 0 && s.BaselinePingMs > 0 && s.InstantPingMs > s.BaselinePingMs + 35.0) ||
-                s.JitterMs >= 18.0 ||
-                s.LossRate >= 0.22)
+            if ((s.SpikeDetected && s.JitterMs >= 14.0) ||
+                (s.InstantPingMs > 0 && s.BaselinePingMs > 0 && s.InstantPingMs > s.BaselinePingMs + 40.0) ||
+                s.JitterMs >= 20.0 ||
+                s.LossRate >= 0.24)
                 return FastPingHealthState.Warning;
 
             if (s.OffBaseline)
@@ -1289,50 +1330,126 @@ namespace WTFnetApp
             return Math.Abs(primary.StablePingMs - secondary.StablePingMs);
         }
 
+        private double ComputeCombinedLoss_NoLock(bool primaryFresh, bool secondaryFresh)
+        {
+            if (primaryFresh && secondaryFresh)
+                return (primary.LossRate * 0.55) + (secondary.LossRate * 0.45);
+
+            if (primaryFresh)
+                return primary.LossRate;
+
+            if (secondaryFresh)
+                return secondary.LossRate;
+
+            return Math.Min(1.0, (primary.LossRate + secondary.LossRate) * 0.5);
+        }
+
+        private double ComputeCombinedBadQuality_NoLock(bool primaryFresh, bool secondaryFresh)
+        {
+            if (primaryFresh && secondaryFresh)
+                return Math.Max(primary.BadQualityRate, secondary.BadQualityRate * 0.90);
+
+            if (primaryFresh)
+                return primary.BadQualityRate;
+
+            if (secondaryFresh)
+                return secondary.BadQualityRate;
+
+            return Math.Max(primary.BadQualityRate, secondary.BadQualityRate);
+        }
+
+        private double ComputeCombinedConfidence_NoLock(bool primaryFresh, bool secondaryFresh)
+        {
+            if (primaryFresh && secondaryFresh)
+            {
+                double best = Math.Max(primary.Confidence, secondary.Confidence);
+                double other = Math.Min(primary.Confidence, secondary.Confidence);
+
+                // still prefer the better path, but don't let one perfect path fully hide a weak other one
+                return Math.Max(0.0, Math.Min(1.0, (best * 0.75) + (other * 0.25)));
+            }
+
+            if (primaryFresh)
+                return primary.Confidence;
+
+            if (secondaryFresh)
+                return secondary.Confidence;
+
+            return Math.Max(primary.Confidence, secondary.Confidence);
+        }
+
         private double ComputeDisplayedPing_NoLock(FastPingState s)
         {
             double tunnel = s.TunnelLatencyMs;
             double stable = s.StablePingMs;
             double instant = s.InstantPingMs;
+            double baseline = s.BaselinePingMs;
 
             if (s.IsStale)
             {
                 if (tunnel > 0)
                     return tunnel;
-                if (instant > 0)
-                    return instant;
                 if (stable > 0)
                     return stable;
+                if (instant > 0)
+                    return instant;
                 return -1;
             }
 
+            // No tunnel available: prefer stable, but still react to real spikes
             if (tunnel <= 0)
             {
-                if (instant > 0 && stable > 0)
-                    return (0.70 * instant) + (0.30 * stable);
+                if (stable > 0 && instant > 0)
+                {
+                    bool hardSpike =
+                        (baseline > 0 && instant >= baseline + 28.0) ||
+                        (stable > 0 && instant >= stable + 22.0);
 
-                if (instant > 0)
-                    return instant;
+                    if (hardSpike)
+                        return (0.78 * instant) + (0.22 * stable);
+
+                    return (0.30 * instant) + (0.70 * stable);
+                }
 
                 if (stable > 0)
                     return stable;
 
+                if (instant > 0)
+                    return instant;
+
                 return -1;
             }
 
-            if (stable <= 0 && tunnel > 0)
+            // Tunnel only
+            if (stable <= 0)
                 return tunnel;
 
-            if (stable > 0 && tunnel <= 0)
-                return stable;
+            // Tunnel + stable probe available
+            bool tunnelLooksHigher =
+                tunnel > stable + 8.0;
 
-            if (stable <= 0 && tunnel <= 0)
-                return -1;
+            bool instantSpike =
+                instant > 0 &&
+                (
+                    (baseline > 0 && instant >= baseline + 28.0) ||
+                    instant >= stable + 22.0 ||
+                    instant >= tunnel + 18.0
+                );
 
-            if (instant > 0 && tunnel > 0 && instant > tunnel + SpikeDeltaMs)
-                return Math.Max(instant, tunnel);
+            if (instantSpike)
+            {
+                double spikeAnchor = Math.Max(tunnel, stable);
+                return Math.Max(instant, spikeAnchor);
+            }
 
-            return (0.65 * tunnel) + (0.35 * stable);
+            if (tunnelLooksHigher)
+            {
+                // trust tunnel more when it is consistently above probe
+                return (0.72 * tunnel) + (0.28 * stable);
+            }
+
+            // default: smoother display, less twitchy than before
+            return (0.58 * tunnel) + (0.42 * stable);
         }
 
         private sealed class ProbeTargetState

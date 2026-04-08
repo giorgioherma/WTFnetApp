@@ -276,8 +276,12 @@ namespace WTFnetApp
             double jitter = s10.IsValid ? s10.AvgJitterMs : s30.AvgJitterMs;
             double loss = s10.IsValid ? s10.AvgLossRate : s30.AvgLossRate;
 
+            double bad = s10.IsValid ? s10.AvgBadQualityRate : s30.AvgBadQualityRate;
+            double conf = s10.IsValid ? s10.AvgConfidence : s30.AvgConfidence;
+
             Logger.Log("fastping-agg",
                 $"avg={avg:0} max={max:0} p95={p95:0} j={jitter:0} loss={loss:0.00} " +
+                $"bad={bad:0.00} conf={conf:0.00} " +
                 $"spkD10={s10.SpikeDensityPerMinute:0.0} spkD30={s30.SpikeDensityPerMinute:0.0}");
 
             lastAggregatedLogUtc = nowUtc;
@@ -310,7 +314,9 @@ namespace WTFnetApp
             if (deltaFromBaseline >= CriticalSpikeDeltaMs || jitter >= CriticalJitterMs)
                 return TrackerState.Critical;
 
-            if (deltaFromBaseline >= WarningSpikeDeltaMs || jitter >= WarningJitterMs || state.SpikeDetected)
+            if ((deltaFromBaseline >= WarningSpikeDeltaMs && jitter >= 8.0) ||
+                jitter >= WarningJitterMs ||
+                (state.SpikeDetected && deltaFromBaseline >= 18.0))
                 return TrackerState.Warning;
 
             if (deltaFromBaseline >= 15.0 || jitter >= 8.0)
@@ -441,13 +447,19 @@ namespace WTFnetApp
 
             public bool IsValid
             {
-                get { return ValidPingCount >= 3; }
+                get { return ValidPingCount >= 5; }
             }
         }
 
         private sealed class RunningStats
         {
             private int sampleCount;
+            private int instantCount;
+            private int jitterCount;
+            private int confidenceCount;
+            private int lossCount;
+            private int badQualityCount;
+
             private double instantSum;
             private double jitterSum;
             private double confidenceSum;
@@ -469,6 +481,12 @@ namespace WTFnetApp
             public void Reset()
             {
                 sampleCount = 0;
+                instantCount = 0;
+                jitterCount = 0;
+                confidenceCount = 0;
+                lossCount = 0;
+                badQualityCount = 0;
+
                 instantSum = 0;
                 jitterSum = 0;
                 confidenceSum = 0;
@@ -498,20 +516,38 @@ namespace WTFnetApp
                 if (state.InstantPingMs > 0)
                 {
                     instantSum += state.InstantPingMs;
+                    instantCount++;
+
                     if (state.InstantPingMs > MaxInstantMs)
                         MaxInstantMs = state.InstantPingMs;
                 }
 
-                if (state.JitterMs > 0)
+                if (state.JitterMs >= 0)
                 {
                     jitterSum += state.JitterMs;
+                    jitterCount++;
+
                     if (state.JitterMs > MaxJitterMs)
                         MaxJitterMs = state.JitterMs;
                 }
 
-                confidenceSum += state.Confidence;
-                lossSum += state.LossRate;
-                badQualitySum += state.BadQualityRate;
+                if (state.Confidence >= 0)
+                {
+                    confidenceSum += state.Confidence;
+                    confidenceCount++;
+                }
+
+                if (state.LossRate >= 0)
+                {
+                    lossSum += state.LossRate;
+                    lossCount++;
+                }
+
+                if (state.BadQualityRate >= 0)
+                {
+                    badQualitySum += state.BadQualityRate;
+                    badQualityCount++;
+                }
 
                 if (state.SpikeDetected)
                     SpikeCount++;
@@ -519,11 +555,11 @@ namespace WTFnetApp
                 if (state.IsStale || state.HealthState == FastPingHealthState.Stale)
                     StaleCount++;
 
-                AvgInstantMs = instantSum / sampleCount;
-                AvgJitterMs = jitterSum / sampleCount;
-                AvgConfidence = confidenceSum / sampleCount;
-                AvgLossRate = lossSum / sampleCount;
-                AvgBadQualityRate = badQualitySum / sampleCount;
+                AvgInstantMs = instantCount > 0 ? instantSum / instantCount : 0;
+                AvgJitterMs = jitterCount > 0 ? jitterSum / jitterCount : 0;
+                AvgConfidence = confidenceCount > 0 ? confidenceSum / confidenceCount : 0;
+                AvgLossRate = lossCount > 0 ? lossSum / lossCount : 0;
+                AvgBadQualityRate = badQualityCount > 0 ? badQualitySum / badQualityCount : 0;
             }
         }
 
