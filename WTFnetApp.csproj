@@ -80,7 +80,7 @@
     <Compile Include="runtime\Data\WtfFastPingData\NetworkMetricsCalculator.cs" />
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkQualityEvaluator.cs" />
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkSignalResolver.cs" />
-    <Compile Include="runtime\Data\WtfFastPingData\FastPingDeviationTracker.cs" />
+    <Compile Include="runtime\Data\WtfFastPingData\FastPingSignalAnalyzer.cs" />
     <None Include="legacy\DataSet.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>

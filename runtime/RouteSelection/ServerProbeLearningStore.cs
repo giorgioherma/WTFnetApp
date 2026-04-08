@@ -1,12 +1,413 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 
-namespace WTFnetApp.runtime.Data.RouteSelection
+namespace WTFnetApp
 {
-    internal class ServerProbeLearningStore
+    public sealed class LearnedMetricBand
     {
+        public double GoodMin { get; set; } = -1;
+        public double GoodMax { get; set; } = -1;
+        public double BadMin { get; set; } = -1;
+        public double BadMax { get; set; } = -1;
+
+        public bool HasGoodBand
+        {
+            get { return GoodMin >= 0 && GoodMax >= 0; }
+        }
+
+        public bool HasBadBand
+        {
+            get { return BadMin >= 0 && BadMax >= 0; }
+        }
+
+        public bool IsInGoodBand(double value)
+        {
+            if (!HasGoodBand || value < 0)
+                return false;
+
+            return value >= GoodMin && value <= GoodMax;
+        }
+
+        public bool IsInBadBand(double value)
+        {
+            if (!HasBadBand || value < 0)
+                return false;
+
+            return value >= BadMin && value <= BadMax;
+        }
+
+        public void SeedGood(double min, double max)
+        {
+            GoodMin = min;
+            GoodMax = max;
+        }
+
+        public void SeedBad(double min, double max)
+        {
+            BadMin = min;
+            BadMax = max;
+        }
+
+        public void UpdateGood(double value, double expandFactor = 0.20)
+        {
+            if (value < 0)
+                return;
+
+            if (!HasGoodBand)
+            {
+                GoodMin = value;
+                GoodMax = value;
+                return;
+            }
+
+            if (value < GoodMin)
+            {
+                double delta = GoodMin - value;
+                GoodMin = value;
+                GoodMax += delta * expandFactor;
+            }
+            else if (value > GoodMax)
+            {
+                double delta = value - GoodMax;
+                GoodMax = value;
+                GoodMin = Math.Max(0, GoodMin - (delta * expandFactor));
+            }
+            else
+            {
+                GoodMin = Math.Max(0, (GoodMin * 0.97) + (value * 0.03));
+                GoodMax = (GoodMax * 0.97) + (value * 0.03);
+            }
+        }
+
+        public void UpdateBad(double value, double expandFactor = 0.20)
+        {
+            if (value < 0)
+                return;
+
+            if (!HasBadBand)
+            {
+                BadMin = value;
+                BadMax = value;
+                return;
+            }
+
+            if (value < BadMin)
+            {
+                double delta = BadMin - value;
+                BadMin = value;
+                BadMax += delta * expandFactor;
+            }
+            else if (value > BadMax)
+            {
+                double delta = value - BadMax;
+                BadMax = value;
+                BadMin = Math.Max(0, BadMin - (delta * expandFactor));
+            }
+            else
+            {
+                BadMin = Math.Max(0, (BadMin * 0.97) + (value * 0.03));
+                BadMax = (BadMax * 0.97) + (value * 0.03);
+            }
+        }
+    }
+
+    public sealed class LearnedProbeStateProfile
+    {
+        public string ProfileKey { get; set; }
+        public string RouteKey { get; set; }
+        public string TimeBucketKey { get; set; }
+
+        public LearnedMetricBand AvgJitterMs { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand JitterRangeMs { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand P95PingMs { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand SpikeDensityPerMinute { get; set; } = new LearnedMetricBand();
+
+        public int SampleCountGood { get; set; }
+        public int SampleCountBad { get; set; }
+
+        public DateTime LastUpdatedUtc { get; set; } = DateTime.MinValue;
+
+        public bool HasUsefulLearning
+        {
+            get
+            {
+                return AvgJitterMs.HasGoodBand ||
+                       AvgJitterMs.HasBadBand ||
+                       JitterRangeMs.HasGoodBand ||
+                       JitterRangeMs.HasBadBand ||
+                       P95PingMs.HasGoodBand ||
+                       P95PingMs.HasBadBand ||
+                       SpikeDensityPerMinute.HasGoodBand ||
+                       SpikeDensityPerMinute.HasBadBand;
+            }
+        }
+    }
+
+    public sealed class ServerProbeLearningStore
+    {
+        private readonly Dictionary<string, LearnedProbeStateProfile> profiles =
+            new Dictionary<string, LearnedProbeStateProfile>(StringComparer.OrdinalIgnoreCase);
+
+        private bool defaultsSeeded;
+
+        public void SeedDefaultsIfEmpty()
+        {
+            if (defaultsSeeded)
+                return;
+
+            SeedProfileDefaults("raw", "night",
+                avgJitterGoodMax: 10, avgJitterBadMin: 15,
+                jitterRangeGoodMax: 10, jitterRangeBadMin: 18,
+                p95GoodMax: 75, p95BadMin: 115,
+                spikeGoodMax: 3.0, spikeBadMin: 7.0);
+
+            SeedProfileDefaults("raw", "morning",
+                avgJitterGoodMax: 10, avgJitterBadMin: 15,
+                jitterRangeGoodMax: 10, jitterRangeBadMin: 18,
+                p95GoodMax: 75, p95BadMin: 115,
+                spikeGoodMax: 3.0, spikeBadMin: 7.0);
+
+            SeedProfileDefaults("raw", "day",
+                avgJitterGoodMax: 11, avgJitterBadMin: 16,
+                jitterRangeGoodMax: 11, jitterRangeBadMin: 19,
+                p95GoodMax: 80, p95BadMin: 120,
+                spikeGoodMax: 3.5, spikeBadMin: 7.5);
+
+            SeedProfileDefaults("raw", "evening",
+                avgJitterGoodMax: 11, avgJitterBadMin: 16,
+                jitterRangeGoodMax: 11, jitterRangeBadMin: 19,
+                p95GoodMax: 80, p95BadMin: 120,
+                spikeGoodMax: 3.5, spikeBadMin: 7.5);
+
+            SeedProfileDefaults("*", "night",
+                avgJitterGoodMax: 9, avgJitterBadMin: 14,
+                jitterRangeGoodMax: 9, jitterRangeBadMin: 17,
+                p95GoodMax: 70, p95BadMin: 110,
+                spikeGoodMax: 2.5, spikeBadMin: 6.5);
+
+            SeedProfileDefaults("*", "morning",
+                avgJitterGoodMax: 9, avgJitterBadMin: 14,
+                jitterRangeGoodMax: 9, jitterRangeBadMin: 17,
+                p95GoodMax: 70, p95BadMin: 110,
+                spikeGoodMax: 2.5, spikeBadMin: 6.5);
+
+            SeedProfileDefaults("*", "day",
+                avgJitterGoodMax: 10, avgJitterBadMin: 15,
+                jitterRangeGoodMax: 10, jitterRangeBadMin: 18,
+                p95GoodMax: 75, p95BadMin: 115,
+                spikeGoodMax: 3.0, spikeBadMin: 7.0);
+
+            SeedProfileDefaults("*", "evening",
+                avgJitterGoodMax: 10, avgJitterBadMin: 15,
+                jitterRangeGoodMax: 10, jitterRangeBadMin: 18,
+                p95GoodMax: 75, p95BadMin: 115,
+                spikeGoodMax: 3.0, spikeBadMin: 7.0);
+
+            defaultsSeeded = true;
+        }
+
+        public LearnedProbeStateProfile GetProfile(string routeKey, string timeBucketKey)
+        {
+            string normalizedRouteKey = NormalizeRouteKey(routeKey);
+            string normalizedBucket = NormalizeTimeBucket(timeBucketKey);
+
+            string exactKey = BuildProfileKey(normalizedRouteKey, normalizedBucket);
+
+            LearnedProbeStateProfile profile;
+            if (profiles.TryGetValue(exactKey, out profile))
+                return profile;
+
+            string wildcardKey = BuildProfileKey("*", normalizedBucket);
+            if (profiles.TryGetValue(wildcardKey, out profile))
+                return profile;
+
+            profile = CreateEmptyProfile(normalizedRouteKey, normalizedBucket);
+            profiles[exactKey] = profile;
+            return profile;
+        }
+
+        public void UpdateFromResult(ProbeScoreResult result)
+        {
+            if (result == null || result.Runtime == null || result.Candidate == null)
+                return;
+
+            string routeKey = NormalizeRouteKey(result.Candidate.RouteKey);
+            string timeBucketKey = NormalizeTimeBucket(result.Runtime.TimeBucketKey);
+
+            LearnedProbeStateProfile profile = GetOrCreateOwnedProfile(routeKey, timeBucketKey);
+
+            bool isGood =
+                result.WarningLevel == ProbeWarningLevel.None &&
+                !result.IsDiscardedEarly;
+
+            bool isBad =
+                result.WarningLevel == ProbeWarningLevel.Risky ||
+                result.IsDiscardedEarly;
+
+            if (!isGood && !isBad)
+            {
+                profile.LastUpdatedUtc = DateTime.UtcNow;
+                return;
+            }
+
+            double avgJitter = result.Runtime.AvgJitterMs;
+            double jitterRange = result.JitterRangeMs;
+            double p95Ping = result.Runtime.P95PingMs;
+            double spikeDensity = result.Runtime.SpikeDensityPerMinute;
+
+            if (isGood)
+            {
+                profile.AvgJitterMs.UpdateGood(avgJitter);
+                profile.JitterRangeMs.UpdateGood(jitterRange);
+                profile.P95PingMs.UpdateGood(p95Ping);
+                profile.SpikeDensityPerMinute.UpdateGood(spikeDensity);
+                profile.SampleCountGood++;
+            }
+
+            if (isBad)
+            {
+                profile.AvgJitterMs.UpdateBad(avgJitter);
+                profile.JitterRangeMs.UpdateBad(jitterRange);
+                profile.P95PingMs.UpdateBad(p95Ping);
+                profile.SpikeDensityPerMinute.UpdateBad(spikeDensity);
+                profile.SampleCountBad++;
+            }
+
+            profile.LastUpdatedUtc = DateTime.UtcNow;
+        }
+
+        public void UpdateFromRawReadinessSnapshot(
+            string routeKey,
+            string timeBucketKey,
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot,
+            ProbeReadinessKind readinessKind)
+        {
+            if (snapshot == null)
+                return;
+
+            LearnedProbeStateProfile profile =
+                GetOrCreateOwnedProfile(NormalizeRouteKey(routeKey), NormalizeTimeBucket(timeBucketKey));
+
+            double avgJitter = snapshot.AvgJitterMs;
+            double jitterRange = ComputeJitterRange(snapshot);
+            double p95Ping = snapshot.P95PingMs;
+            double spikeDensity = snapshot.SpikeDensityPerMinute;
+
+            if (readinessKind == ProbeReadinessKind.GoodStable)
+            {
+                profile.AvgJitterMs.UpdateGood(avgJitter);
+                profile.JitterRangeMs.UpdateGood(jitterRange);
+                profile.P95PingMs.UpdateGood(p95Ping);
+                profile.SpikeDensityPerMinute.UpdateGood(spikeDensity);
+                profile.SampleCountGood++;
+            }
+            else if (readinessKind == ProbeReadinessKind.BadStable)
+            {
+                profile.AvgJitterMs.UpdateBad(avgJitter);
+                profile.JitterRangeMs.UpdateBad(jitterRange);
+                profile.P95PingMs.UpdateBad(p95Ping);
+                profile.SpikeDensityPerMinute.UpdateBad(spikeDensity);
+                profile.SampleCountBad++;
+            }
+
+            profile.LastUpdatedUtc = DateTime.UtcNow;
+        }
+
+        private void SeedProfileDefaults(
+            string routeKey,
+            string timeBucketKey,
+            double avgJitterGoodMax,
+            double avgJitterBadMin,
+            double jitterRangeGoodMax,
+            double jitterRangeBadMin,
+            double p95GoodMax,
+            double p95BadMin,
+            double spikeGoodMax,
+            double spikeBadMin)
+        {
+            LearnedProbeStateProfile profile = GetOrCreateOwnedProfile(routeKey, timeBucketKey);
+
+            if (!profile.AvgJitterMs.HasGoodBand)
+                profile.AvgJitterMs.SeedGood(0, avgJitterGoodMax);
+
+            if (!profile.AvgJitterMs.HasBadBand)
+                profile.AvgJitterMs.SeedBad(avgJitterBadMin, 999);
+
+            if (!profile.JitterRangeMs.HasGoodBand)
+                profile.JitterRangeMs.SeedGood(0, jitterRangeGoodMax);
+
+            if (!profile.JitterRangeMs.HasBadBand)
+                profile.JitterRangeMs.SeedBad(jitterRangeBadMin, 999);
+
+            if (!profile.P95PingMs.HasGoodBand)
+                profile.P95PingMs.SeedGood(0, p95GoodMax);
+
+            if (!profile.P95PingMs.HasBadBand)
+                profile.P95PingMs.SeedBad(p95BadMin, 999);
+
+            if (!profile.SpikeDensityPerMinute.HasGoodBand)
+                profile.SpikeDensityPerMinute.SeedGood(0, spikeGoodMax);
+
+            if (!profile.SpikeDensityPerMinute.HasBadBand)
+                profile.SpikeDensityPerMinute.SeedBad(spikeBadMin, 999);
+        }
+
+        private LearnedProbeStateProfile GetOrCreateOwnedProfile(string routeKey, string timeBucketKey)
+        {
+            string profileKey = BuildProfileKey(routeKey, timeBucketKey);
+
+            LearnedProbeStateProfile profile;
+            if (profiles.TryGetValue(profileKey, out profile))
+                return profile;
+
+            profile = CreateEmptyProfile(routeKey, timeBucketKey);
+            profiles[profileKey] = profile;
+            return profile;
+        }
+
+        private static LearnedProbeStateProfile CreateEmptyProfile(string routeKey, string timeBucketKey)
+        {
+            return new LearnedProbeStateProfile
+            {
+                ProfileKey = BuildProfileKey(routeKey, timeBucketKey),
+                RouteKey = routeKey,
+                TimeBucketKey = timeBucketKey
+            };
+        }
+
+        private static string BuildProfileKey(string routeKey, string timeBucketKey)
+        {
+            return NormalizeRouteKey(routeKey) + "|" + NormalizeTimeBucket(timeBucketKey);
+        }
+
+        private static string NormalizeRouteKey(string routeKey)
+        {
+            if (string.IsNullOrWhiteSpace(routeKey))
+                return "raw";
+
+            return routeKey.Trim().ToLowerInvariant();
+        }
+
+        private static string NormalizeTimeBucket(string timeBucketKey)
+        {
+            if (string.IsNullOrWhiteSpace(timeBucketKey))
+                return "day";
+
+            return timeBucketKey.Trim().ToLowerInvariant();
+        }
+
+        private static double ComputeJitterRange(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return -1;
+
+            if (snapshot.MinJitterMs >= 0 && snapshot.MaxJitterMs >= 0)
+                return Math.Max(0, snapshot.MaxJitterMs - snapshot.MinJitterMs);
+
+            if (snapshot.AvgJitterMs >= 0 && snapshot.P95JitterMs >= 0)
+                return Math.Max(0, snapshot.P95JitterMs - snapshot.AvgJitterMs);
+
+            return -1;
+        }
     }
 }

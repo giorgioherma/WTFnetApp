@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace WTFnetApp
@@ -14,11 +16,11 @@ namespace WTFnetApp
         private SpeedifyTelemetryReader speedifyReader;
 
         private readonly WtfFastPing fastPing = new WtfFastPing();
-        private readonly FastPingDeviationTracker fastPingDeviationTracker = new FastPingDeviationTracker();
+        private readonly FastPingSignalAnalyzer fastPingSignalAnalyzer = new FastPingSignalAnalyzer();
         private readonly NetworkSignalResolver networkSignalResolver = new NetworkSignalResolver();
+        private readonly ServerProbeLearningStore probeLearningStore = new ServerProbeLearningStore();
 
-        private const int RouteEvaluationMeasureMs = 35000;
-        private const int RouteEvaluationSettleMs = 2000;
+        private StartupProbeCoordinator startupProbeCoordinator;
 
         // =========================
         // CURRENT STATE CACHE
@@ -31,37 +33,37 @@ namespace WTFnetApp
 
         private volatile bool startupEvaluationRunning;
         private DateTime lastStartupEvaluationUtc = DateTime.MinValue;
-
-        private const string SpeedifyCliPath = @"C:\Program Files (x86)\Speedify\speedify_cli.exe";
-        private const string SpeedifyExePath = @"C:\Program Files (x86)\Speedify\Speedify.exe";
-
         private DateTime lastSpeedifySnapshotUtc = DateTime.MinValue;
 
+        private StartupProbeResult lastStartupProbeResult;
         private EvaluationStats lastRouteEvaluationStats;
 
         private readonly DateTime appStartedUtc = DateTime.UtcNow;
         private const int StartupUiGraceSeconds = 10;
 
         // =========================
-        // FASTPING TARGET ORCHESTRATION
+        // SPEEDIFY PATHS
         // =========================
+
+        private const string SpeedifyCliPath = @"C:\Program Files (x86)\Speedify\speedify_cli.exe";
+        private const string SpeedifyExePath = @"C:\Program Files (x86)\Speedify\Speedify.exe";
+
+        // =========================
+        // FIXED FAIR PROBE TARGETS
+        // =========================
+
+        private const string FixedPrimaryProbeTarget = "1.1.1.1";
+        private const string FixedSecondaryProbeTarget = "8.8.8.8";
 
         private string lastFastPingPrimaryTarget;
         private string lastFastPingSecondaryTarget;
 
-        private string lastValidTunnelProbeTarget;
-        private DateTime lastValidTunnelProbeTargetUtc = DateTime.MinValue;
+        // =========================
+        // PROBE TIMING
+        // =========================
 
-        private const int TunnelProbeTargetGraceSeconds = 8;
-
-        private ProbeTargetMode currentProbeTargetMode = ProbeTargetMode.Unknown;
-
-        private enum ProbeTargetMode
-        {
-            Unknown = 0,
-            ExternalOnly = 1,
-            TunnelAware = 2
-        }
+        private const int RawBaselineObserveMs = 12000;
+        private const int CandidateObserveMs = 10000;
 
         // =========================
         // CONSTRUCTOR
@@ -80,6 +82,7 @@ namespace WTFnetApp
             InitializeNat();
             InitializeFastPing();
             InitializeTelemetry();
+            InitializeRouteSelection();
 
             Logger.Log("engine", "network monitor started");
         }
@@ -106,8 +109,8 @@ namespace WTFnetApp
         {
             fastPing.StateUpdated += OnFastPingStateUpdated;
 
-            UpdateFastPingTargetsIfChanged("1.1.1.1", "8.8.8.8");
-            LogProbeModeIfChanged(ProbeTargetMode.ExternalOnly, "startup default");
+            UpdateFastPingTargetsIfChanged(FixedPrimaryProbeTarget, FixedSecondaryProbeTarget);
+            Logger.Log("fastping", "probe mode -> externalonly | forced fixed targets for fair comparison");
 
             fastPing.Start();
         }
@@ -116,6 +119,20 @@ namespace WTFnetApp
         {
             speedifyReader = new SpeedifyTelemetryReader(OnSpeedifySnapshot);
             speedifyReader.Start();
+        }
+
+        private void InitializeRouteSelection()
+        {
+            probeLearningStore.SeedDefaultsIfEmpty();
+
+            startupProbeCoordinator = new StartupProbeCoordinator(
+                disableSpeedifyAsync: DisableSpeedifyAsync,
+                activateSpeedifyAsync: ActivateSpeedifyTargetAsync,
+                getFastPingState: () => fastPing.GetState(),
+                getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
+                captureProbeAsync: CaptureProbeRuntimeAsync,
+                learningStore: probeLearningStore,
+                log: message => Logger.Log("startup", message));
         }
 
         // =========================
@@ -129,7 +146,7 @@ namespace WTFnetApp
                 if (fastPingState == null)
                     return;
 
-                fastPingDeviationTracker.Update(fastPingState);
+                fastPingSignalAnalyzer.Update(fastPingState);
                 PublishNetworkState(lastSnapshot, fastPingState);
             }
             catch (Exception ex)
@@ -148,12 +165,15 @@ namespace WTFnetApp
                 lastSnapshot = snapshot;
                 lastSpeedifySnapshotUtc = DateTime.UtcNow;
 
-                UpdateFastPingTargetsFromSnapshot(snapshot);
+                // Keep comparison fair: always same external targets
+                UpdateFastPingTargetsIfChanged(FixedPrimaryProbeTarget, FixedSecondaryProbeTarget);
+
+                // Keep tunnel latency as supporting context only
                 UpdateFastPingTunnelLatency(snapshot);
 
                 FastPingState fastPingState = fastPing.GetState();
 
-                fastPingDeviationTracker.Update(fastPingState);
+                fastPingSignalAnalyzer.Update(fastPingState);
                 PublishNetworkState(snapshot, fastPingState);
             }
             catch (Exception ex)
@@ -180,8 +200,6 @@ namespace WTFnetApp
 
                 lastUnifiedState = unifiedState?.Clone();
 
-                // During startup grace, keep measurement/logging real,
-                // but do not let the overlay scream while everything settles.
                 if (!IsStartupUiGraceActive())
                     overlay?.RenderUnified(lastUnifiedState);
 
@@ -196,65 +214,8 @@ namespace WTFnetApp
         }
 
         // =========================
-        // FASTPING TARGET MANAGEMENT
+        // FASTPING TARGETS / TUNNEL CONTEXT
         // =========================
-
-        private void UpdateFastPingTargetsFromSnapshot(MetricsSnapshot snapshot)
-        {
-            if (snapshot == null)
-                return;
-
-            string freshTunnelTarget = ChooseBestTunnelProbeTarget(snapshot);
-
-            bool tunnelConnected = snapshot.TunnelConnected;
-            bool hasFreshTunnelTarget = IsUsableProbeTarget(freshTunnelTarget);
-
-            if (hasFreshTunnelTarget)
-            {
-                lastValidTunnelProbeTarget = freshTunnelTarget;
-                lastValidTunnelProbeTargetUtc = DateTime.UtcNow;
-            }
-
-            string primaryTarget;
-            string secondaryTarget;
-            ProbeTargetMode targetMode;
-            string reason;
-
-            if (tunnelConnected)
-            {
-                if (hasFreshTunnelTarget)
-                {
-                    primaryTarget = freshTunnelTarget;
-                    secondaryTarget = "1.1.1.1";
-                    targetMode = ProbeTargetMode.TunnelAware;
-                    reason = "fresh tunnel target available";
-                }
-                else if (IsRecentTunnelProbeTargetAvailable())
-                {
-                    primaryTarget = lastValidTunnelProbeTarget;
-                    secondaryTarget = "1.1.1.1";
-                    targetMode = ProbeTargetMode.TunnelAware;
-                    reason = "reusing recent tunnel target during grace";
-                }
-                else
-                {
-                    primaryTarget = "1.1.1.1";
-                    secondaryTarget = "8.8.8.8";
-                    targetMode = ProbeTargetMode.ExternalOnly;
-                    reason = "tunnel connected but no usable tunnel target";
-                }
-            }
-            else
-            {
-                primaryTarget = "1.1.1.1";
-                secondaryTarget = "8.8.8.8";
-                targetMode = ProbeTargetMode.ExternalOnly;
-                reason = "tunnel not connected";
-            }
-
-            LogProbeModeIfChanged(targetMode, reason);
-            UpdateFastPingTargetsIfChanged(primaryTarget, secondaryTarget);
-        }
 
         private void UpdateFastPingTunnelLatency(MetricsSnapshot snapshot)
         {
@@ -274,34 +235,6 @@ namespace WTFnetApp
             {
                 fastPing.UpdateTunnelLatency(-1);
             }
-        }
-
-        private string ChooseBestTunnelProbeTarget(MetricsSnapshot snapshot)
-        {
-            if (snapshot == null)
-                return null;
-
-            if (IsUsableProbeTarget(snapshot.ConnectedServerPublicIp))
-                return NormalizeProbeTarget(snapshot.ConnectedServerPublicIp);
-
-            if (IsUsableProbeTarget(snapshot.PrimaryRemoteIp))
-                return NormalizeProbeTarget(snapshot.PrimaryRemoteIp);
-
-            if (IsUsableProbeTarget(snapshot.SpeedifyRemoteIp))
-                return NormalizeProbeTarget(snapshot.SpeedifyRemoteIp);
-
-            return null;
-        }
-
-        private bool IsRecentTunnelProbeTargetAvailable()
-        {
-            if (!IsUsableProbeTarget(lastValidTunnelProbeTarget))
-                return false;
-
-            if (lastValidTunnelProbeTargetUtc == DateTime.MinValue)
-                return false;
-
-            return (DateTime.UtcNow - lastValidTunnelProbeTargetUtc).TotalSeconds <= TunnelProbeTargetGraceSeconds;
         }
 
         private void UpdateFastPingTargetsIfChanged(string primaryTarget, string secondaryTarget)
@@ -334,15 +267,6 @@ namespace WTFnetApp
 
             lastFastPingPrimaryTarget = primaryTarget;
             lastFastPingSecondaryTarget = secondaryTarget;
-        }
-
-        private void LogProbeModeIfChanged(ProbeTargetMode newMode, string reason)
-        {
-            if (currentProbeTargetMode == newMode)
-                return;
-
-            currentProbeTargetMode = newMode;
-            Logger.Log("fastping", "probe mode -> " + newMode.ToString().ToLowerInvariant() + " | " + reason);
         }
 
         private static string NormalizeProbeTarget(string host)
@@ -428,73 +352,90 @@ namespace WTFnetApp
         {
             Logger.Log("startup", "route evaluation requested");
 
-            await EnsureSpeedifyReadyForEvaluationAsync();
-
-            if (!IsSpeedifyReadyForEvaluation())
-            {
-                Logger.Log("startup", "Speedify not ready -> skipping route evaluation");
-                return;
-            }
-
-            Logger.Log("startup", "checking current Speedify server via CLI");
-
-            string raw = await GetCurrentSpeedifyServerRawAsync();
-
-            if (!string.IsNullOrWhiteSpace(raw))
-                Logger.Log("startup", "current server raw:\n" + CleanJson(raw));
-            else
-                Logger.Log("startup", "failed to read current server");
-
-            Logger.Log("startup", "starting fastping evaluation window");
-
-            fastPing.BeginEvaluationWindow();
-
-            try
-            {
-                await Task.Delay(RouteEvaluationSettleMs);
-                await Task.Delay(RouteEvaluationMeasureMs);
-            }
-            finally
-            {
-                lastRouteEvaluationStats = fastPing.EndEvaluationWindow();
-            }
-
-            if (lastRouteEvaluationStats == null)
-            {
-                Logger.Log("startup", "evaluation produced no stats");
-                return;
-            }
-
-            Logger.Log(
-                "startup",
-                "evaluation stats | valid=" + lastRouteEvaluationStats.IsValid +
-                " | success=" + lastRouteEvaluationStats.SuccessCount +
-                " | timeout=" + lastRouteEvaluationStats.TimeoutCount +
-                " | exception=" + lastRouteEvaluationStats.ExceptionCount +
-                " | median=" + FormatEvalForLog(lastRouteEvaluationStats.MedianMs) +
-                " | p90=" + FormatEvalForLog(lastRouteEvaluationStats.P90Ms) +
-                " | p95=" + FormatEvalForLog(lastRouteEvaluationStats.P95Ms) +
-                " | jitter=" + FormatEvalForLog(lastRouteEvaluationStats.JitterMs) +
-                " | timeoutRate=" + lastRouteEvaluationStats.TimeoutRate.ToString("0.00") +
-                " | successRate=" + lastRouteEvaluationStats.SuccessRate.ToString("0.00") +
-                " | burstSamples=" + lastRouteEvaluationStats.BurstSampleCount +
-                " | burstTimeoutRate=" + lastRouteEvaluationStats.BurstTimeoutRate.ToString("0.00") +
-                " | burstExceptionRate=" + lastRouteEvaluationStats.BurstExceptionRate.ToString("0.00"));
-        }
-
-        private static string FormatEvalForLog(double value)
-        {
-            return value > 0
-                ? ((int)Math.Round(value)).ToString()
-                : "--";
-        }
-
-        private async Task EnsureSpeedifyReadyForEvaluationAsync()
-        {
             await EnsureSpeedifyProcessRunningAsync();
             await EnsureSpeedifyTelemetryAvailableAsync();
-            await EnsureSpeedifyConnectedAsync();
-            await WaitForFreshUsableSpeedifySnapshotAsync();
+
+            List<ProbeCandidateDefinition> candidates = BuildStartupCandidates();
+            if (candidates.Count == 0)
+            {
+                Logger.Log("startup", "no startup candidates available");
+                return;
+            }
+
+            lastStartupProbeResult = await startupProbeCoordinator.RunAsync(candidates, CancellationToken.None);
+
+            if (lastStartupProbeResult == null)
+            {
+                Logger.Log("startup", "startup probe produced no result");
+                return;
+            }
+
+            ApplyLearningFromStartupProbe(lastStartupProbeResult);
+            await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
+
+            Logger.Log("startup", lastStartupProbeResult.SummaryText ?? "startup probe finished");
+
+            lastRouteEvaluationStats = fastPing.GetLastEvaluationStats();
+        }
+
+        private List<ProbeCandidateDefinition> BuildStartupCandidates()
+        {
+            List<ProbeCandidateDefinition> list = new List<ProbeCandidateDefinition>();
+
+            IReadOnlyList<SpeedifyServerRegion> defaults = SpeedifyServerRegionCatalog.GetDefaultRegions();
+            if (defaults == null)
+                return list;
+
+            foreach (SpeedifyServerRegion region in defaults)
+            {
+                if (region == null)
+                    continue;
+
+                list.Add(new ProbeCandidateDefinition
+                {
+                    RouteKey = string.IsNullOrWhiteSpace(region.CountryCode)
+                        ? region.ConnectTarget
+                        : region.CountryCode,
+                    DisplayName = region.FriendlyName,
+                    ConnectTarget = region.ConnectTarget,
+                    Kind = ProbeCandidateKind.Speedify
+                });
+            }
+
+            return list;
+        }
+
+        private void ApplyLearningFromStartupProbe(StartupProbeResult result)
+        {
+            if (result == null || result.AllResults == null)
+                return;
+
+            foreach (ProbeScoreResult score in result.AllResults)
+            {
+                if (score?.Runtime == null)
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(score.Runtime.TimeBucketKey))
+                    score.Runtime.TimeBucketKey = ProbeScoring.GetCurrentTimeBucketKey(DateTime.Now);
+
+                probeLearningStore.UpdateFromResult(score);
+            }
+        }
+
+        private async Task ApplyWinnerAfterStartupProbeAsync(ProbeScoreResult winner)
+        {
+            if (winner == null || winner.Candidate == null)
+                return;
+
+            if (winner.Candidate.Kind == ProbeCandidateKind.Raw)
+            {
+                Logger.Log("startup", "winner is raw baseline -> keeping speedify disabled");
+                await DisableSpeedifyAsync();
+                return;
+            }
+
+            Logger.Log("startup", "applying winner target | " + winner.Candidate);
+            await ActivateSpeedifyTargetAsync(winner.Candidate.ConnectTarget);
         }
 
         private async Task EnsureSpeedifyProcessRunningAsync()
@@ -582,84 +523,6 @@ namespace WTFnetApp
             Logger.Log("startup", "Speedify telemetry not available in time");
         }
 
-        private async Task EnsureSpeedifyConnectedAsync()
-        {
-            if (IsSpeedifyCurrentlyConnected())
-            {
-                Logger.Log("startup", "Speedify already connected");
-                return;
-            }
-
-            if (!System.IO.File.Exists(SpeedifyCliPath))
-            {
-                Logger.Log("startup", "Speedify CLI not found -> cannot force connect");
-                return;
-            }
-
-            Logger.Log("startup", "requesting Speedify connect");
-
-            await RunSpeedifyCliAsync("connect");
-
-            const int maxWaitMs = 12000;
-            const int pollMs = 500;
-            int waited = 0;
-
-            while (waited < maxWaitMs)
-            {
-                if (IsSpeedifyCurrentlyConnected())
-                {
-                    Logger.Log("startup", "Speedify connected");
-                    return;
-                }
-
-                await Task.Delay(pollMs);
-                waited += pollMs;
-            }
-
-            Logger.Log("startup", "Speedify did not connect in time");
-        }
-
-        private bool IsSpeedifyCurrentlyConnected()
-        {
-            if (lastSnapshot == null)
-                return false;
-
-            if (!HasRecentSpeedifySnapshot())
-                return false;
-
-            return lastSnapshot.TunnelConnected;
-        }
-
-        private async Task WaitForFreshUsableSpeedifySnapshotAsync()
-        {
-            const int maxWaitMs = 12000;
-            const int pollMs = 250;
-            int waited = 0;
-
-            while (waited < maxWaitMs)
-            {
-                if (IsSpeedifyReadyForEvaluation())
-                    return;
-
-                await Task.Delay(pollMs);
-                waited += pollMs;
-            }
-        }
-
-        private bool IsSpeedifyReadyForEvaluation()
-        {
-            if (!IsSpeedifyProcessRunning())
-                return false;
-
-            if (!HasRecentSpeedifySnapshot())
-                return false;
-
-            if (lastSnapshot == null)
-                return false;
-
-            return lastSnapshot.TunnelConnected;
-        }
-
         private bool HasRecentSpeedifySnapshot()
         {
             if (lastSnapshot == null)
@@ -674,6 +537,176 @@ namespace WTFnetApp
             double ageMs = (DateTime.UtcNow - lastSpeedifySnapshotUtc).TotalMilliseconds;
             return ageMs >= 0 && ageMs <= 3000;
         }
+
+        // =========================
+        // ROUTE SELECTION GLUE
+        // =========================
+
+        private async Task<bool> DisableSpeedifyAsync()
+        {
+            Logger.Log("startup", "disable speedify requested");
+
+            if (!System.IO.File.Exists(SpeedifyCliPath))
+            {
+                Logger.Log("startup", "Speedify CLI not found -> cannot disable speedify");
+                return false;
+            }
+
+            await RunSpeedifyCliAsync("disconnect");
+
+            const int maxWaitMs = 12000;
+            const int pollMs = 350;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                if (!IsSpeedifyCurrentlyConnected())
+                {
+                    Logger.Log("startup", "Speedify disabled for raw baseline");
+                    return true;
+                }
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+
+            Logger.Log("startup", "Speedify did not fully disconnect in time");
+            return !IsSpeedifyCurrentlyConnected();
+        }
+
+        private async Task<bool> ActivateSpeedifyTargetAsync(string connectTarget)
+        {
+            if (string.IsNullOrWhiteSpace(connectTarget))
+                return false;
+
+            if (!System.IO.File.Exists(SpeedifyCliPath))
+            {
+                Logger.Log("startup", "Speedify CLI not found -> cannot connect target");
+                return false;
+            }
+
+            Logger.Log("startup", "activating Speedify target | " + connectTarget);
+
+            await RunSpeedifyCliAsync("connect " + connectTarget);
+
+            const int maxWaitMs = 15000;
+            const int pollMs = 400;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                if (IsSpeedifyCurrentlyConnected() && HasRecentSpeedifySnapshot())
+                {
+                    Logger.Log("startup", "Speedify target active | " + connectTarget);
+                    return true;
+                }
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+
+            Logger.Log("startup", "Speedify target did not become active in time | " + connectTarget);
+            return false;
+        }
+
+        private bool IsSpeedifyCurrentlyConnected()
+        {
+            if (lastSnapshot == null)
+                return false;
+
+            if (!HasRecentSpeedifySnapshot())
+                return false;
+
+            return lastSnapshot.TunnelConnected;
+        }
+
+        private async Task<ProbeCandidateRuntimeData> CaptureProbeRuntimeAsync(
+            ProbeCandidateDefinition candidate,
+            TimeSpan settle,
+            TimeSpan observe)
+        {
+            if (candidate == null)
+                throw new ArgumentNullException(nameof(candidate));
+
+            if (settle > TimeSpan.Zero)
+                await Task.Delay(settle);
+
+            if (observe > TimeSpan.Zero)
+                await Task.Delay(observe);
+
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window =
+                observe >= TimeSpan.FromSeconds(20)
+                    ? fastPingSignalAnalyzer.Last30sSnapshot
+                    : fastPingSignalAnalyzer.Last10sSnapshot;
+
+            FastPingState fastPingState = fastPing.GetState();
+            UnifiedNetworkState unified = GetLastUnifiedState();
+            MetricsSnapshot snapshot = lastSnapshot;
+
+            ProbeCandidateRuntimeData runtime = new ProbeCandidateRuntimeData
+            {
+                Candidate = candidate,
+                TimeBucketKey = ProbeScoring.GetCurrentTimeBucketKey(DateTime.Now),
+
+                AvgPingMs = window != null ? window.AvgPingMs : -1,
+                MaxPingMs = window != null ? window.MaxPingMs : -1,
+                P95PingMs = window != null ? window.P95PingMs : -1,
+
+                AvgJitterMs = window != null ? window.AvgJitterMs : -1,
+                MinJitterMs = window != null ? window.MinJitterMs : -1,
+                MaxJitterMs = window != null ? window.MaxJitterMs : -1,
+                P95JitterMs = window != null ? window.P95JitterMs : -1,
+
+                AvgLossRate = window != null ? window.AvgLossRate : -1,
+                AvgBadQualityRate = window != null ? window.AvgBadQualityRate : -1,
+                AvgConfidence = window != null ? window.AvgConfidence : (fastPingState != null ? fastPingState.Confidence : -1),
+
+                SpikeDensityPerMinute = window != null ? window.SpikeDensityPerMinute : -1,
+                StaleRate = window != null ? window.StaleRate : -1,
+
+                TunnelConnected = snapshot != null && snapshot.TunnelConnected,
+                AggregateCongested = snapshot != null && snapshot.AggregateCongested,
+                ActiveConnectionCount = snapshot != null ? snapshot.ActiveConnectionCount : 0,
+                BackupConnectionCount = snapshot != null ? snapshot.BackupConnectionCount : 0,
+
+                IsValid = window != null && window.IsValid,
+                Notes = unified != null ? unified.HealthReason : null
+            };
+
+            if (candidate.Kind == ProbeCandidateKind.Raw)
+            {
+                runtime.TunnelConnected = false;
+                runtime.AggregateCongested = false;
+                runtime.ActiveConnectionCount = 0;
+                runtime.BackupConnectionCount = 0;
+            }
+
+            Logger.Log("startup",
+                "capture probe | " + candidate +
+                " | avgPing=" + FormatProbeMetric(runtime.AvgPingMs) +
+                " | p95=" + FormatProbeMetric(runtime.P95PingMs) +
+                " | avgJit=" + FormatProbeMetric(runtime.AvgJitterMs) +
+                " | p95Jit=" + FormatProbeMetric(runtime.P95JitterMs) +
+                " | loss=" + FormatProbePercent(runtime.AvgLossRate) +
+                " | conf=" + FormatProbeMetric(runtime.AvgConfidence) +
+                " | spkD=" + FormatProbeMetric(runtime.SpikeDensityPerMinute));
+
+            return runtime;
+        }
+
+        private static string FormatProbeMetric(double value)
+        {
+            return value >= 0 ? value.ToString("0.0") : "--";
+        }
+
+        private static string FormatProbePercent(double value)
+        {
+            return value >= 0 ? (value * 100.0).ToString("0.0") + "%" : "--";
+        }
+
+        // =========================
+        // SPEEDIFY CLI
+        // =========================
 
         private async Task<int> RunSpeedifyCliAsync(string arguments)
         {
@@ -704,51 +737,6 @@ namespace WTFnetApp
             }
         }
 
-        private async Task<string> RunSpeedifyCliReadAsync(string arguments)
-        {
-            if (!System.IO.File.Exists(SpeedifyCliPath))
-                return null;
-
-            try
-            {
-                using (var process = new System.Diagnostics.Process())
-                {
-                    process.StartInfo = new System.Diagnostics.ProcessStartInfo
-                    {
-                        FileName = SpeedifyCliPath,
-                        Arguments = arguments,
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        StandardOutputEncoding = System.Text.Encoding.Unicode,
-                        StandardErrorEncoding = System.Text.Encoding.Unicode,
-                        CreateNoWindow = true
-                    };
-
-                    process.Start();
-
-                    string output = await process.StandardOutput.ReadToEndAsync();
-                    string error = await process.StandardError.ReadToEndAsync();
-                    await Task.Run(() => process.WaitForExit());
-
-                    if (!string.IsNullOrWhiteSpace(error))
-                        Logger.Log("startup", "Speedify CLI stderr: " + error.Trim());
-
-                    return SanitizeCliOutput(output);
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Log("startup", "Speedify CLI read error: " + ex.Message);
-                return null;
-            }
-        }
-
-        private async Task<string> GetCurrentSpeedifyServerRawAsync()
-        {
-            return await RunSpeedifyCliReadAsync("show currentserver");
-        }
-
         // =========================
         // ACCESSORS
         // =========================
@@ -756,40 +744,6 @@ namespace WTFnetApp
         public FastPingState GetFastPingState()
         {
             return fastPing.GetState();
-        }
-
-        private string CleanJson(string raw)
-        {
-            if (string.IsNullOrWhiteSpace(raw))
-                return raw;
-
-            try
-            {
-                using (var doc = System.Text.Json.JsonDocument.Parse(raw))
-                {
-                    return System.Text.Json.JsonSerializer.Serialize(
-                        doc,
-                        new System.Text.Json.JsonSerializerOptions
-                        {
-                            WriteIndented = true
-                        });
-                }
-            }
-            catch
-            {
-                return raw.Replace("\r", "").Replace("\n", "").Trim();
-            }
-        }
-
-        private string SanitizeCliOutput(string raw)
-        {
-            if (string.IsNullOrWhiteSpace(raw))
-                return raw;
-
-            return raw
-                .Replace("\0", "")
-                .Replace("\uFEFF", "")
-                .Trim();
         }
 
         public UnifiedNetworkState GetUnifiedNetworkState()
@@ -809,6 +763,11 @@ namespace WTFnetApp
             return lastRouteEvaluationStats != null
                 ? lastRouteEvaluationStats.Clone()
                 : null;
+        }
+
+        public StartupProbeResult GetLastStartupProbeResult()
+        {
+            return lastStartupProbeResult;
         }
 
         // =========================
