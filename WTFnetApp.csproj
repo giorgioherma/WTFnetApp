@@ -77,24 +77,28 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="legacy\NetworkMetricsEngine.cs" />
-    <Compile Include="runtime\Data\DataEngine\NetworkMetricsCalculator.cs" />
-    <Compile Include="runtime\Data\DataEngine\NetworkQualityEvaluator.cs" />
-    <Compile Include="runtime\Data\DataEngine\NetworkSignalResolver.cs" />
-    <Compile Include="runtime\Data\DataEngine\FastPingDeviationTracker.cs" />
+    <Compile Include="runtime\Data\WtfFastPingData\NetworkMetricsCalculator.cs" />
+    <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkQualityEvaluator.cs" />
+    <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkSignalResolver.cs" />
+    <Compile Include="runtime\Data\WtfFastPingData\FastPingDeviationTracker.cs" />
     <None Include="legacy\DataSet.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <Compile Include="runtime\RouteSelection\ProbeScoring.cs" />
+    <Compile Include="runtime\RouteSelection\ServerProbeLearningStore.cs" />
+    <Compile Include="runtime\RouteSelection\SpeedifyServerRegionCatalog.cs" />
+    <Compile Include="runtime\RouteSelection\StartupProbeCoordinator.cs" />
     <Compile Include="runtime\derGrosseGeneralstab.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <Compile Include="runtime\Logger.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="runtime\Data\RuntimeDataModels\SpeedifyTelemetryData\MetricsSnapshot.cs">
+    <Compile Include="runtime\Data\SpeedifyTelemetryData\MetricsSnapshot.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\UnifiedNetworkState.cs" />
-    <Compile Include="runtime\Data\RuntimeDataModels\SpeedifyTelemetryData\SpeedifyStructuredState.cs" />
+    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyStructuredState.cs" />
     <None Include="lab\StartupServerTest.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
@@ -134,10 +138,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
     <None Include="legacy\NetworkAnalysisFrame.cs" />
-    <Compile Include="runtime\Data\RuntimeDataModels\SpeedifyTelemetryData\SpeedifyMetricsParser.cs">
+    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyMetricsParser.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="runtime\Data\RuntimeDataModels\SpeedifyTelemetryData\SpeedifyTelemetryReader.cs">
+    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyTelemetryReader.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <None Include="lab\VPNServerList.cs">
@@ -150,7 +154,7 @@
       <SubType>Form</SubType>
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
-    <Compile Include="runtime\Data\RuntimeDataModels\WtfFastPingData\WtfFastPing.cs">
+    <Compile Include="runtime\Data\WtfFastPingData\WtfFastPing.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
     <None Include="legacy\Form1.cs" />

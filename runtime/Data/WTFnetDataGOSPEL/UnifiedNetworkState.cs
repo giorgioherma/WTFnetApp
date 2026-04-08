@@ -163,6 +163,63 @@ namespace WTFnetApp
         public double Adapter1Latency = -1;
         public double Adapter2Latency = -1;
 
+        public string SpeedifyCurrentState;
+        public string SpeedifyCurrentMode;
+
+        public bool SpeedifyHasConnectionStats;
+        public bool SpeedifyHasNetworks;
+        public bool SpeedifyHasSessionStats;
+        public bool SpeedifyHasCurrentState;
+        public bool SpeedifyHasConnectedServer;
+        public bool SpeedifyStructuredCoreComplete;
+
+        public int SpeedifyParseWarningCount;
+
+        public bool SpeedifyConnectedLegacy;
+        public bool SpeedifyCongestedLegacy;
+        public bool SpeedifyDownloadCongested;
+        public bool SpeedifyUploadCongested;
+
+        public double SpeedifyLatencyMs = -1;
+        public double SpeedifyBaseLatencyMs = -1;
+        public double SpeedifyLegacyJitterMs = -1;
+        public double SpeedifyExternalPingMs = -1;
+
+        public double SpeedifyMosScore = -1;
+
+        public long SpeedifyReceiveBytesPerSecond;
+        public long SpeedifySendBytesPerSecond;
+        public long SpeedifyReceiveBytes;
+        public long SpeedifySendBytes;
+
+        public double SpeedifyLagScore = -1;
+        public double SpeedifyQueueDelay = -1;
+        public double SpeedifyQueueGrowth = 0;
+        public double SpeedifyQueueAcceleration = 0;
+        public double SpeedifyLatencyDrift = 0;
+        public double SpeedifyRetransmissionGrowth = 0;
+        public double SpeedifyQueuePressure = 0;
+        public double SpeedifyAggressionFactor = 0;
+        public double SpeedifyServerScore = 1.0;
+        public double SpeedifyBurstMultiplier = 0;
+        public double SpeedifyPatternMatchScore = 0;
+        public double SpeedifySignatureAvgQueueGrowth = 0;
+        public double SpeedifyLagPressure = 0;
+        public double SpeedifyRetransmissionRate = 0;
+
+        public string SpeedifyPredictionConfidence;
+        public string SpeedifyDominantSignal;
+        public string SpeedifyLagEventType;
+        public string SpeedifyGamePhase;
+        public string SpeedifyNetworkState;
+        public string SpeedifyControlState;
+        public string SpeedifyIssueSource;
+
+        public int SpeedifyPendingLagEvents;
+        public bool SpeedifyLearningEnabled;
+
+        public List<SpeedifySessionWindowStats> SpeedifySessionWindows = new List<SpeedifySessionWindowStats>();
+
         // =========================================================
         // FASTPING DETAILS
         // =========================================================
@@ -175,6 +232,9 @@ namespace WTFnetApp
         public double FastPingBaselineMs = -1;
         public double FastPingFloorMs = -1;
         public double FastPingJitterMs = -1;
+        public double FastPingDisplayedPingMs = -1;
+        public double FastPingTunnelLatencyMs = -1;
+
         public double FastPingConfidence = 0;
         public double FastPingLossRate = 0;
         public double FastPingBadQualityRate = 0;
@@ -182,6 +242,27 @@ namespace WTFnetApp
 
         public bool FastPingSpikeDetected;
         public bool FastPingIsStale;
+        public bool FastPingPrimaryFresh;
+        public bool FastPingSecondaryFresh;
+        public bool FastPingIsEvaluationMode;
+
+        public double FastPingPrimaryInstantMs = -1;
+        public double FastPingPrimaryStableMs = -1;
+        public double FastPingPrimaryFloorMs = -1;
+        public double FastPingPrimaryBaselineMs = -1;
+        public double FastPingPrimaryJitterMs = -1;
+        public double FastPingPrimaryLossRate = 0;
+        public double FastPingPrimaryBadQualityRate = 0;
+        public double FastPingPrimaryConfidence = 0;
+
+        public double FastPingSecondaryInstantMs = -1;
+        public double FastPingSecondaryStableMs = -1;
+        public double FastPingSecondaryFloorMs = -1;
+        public double FastPingSecondaryBaselineMs = -1;
+        public double FastPingSecondaryJitterMs = -1;
+        public double FastPingSecondaryLossRate = 0;
+        public double FastPingSecondaryBadQualityRate = 0;
+        public double FastPingSecondaryConfidence = 0;
 
         public string FastPingHealthState;
 
@@ -483,6 +564,64 @@ namespace WTFnetApp
                     };
 
                     clone.Links.Add(copy);
+                }
+            }
+
+            if (SpeedifySessionWindows != null)
+            {
+                clone.SpeedifySessionWindows = new List<SpeedifySessionWindowStats>(SpeedifySessionWindows.Count);
+
+                for (int i = 0; i < SpeedifySessionWindows.Count; i++)
+                {
+                    SpeedifySessionWindowStats src = SpeedifySessionWindows[i];
+                    if (src == null)
+                    {
+                        clone.SpeedifySessionWindows.Add(null);
+                        continue;
+                    }
+
+                    clone.SpeedifySessionWindows.Add(new SpeedifySessionWindowStats
+                    {
+                        WindowKey = src.WindowKey,
+
+                        BytesRecv = src.BytesRecv,
+                        BytesSent = src.BytesSent,
+                        EncryptedBytesRecv = src.EncryptedBytesRecv,
+                        EncryptedBytesSent = src.EncryptedBytesSent,
+
+                        MaxDownloadMbps = src.MaxDownloadMbps,
+                        MaxUploadMbps = src.MaxUploadMbps,
+
+                        NumFailovers = src.NumFailovers,
+                        NumSessions = src.NumSessions,
+                        RetransBytes = src.RetransBytes,
+                        TotalConnectedMinutes = src.TotalConnectedMinutes,
+
+                        DownBenefitNumConnections = src.DownBenefitNumConnections,
+                        DownBenefitCombinedMbps = src.DownBenefitCombinedMbps,
+                        DownBenefitFastestConnMbps = src.DownBenefitFastestConnMbps,
+
+                        UpBenefitNumConnections = src.UpBenefitNumConnections,
+                        UpBenefitCombinedMbps = src.UpBenefitCombinedMbps,
+                        UpBenefitFastestConnMbps = src.UpBenefitFastestConnMbps,
+
+                        TunBytesIn = src.TunBytesIn,
+                        TunBytesOut = src.TunBytesOut,
+                        TunDroppedIncoming = src.TunDroppedIncoming,
+                        TunPacketWaits = src.TunPacketWaits,
+                        TunReadQueue = src.TunReadQueue,
+
+                        PacketHandlerBytesIn = src.PacketHandlerBytesIn,
+                        PacketHandlerBytesOut = src.PacketHandlerBytesOut,
+                        PacketHandlerDroppedOut = src.PacketHandlerDroppedOut,
+                        PacketHandlerRetries = src.PacketHandlerRetries,
+
+                        TotalFailoverSaves = src.TotalFailoverSaves,
+                        TotalRedundantSaves = src.TotalRedundantSaves,
+                        TotalSpeedSaves = src.TotalSpeedSaves,
+                        TotalStreams = src.TotalStreams,
+                        UniqueSaves = src.UniqueSaves
+                    });
                 }
             }
 

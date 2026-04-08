@@ -46,7 +46,7 @@ namespace WTFnetApp
         {
             try
             {
-                await core.RunManualServerPingScan();
+                await core.RunManualRouteRecheck();
             }
             catch (Exception ex)
             {

@@ -1,7 +1,5 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 
 namespace WTFnetApp
 {
@@ -19,6 +17,9 @@ namespace WTFnetApp
         private readonly FastPingDeviationTracker fastPingDeviationTracker = new FastPingDeviationTracker();
         private readonly NetworkSignalResolver networkSignalResolver = new NetworkSignalResolver();
 
+        private const int RouteEvaluationMeasureMs = 35000;
+        private const int RouteEvaluationSettleMs = 2000;
+
         // =========================
         // CURRENT STATE CACHE
         // =========================
@@ -27,6 +28,19 @@ namespace WTFnetApp
         private UnifiedNetworkState lastUnifiedState;
 
         private readonly object publishSync = new object();
+
+        private volatile bool startupEvaluationRunning;
+        private DateTime lastStartupEvaluationUtc = DateTime.MinValue;
+
+        private const string SpeedifyCliPath = @"C:\Program Files (x86)\Speedify\speedify_cli.exe";
+        private const string SpeedifyExePath = @"C:\Program Files (x86)\Speedify\Speedify.exe";
+
+        private DateTime lastSpeedifySnapshotUtc = DateTime.MinValue;
+
+        private EvaluationStats lastRouteEvaluationStats;
+
+        private readonly DateTime appStartedUtc = DateTime.UtcNow;
+        private const int StartupUiGraceSeconds = 10;
 
         // =========================
         // FASTPING TARGET ORCHESTRATION
@@ -57,6 +71,7 @@ namespace WTFnetApp
         {
             Logger.StartSession();
             Logger.StartDeviationSession();
+            Logger.StartUnifiedMetricsSession();
 
             Logger.Log("system", "application starting");
             Logger.Log("engine", "initializing core");
@@ -91,7 +106,6 @@ namespace WTFnetApp
         {
             fastPing.StateUpdated += OnFastPingStateUpdated;
 
-            // Safe startup defaults even before Speedify gives anything useful.
             UpdateFastPingTargetsIfChanged("1.1.1.1", "8.8.8.8");
             LogProbeModeIfChanged(ProbeTargetMode.ExternalOnly, "startup default");
 
@@ -132,6 +146,7 @@ namespace WTFnetApp
                     return;
 
                 lastSnapshot = snapshot;
+                lastSpeedifySnapshotUtc = DateTime.UtcNow;
 
                 UpdateFastPingTargetsFromSnapshot(snapshot);
                 UpdateFastPingTunnelLatency(snapshot);
@@ -163,17 +178,21 @@ namespace WTFnetApp
                 UnifiedNetworkState unifiedState =
                     networkSignalResolver.Resolve(snapshot, fastPingState, natState);
 
-                // Store immutable snapshot
                 lastUnifiedState = unifiedState?.Clone();
 
-                // Use SAME immutable version everywhere
-                var safeState = lastUnifiedState;
+                // During startup grace, keep measurement/logging real,
+                // but do not let the overlay scream while everything settles.
+                if (!IsStartupUiGraceActive())
+                    overlay?.RenderUnified(lastUnifiedState);
 
-                overlay?.RenderUnified(safeState);
-
-                // Optional logging
-                Logger.LogAnalysis(safeState);
+                Logger.LogAnalysis(lastUnifiedState);
+                Logger.LogUnifiedCsv(lastUnifiedState);
             }
+        }
+
+        private bool IsStartupUiGraceActive()
+        {
+            return (DateTime.UtcNow - appStartedUtc).TotalSeconds < StartupUiGraceSeconds;
         }
 
         // =========================
@@ -359,58 +378,375 @@ namespace WTFnetApp
 
         public void Startup()
         {
-            Logger.Log("startup", "detecting best server");
+            if (startupEvaluationRunning)
+            {
+                Logger.Log("startup", "startup evaluation already running");
+                return;
+            }
+
+            if (!IsSpeedifyInstalled())
+            {
+                Logger.Log("startup", "Speedify not installed -> skipping startup route evaluation");
+                return;
+            }
+
+            Logger.Log("startup", "starting startup route evaluation");
+
+            startupEvaluationRunning = true;
 
             _ = Task.Run(async () =>
             {
-                string bestServer = await DetectBestServerFast();
-                Logger.Log("startup", "Using server region: " + bestServer);
+                try
+                {
+                    await RunStartupRouteEvaluationAsync();
+                    lastStartupEvaluationUtc = DateTime.UtcNow;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log("startup", "startup route evaluation error: " + ex.Message);
+                }
+                finally
+                {
+                    startupEvaluationRunning = false;
+                }
             });
         }
 
-        // =========================
-        // SERVER DETECTION
-        // =========================
-
-        private async Task<string> DetectBestServerFast()
+        private bool IsSpeedifyInstalled()
         {
-            var servers = new Dictionary<string, string>
+            try
             {
-                { "Vienna", "1.1.1.1" },
-                { "Ljubljana", "8.8.8.8" },
-                { "Milan", "9.9.9.9" }
-            };
-
-            var tasks = new List<Task<Tuple<string, int>>>();
-
-            foreach (var s in servers)
-                tasks.Add(CheckServer(s.Key, s.Value));
-
-            Tuple<string, int>[] results = await Task.WhenAll(tasks);
-
-            string best = "Ljubljana";
-            int bestPing = int.MaxValue;
-
-            foreach (Tuple<string, int> r in results)
-            {
-                if (r.Item2 > 0 && r.Item2 < bestPing)
-                {
-                    bestPing = r.Item2;
-                    best = r.Item1;
-                }
+                return System.IO.File.Exists(SpeedifyCliPath) || System.IO.File.Exists(SpeedifyExePath);
             }
-
-            Logger.Log("startup", "Best server: " + best + " (" + bestPing + "ms)");
-            return best;
+            catch
+            {
+                return false;
+            }
         }
 
-        private async Task<Tuple<string, int>> CheckServer(string name, string host)
+        private async Task RunStartupRouteEvaluationAsync()
         {
-            int ping = await WtfFastPing.Ping(host);
+            Logger.Log("startup", "route evaluation requested");
 
-            Logger.Log("startup", "server check " + name + " = " + ping + "ms");
+            await EnsureSpeedifyReadyForEvaluationAsync();
 
-            return Tuple.Create(name, ping);
+            if (!IsSpeedifyReadyForEvaluation())
+            {
+                Logger.Log("startup", "Speedify not ready -> skipping route evaluation");
+                return;
+            }
+
+            Logger.Log("startup", "checking current Speedify server via CLI");
+
+            string raw = await GetCurrentSpeedifyServerRawAsync();
+
+            if (!string.IsNullOrWhiteSpace(raw))
+                Logger.Log("startup", "current server raw:\n" + CleanJson(raw));
+            else
+                Logger.Log("startup", "failed to read current server");
+
+            Logger.Log("startup", "starting fastping evaluation window");
+
+            fastPing.BeginEvaluationWindow();
+
+            try
+            {
+                await Task.Delay(RouteEvaluationSettleMs);
+                await Task.Delay(RouteEvaluationMeasureMs);
+            }
+            finally
+            {
+                lastRouteEvaluationStats = fastPing.EndEvaluationWindow();
+            }
+
+            if (lastRouteEvaluationStats == null)
+            {
+                Logger.Log("startup", "evaluation produced no stats");
+                return;
+            }
+
+            Logger.Log(
+                "startup",
+                "evaluation stats | valid=" + lastRouteEvaluationStats.IsValid +
+                " | success=" + lastRouteEvaluationStats.SuccessCount +
+                " | timeout=" + lastRouteEvaluationStats.TimeoutCount +
+                " | exception=" + lastRouteEvaluationStats.ExceptionCount +
+                " | median=" + FormatEvalForLog(lastRouteEvaluationStats.MedianMs) +
+                " | p90=" + FormatEvalForLog(lastRouteEvaluationStats.P90Ms) +
+                " | p95=" + FormatEvalForLog(lastRouteEvaluationStats.P95Ms) +
+                " | jitter=" + FormatEvalForLog(lastRouteEvaluationStats.JitterMs) +
+                " | timeoutRate=" + lastRouteEvaluationStats.TimeoutRate.ToString("0.00") +
+                " | successRate=" + lastRouteEvaluationStats.SuccessRate.ToString("0.00") +
+                " | burstSamples=" + lastRouteEvaluationStats.BurstSampleCount +
+                " | burstTimeoutRate=" + lastRouteEvaluationStats.BurstTimeoutRate.ToString("0.00") +
+                " | burstExceptionRate=" + lastRouteEvaluationStats.BurstExceptionRate.ToString("0.00"));
+        }
+
+        private static string FormatEvalForLog(double value)
+        {
+            return value > 0
+                ? ((int)Math.Round(value)).ToString()
+                : "--";
+        }
+
+        private async Task EnsureSpeedifyReadyForEvaluationAsync()
+        {
+            await EnsureSpeedifyProcessRunningAsync();
+            await EnsureSpeedifyTelemetryAvailableAsync();
+            await EnsureSpeedifyConnectedAsync();
+            await WaitForFreshUsableSpeedifySnapshotAsync();
+        }
+
+        private async Task EnsureSpeedifyProcessRunningAsync()
+        {
+            if (IsSpeedifyProcessRunning())
+            {
+                Logger.Log("startup", "Speedify process already running");
+                return;
+            }
+
+            if (!System.IO.File.Exists(SpeedifyExePath))
+            {
+                Logger.Log("startup", "Speedify executable not found");
+                return;
+            }
+
+            Logger.Log("startup", "launching Speedify process");
+
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = SpeedifyExePath,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("startup", "failed to launch Speedify: " + ex.Message);
+                return;
+            }
+
+            const int maxWaitMs = 10000;
+            const int pollMs = 250;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                if (IsSpeedifyProcessRunning())
+                {
+                    Logger.Log("startup", "Speedify process detected");
+                    return;
+                }
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+
+            Logger.Log("startup", "Speedify process did not appear in time");
+        }
+
+        private bool IsSpeedifyProcessRunning()
+        {
+            try
+            {
+                System.Diagnostics.Process[] processes =
+                    System.Diagnostics.Process.GetProcessesByName("Speedify");
+
+                return processes != null && processes.Length > 0;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private async Task EnsureSpeedifyTelemetryAvailableAsync()
+        {
+            const int maxWaitMs = 10000;
+            const int pollMs = 250;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                if (HasRecentSpeedifySnapshot())
+                {
+                    Logger.Log("startup", "Speedify telemetry available");
+                    return;
+                }
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+
+            Logger.Log("startup", "Speedify telemetry not available in time");
+        }
+
+        private async Task EnsureSpeedifyConnectedAsync()
+        {
+            if (IsSpeedifyCurrentlyConnected())
+            {
+                Logger.Log("startup", "Speedify already connected");
+                return;
+            }
+
+            if (!System.IO.File.Exists(SpeedifyCliPath))
+            {
+                Logger.Log("startup", "Speedify CLI not found -> cannot force connect");
+                return;
+            }
+
+            Logger.Log("startup", "requesting Speedify connect");
+
+            await RunSpeedifyCliAsync("connect");
+
+            const int maxWaitMs = 12000;
+            const int pollMs = 500;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                if (IsSpeedifyCurrentlyConnected())
+                {
+                    Logger.Log("startup", "Speedify connected");
+                    return;
+                }
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+
+            Logger.Log("startup", "Speedify did not connect in time");
+        }
+
+        private bool IsSpeedifyCurrentlyConnected()
+        {
+            if (lastSnapshot == null)
+                return false;
+
+            if (!HasRecentSpeedifySnapshot())
+                return false;
+
+            return lastSnapshot.TunnelConnected;
+        }
+
+        private async Task WaitForFreshUsableSpeedifySnapshotAsync()
+        {
+            const int maxWaitMs = 12000;
+            const int pollMs = 250;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                if (IsSpeedifyReadyForEvaluation())
+                    return;
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+        }
+
+        private bool IsSpeedifyReadyForEvaluation()
+        {
+            if (!IsSpeedifyProcessRunning())
+                return false;
+
+            if (!HasRecentSpeedifySnapshot())
+                return false;
+
+            if (lastSnapshot == null)
+                return false;
+
+            return lastSnapshot.TunnelConnected;
+        }
+
+        private bool HasRecentSpeedifySnapshot()
+        {
+            if (lastSnapshot == null)
+                return false;
+
+            if (lastSnapshot.TimeUtc == DateTime.MinValue)
+                return false;
+
+            if (lastSpeedifySnapshotUtc == DateTime.MinValue)
+                return false;
+
+            double ageMs = (DateTime.UtcNow - lastSpeedifySnapshotUtc).TotalMilliseconds;
+            return ageMs >= 0 && ageMs <= 3000;
+        }
+
+        private async Task<int> RunSpeedifyCliAsync(string arguments)
+        {
+            if (!System.IO.File.Exists(SpeedifyCliPath))
+                return -1;
+
+            try
+            {
+                using (var process = new System.Diagnostics.Process())
+                {
+                    process.StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = SpeedifyCliPath,
+                        Arguments = arguments,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+
+                    process.Start();
+                    await Task.Run(() => process.WaitForExit());
+                    return process.ExitCode;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("startup", "Speedify CLI error: " + ex.Message);
+                return -1;
+            }
+        }
+
+        private async Task<string> RunSpeedifyCliReadAsync(string arguments)
+        {
+            if (!System.IO.File.Exists(SpeedifyCliPath))
+                return null;
+
+            try
+            {
+                using (var process = new System.Diagnostics.Process())
+                {
+                    process.StartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = SpeedifyCliPath,
+                        Arguments = arguments,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        StandardOutputEncoding = System.Text.Encoding.Unicode,
+                        StandardErrorEncoding = System.Text.Encoding.Unicode,
+                        CreateNoWindow = true
+                    };
+
+                    process.Start();
+
+                    string output = await process.StandardOutput.ReadToEndAsync();
+                    string error = await process.StandardError.ReadToEndAsync();
+                    await Task.Run(() => process.WaitForExit());
+
+                    if (!string.IsNullOrWhiteSpace(error))
+                        Logger.Log("startup", "Speedify CLI stderr: " + error.Trim());
+
+                    return SanitizeCliOutput(output);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("startup", "Speedify CLI read error: " + ex.Message);
+                return null;
+            }
+        }
+
+        private async Task<string> GetCurrentSpeedifyServerRawAsync()
+        {
+            return await RunSpeedifyCliReadAsync("show currentserver");
         }
 
         // =========================
@@ -422,6 +758,40 @@ namespace WTFnetApp
             return fastPing.GetState();
         }
 
+        private string CleanJson(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return raw;
+
+            try
+            {
+                using (var doc = System.Text.Json.JsonDocument.Parse(raw))
+                {
+                    return System.Text.Json.JsonSerializer.Serialize(
+                        doc,
+                        new System.Text.Json.JsonSerializerOptions
+                        {
+                            WriteIndented = true
+                        });
+                }
+            }
+            catch
+            {
+                return raw.Replace("\r", "").Replace("\n", "").Trim();
+            }
+        }
+
+        private string SanitizeCliOutput(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return raw;
+
+            return raw
+                .Replace("\0", "")
+                .Replace("\uFEFF", "")
+                .Trim();
+        }
+
         public UnifiedNetworkState GetUnifiedNetworkState()
         {
             return GetLastUnifiedState();
@@ -431,6 +801,13 @@ namespace WTFnetApp
         {
             return lastUnifiedState != null
                 ? lastUnifiedState.Clone()
+                : null;
+        }
+
+        public EvaluationStats GetLastRouteEvaluationStats()
+        {
+            return lastRouteEvaluationStats != null
+                ? lastRouteEvaluationStats.Clone()
                 : null;
         }
 
@@ -449,10 +826,16 @@ namespace WTFnetApp
                 overlay.Show();
         }
 
+        public Task RunManualRouteRecheck()
+        {
+            Logger.Log("startup", "manual recheck requested");
+            Startup();
+            return Task.CompletedTask;
+        }
+
         public Task RunManualServerPingScan()
         {
-            Logger.Log("server", "manual server ping scan disabled (StartupServerTest removed)");
-            return Task.CompletedTask;
+            return RunManualRouteRecheck();
         }
 
         // =========================

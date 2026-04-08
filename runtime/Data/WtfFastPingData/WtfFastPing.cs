@@ -6,12 +6,19 @@ namespace WTFnetApp
 {
     public sealed class WtfFastPing
     {
-        private const int ProbeIntervalMs = 200;
-        private const int PerTargetPeriodMs = 400;
-        private const int BaseProbeTimeoutMs = 500;
-        private const int MaxProbeTimeoutMs = 600;
-        private const int StaleAfterMs = 1200;
-        private const int MissesBeforeDegrade = 4;
+        private const int NormalProbeIntervalMs = 250;
+        private const int NormalPerTargetPeriodMs = 500;
+        private const int NormalBaseProbeTimeoutMs = 450;
+        private const int NormalMaxProbeTimeoutMs = 700;
+        private const int NormalStaleAfterMs = 2200;
+        private const int NormalMissesBeforeDegrade = 4;
+
+        private const int EvaluationProbeIntervalMs = 600;
+        private const int EvaluationPerTargetPeriodMs = 1200;
+        private const int EvaluationBaseProbeTimeoutMs = 800;
+        private const int EvaluationMaxProbeTimeoutMs = 1200;
+        private const int EvaluationStaleAfterMs = 4500;
+        private const int EvaluationMissesBeforeDegrade = 3;
 
         private const double StableAlpha = 0.35;
         private const double HugeSpikeStableAlpha = 0.10;
@@ -37,6 +44,8 @@ namespace WTFnetApp
         private readonly Ping pingSecondary = new Ping();
 
         private volatile bool running;
+        private volatile bool evaluationMode;
+
         private Task probeLoopTask;
         private Task publishLoopTask;
 
@@ -45,9 +54,34 @@ namespace WTFnetApp
 
         private FastPingState state = new FastPingState();
 
+        private DateTime evaluationModeSinceUtc = DateTime.MinValue;
+        private DateTime lastPrimaryProbeUtc = DateTime.MinValue;
+        private DateTime lastSecondaryProbeUtc = DateTime.MinValue;
+
+        private bool evaluationWindowActive;
+        private DateTime evaluationWindowStartedUtc = DateTime.MinValue;
+        private DateTime evaluationWindowEffectiveStartUtc = DateTime.MinValue;
+        private DateTime lastEvaluationBurstUtc = DateTime.MinValue;
+
+        private EvaluationStats lastEvaluationStats = new EvaluationStats();
+
+        private readonly EvaluationSample[] evaluationSamples = new EvaluationSample[512];
+        private int evaluationSampleIndex;
+        private int evaluationSampleCount;
+
+        private const int EvaluationWarmupMs = 8000;
+        private const int EvaluationBurstIntervalMs = 12000;
+        private const int EvaluationBurstProbeDelayMs = 175;
+        private const int EvaluationBurstExtraProbes = 2;
+
         private const int PublishIntervalMs = 250;
 
         public event Action<FastPingState> StateUpdated;
+
+        public bool IsEvaluationMode
+        {
+            get { return evaluationMode; }
+        }
 
         public static async Task<int> Ping(string host)
         {
@@ -110,6 +144,66 @@ namespace WTFnetApp
             Logger.Log("fastping", "probe stopped");
         }
 
+        public void SetEvaluationMode(bool enabled)
+        {
+            if (evaluationMode == enabled)
+                return;
+
+            evaluationMode = enabled;
+            evaluationModeSinceUtc = DateTime.UtcNow;
+
+            Logger.Log("fastping", "evaluation mode -> " + (enabled ? "on" : "off"));
+        }
+
+        public void BeginEvaluationWindow()
+        {
+            SetEvaluationMode(true);
+
+            lock (sync)
+            {
+                evaluationWindowActive = true;
+                evaluationWindowStartedUtc = DateTime.UtcNow;
+                evaluationWindowEffectiveStartUtc = evaluationWindowStartedUtc.AddMilliseconds(EvaluationWarmupMs);
+                lastEvaluationBurstUtc = DateTime.MinValue;
+
+                evaluationSampleIndex = 0;
+                evaluationSampleCount = 0;
+                Array.Clear(evaluationSamples, 0, evaluationSamples.Length);
+
+                Logger.Log("fastping", "evaluation window started");
+            }
+        }
+
+        public EvaluationStats EndEvaluationWindow()
+        {
+            SetEvaluationMode(false);
+
+            lock (sync)
+            {
+                evaluationWindowActive = false;
+                lastEvaluationStats = BuildEvaluationStats_NoLock();
+                Logger.Log(
+                    "fastping",
+                    "evaluation window ended | valid=" + lastEvaluationStats.IsValid +
+                    " | success=" + lastEvaluationStats.SuccessCount +
+                    " | timeout=" + lastEvaluationStats.TimeoutCount +
+                    " | exception=" + lastEvaluationStats.ExceptionCount +
+                    " | median=" + FormatEvalDouble(lastEvaluationStats.MedianMs) +
+                    " | p90=" + FormatEvalDouble(lastEvaluationStats.P90Ms) +
+                    " | jitter=" + FormatEvalDouble(lastEvaluationStats.JitterMs));
+
+                return lastEvaluationStats.Clone();
+            }
+        }
+
+        public EvaluationStats GetLastEvaluationStats()
+        {
+            lock (sync)
+            {
+                return lastEvaluationStats.Clone();
+            }
+        }
+
         public void UpdateTargets(string primaryHost, string secondaryHost = "1.1.1.1")
         {
             lock (sync)
@@ -118,6 +212,7 @@ namespace WTFnetApp
                     !string.Equals(primary.Host, primaryHost, StringComparison.OrdinalIgnoreCase))
                 {
                     primary.Reset(primaryHost);
+                    lastPrimaryProbeUtc = DateTime.MinValue;
                     Logger.Log("fastping", "primary target -> " + primaryHost);
                 }
 
@@ -132,6 +227,7 @@ namespace WTFnetApp
                 if (!string.Equals(secondary.Host, resolvedSecondary, StringComparison.OrdinalIgnoreCase))
                 {
                     secondary.Reset(resolvedSecondary);
+                    lastSecondaryProbeUtc = DateTime.MinValue;
                     Logger.Log("fastping", "secondary target -> " + resolvedSecondary);
                 }
 
@@ -158,27 +254,67 @@ namespace WTFnetApp
 
         private async Task RunProbeLoop()
         {
-            bool probePrimaryNext = true;
-
             while (running)
             {
                 try
                 {
-                    ProbeTargetState target;
-                    Ping ping;
+                    ProbeTargetState target = null;
+                    Ping ping = null;
 
                     lock (sync)
                     {
-                        target = probePrimaryNext ? primary : secondary;
-                        ping = probePrimaryNext ? pingPrimary : pingSecondary;
+                        DateTime now = DateTime.UtcNow;
+                        bool primaryDue =
+                            !string.IsNullOrWhiteSpace(primary.Host) &&
+                            (lastPrimaryProbeUtc == DateTime.MinValue ||
+                             (now - lastPrimaryProbeUtc).TotalMilliseconds >= GetPerTargetPeriodMs());
+
+                        bool secondaryDue =
+                            !string.IsNullOrWhiteSpace(secondary.Host) &&
+                            (lastSecondaryProbeUtc == DateTime.MinValue ||
+                             (now - lastSecondaryProbeUtc).TotalMilliseconds >= GetPerTargetPeriodMs());
+
+                        if (primaryDue && secondaryDue)
+                        {
+                            double primaryAge = lastPrimaryProbeUtc == DateTime.MinValue
+                                ? double.MaxValue
+                                : (now - lastPrimaryProbeUtc).TotalMilliseconds;
+
+                            double secondaryAge = lastSecondaryProbeUtc == DateTime.MinValue
+                                ? double.MaxValue
+                                : (now - lastSecondaryProbeUtc).TotalMilliseconds;
+
+                            if (primaryAge >= secondaryAge)
+                            {
+                                target = primary;
+                                ping = pingPrimary;
+                                lastPrimaryProbeUtc = now;
+                            }
+                            else
+                            {
+                                target = secondary;
+                                ping = pingSecondary;
+                                lastSecondaryProbeUtc = now;
+                            }
+                        }
+                        else if (primaryDue)
+                        {
+                            target = primary;
+                            ping = pingPrimary;
+                            lastPrimaryProbeUtc = now;
+                        }
+                        else if (secondaryDue)
+                        {
+                            target = secondary;
+                            ping = pingSecondary;
+                            lastSecondaryProbeUtc = now;
+                        }
                     }
 
-                    probePrimaryNext = !probePrimaryNext;
-
-                    if (!string.IsNullOrWhiteSpace(target.Host))
+                    if (target != null && !string.IsNullOrWhiteSpace(target.Host))
                         await ProbeAsync(target, ping);
 
-                    await Task.Delay(ProbeIntervalMs);
+                    await Task.Delay(GetProbeIntervalMs());
                 }
                 catch (Exception ex)
                 {
@@ -200,7 +336,6 @@ namespace WTFnetApp
                 {
                     lock (sync)
                     {
-                        // Recompute again on publish boundary so UI gets freshest blend.
                         RecomputeState_NoLock();
                         snapshot = state.Clone();
                     }
@@ -245,17 +380,29 @@ namespace WTFnetApp
                 {
                     if (reply.Status == IPStatus.Success)
                     {
-                        // 🔥 RAW LOG SUCCESS
                         Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host);
-
                         RegisterSuccess_NoLock(target, reply.RoundtripTime);
+                        RecordEvaluationSample_NoLock(
+                            target.Name,
+                            host,
+                            reply.RoundtripTime,
+                            true,
+                            false,
+                            false,
+                            false);
                     }
                     else
                     {
-                        // 🔥 RAW LOG FAIL (non-success status)
                         Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host);
-
                         RegisterMiss_NoLock(target);
+                        RecordEvaluationSample_NoLock(
+                            target.Name,
+                            host,
+                            -1,
+                            false,
+                            true,
+                            false,
+                            false);
                     }
 
                     RecomputeState_NoLock();
@@ -265,27 +412,330 @@ namespace WTFnetApp
             {
                 lock (sync)
                 {
-                    // 🔥 RAW LOG EXCEPTION FAIL
                     Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ") | " + host);
-
                     RegisterMiss_NoLock(target);
+                    RecordEvaluationSample_NoLock(
+                        target.Name,
+                        host,
+                        -1,
+                        false,
+                        false,
+                        true,
+                        false);
                     RecomputeState_NoLock();
                 }
             }
+            await MaybeRunEvaluationBurstAsync(target, ping);
+        }
+
+        private async Task MaybeRunEvaluationBurstAsync(ProbeTargetState target, Ping ping)
+        {
+            string host = null;
+            bool shouldRun = false;
+
+            lock (sync)
+            {
+                if (!evaluationWindowActive)
+                    return;
+
+                if (IsEvaluationWarmupActive_NoLock())
+                    return;
+
+                if (target == null || string.IsNullOrWhiteSpace(target.Host))
+                    return;
+
+                DateTime now = DateTime.UtcNow;
+
+                if (lastEvaluationBurstUtc != DateTime.MinValue &&
+                    (now - lastEvaluationBurstUtc).TotalMilliseconds < EvaluationBurstIntervalMs)
+                    return;
+
+                lastEvaluationBurstUtc = now;
+                host = target.Host;
+                shouldRun = true;
+            }
+
+            if (!shouldRun)
+                return;
+
+            Logger.Log("fastping", "evaluation burst -> " + host);
+
+            for (int i = 0; i < EvaluationBurstExtraProbes; i++)
+            {
+                try
+                {
+                    await Task.Delay(EvaluationBurstProbeDelayMs);
+
+                    int timeoutMs;
+                    lock (sync)
+                    {
+                        timeoutMs = ComputeProbeTimeout_NoLock();
+                    }
+
+                    PingReply reply = await ping.SendPingAsync(host, timeoutMs, Payload);
+
+                    lock (sync)
+                    {
+                        if (reply.Status == IPStatus.Success)
+                        {
+                            Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host + " [burst]");
+                            RegisterSuccess_NoLock(target, reply.RoundtripTime);
+                            RecordEvaluationSample_NoLock(
+                                target.Name,
+                                host,
+                                reply.RoundtripTime,
+                                true,
+                                false,
+                                false,
+                                true);
+                        }
+                        else
+                        {
+                            Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host + " [burst]");
+                            RegisterMiss_NoLock(target);
+                            RecordEvaluationSample_NoLock(
+                                target.Name,
+                                host,
+                                -1,
+                                false,
+                                true,
+                                false,
+                                true);
+                        }
+
+                        RecomputeState_NoLock();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    lock (sync)
+                    {
+                        Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ") | " + host + " [burst]");
+                        RegisterMiss_NoLock(target);
+                        RecordEvaluationSample_NoLock(
+                            target.Name,
+                            host,
+                            -1,
+                            false,
+                            false,
+                            true,
+                            true);
+                        RecomputeState_NoLock();
+                    }
+                }
+            }
+        }
+
+        private void RecordEvaluationSample_NoLock(
+            string probeName,
+            string host,
+            double rttMs,
+            bool success,
+            bool timeout,
+            bool exception,
+            bool burst)
+        {
+            if (!evaluationWindowActive)
+                return;
+
+            DateTime now = DateTime.UtcNow;
+
+            EvaluationSample sample = new EvaluationSample
+            {
+                TimeUtc = now,
+                ProbeName = probeName,
+                Host = host,
+                RttMs = rttMs,
+                Success = success,
+                Timeout = timeout,
+                Exception = exception,
+                Burst = burst
+            };
+
+            evaluationSamples[evaluationSampleIndex] = sample;
+            evaluationSampleIndex = (evaluationSampleIndex + 1) % evaluationSamples.Length;
+
+            if (evaluationSampleCount < evaluationSamples.Length)
+                evaluationSampleCount++;
+        }
+
+        private EvaluationStats BuildEvaluationStats_NoLock()
+        {
+            EvaluationStats stats = new EvaluationStats();
+
+            if (evaluationSampleCount == 0)
+                return stats;
+
+            double[] rtts = new double[evaluationSampleCount];
+            int rttCount = 0;
+
+            double jitterSum = 0;
+            int jitterPairs = 0;
+            double lastRtt = -1;
+
+            for (int i = 0; i < evaluationSampleCount; i++)
+            {
+                EvaluationSample sample = evaluationSamples[i];
+                if (sample == null)
+                    continue;
+
+                if (sample.TimeUtc < evaluationWindowEffectiveStartUtc)
+                    continue;
+
+                stats.TotalSamples++;
+
+                if (sample.Burst)
+                    stats.BurstSampleCount++;
+
+                if (sample.Success && sample.RttMs > 0)
+                {
+                    stats.SuccessCount++;
+
+                    if (sample.Burst)
+                        stats.BurstSuccessCount++;
+
+                    rtts[rttCount++] = sample.RttMs;
+
+                    if (lastRtt > 0)
+                    {
+                        jitterSum += Math.Abs(sample.RttMs - lastRtt);
+                        jitterPairs++;
+                    }
+
+                    lastRtt = sample.RttMs;
+                }
+                else if (sample.Timeout)
+                {
+                    stats.TimeoutCount++;
+
+                    if (sample.Burst)
+                        stats.BurstTimeoutCount++;
+                }
+                else if (sample.Exception)
+                {
+                    stats.ExceptionCount++;
+
+                    if (sample.Burst)
+                        stats.BurstExceptionCount++;
+                }
+            }
+
+            if (stats.TotalSamples <= 0)
+                return stats;
+
+            stats.TimeoutRate = (double)stats.TimeoutCount / stats.TotalSamples;
+            stats.ExceptionRate = (double)stats.ExceptionCount / stats.TotalSamples;
+            stats.SuccessRate = (double)stats.SuccessCount / stats.TotalSamples;
+
+            if (stats.BurstSampleCount > 0)
+            {
+                stats.BurstSuccessRate = (double)stats.BurstSuccessCount / stats.BurstSampleCount;
+                stats.BurstTimeoutRate = (double)stats.BurstTimeoutCount / stats.BurstSampleCount;
+                stats.BurstExceptionRate = (double)stats.BurstExceptionCount / stats.BurstSampleCount;
+            }
+
+            if (rttCount > 0)
+            {
+                Array.Sort(rtts, 0, rttCount);
+
+                stats.MedianMs = PercentileSorted(rtts, rttCount, 0.50);
+                stats.P90Ms = PercentileSorted(rtts, rttCount, 0.90);
+                stats.P95Ms = PercentileSorted(rtts, rttCount, 0.95);
+                stats.MaxMs = rtts[rttCount - 1];
+                stats.MinMs = rtts[0];
+                stats.JitterMs = jitterPairs > 0 ? jitterSum / jitterPairs : 0;
+            }
+
+            stats.IsValid =
+                stats.TotalSamples >= 16 &&
+                stats.SuccessCount >= 10 &&
+                stats.ExceptionCount <= 3 &&
+                stats.TimeoutRate <= 0.35;
+
+            return stats;
+        }
+
+        private static double PercentileSorted(double[] values, int count, double percentile)
+        {
+            if (values == null || count <= 0)
+                return -1;
+
+            if (count == 1)
+                return values[0];
+
+            double rawIndex = (count - 1) * percentile;
+            int low = (int)Math.Floor(rawIndex);
+            int high = (int)Math.Ceiling(rawIndex);
+
+            if (low == high)
+                return values[low];
+
+            double fraction = rawIndex - low;
+            return values[low] + (values[high] - values[low]) * fraction;
+        }
+
+        private static string FormatEvalDouble(double value)
+        {
+            if (value < 0)
+                return "--";
+
+            return ((int)Math.Round(value)).ToString();
+        }
+
+        private int GetProbeIntervalMs()
+        {
+            return evaluationMode ? EvaluationProbeIntervalMs : NormalProbeIntervalMs;
+        }
+
+        private int GetPerTargetPeriodMs()
+        {
+            return evaluationMode ? EvaluationPerTargetPeriodMs : NormalPerTargetPeriodMs;
+        }
+
+        private int GetBaseProbeTimeoutMs()
+        {
+            return evaluationMode ? EvaluationBaseProbeTimeoutMs : NormalBaseProbeTimeoutMs;
+        }
+
+        private int GetMaxProbeTimeoutMs()
+        {
+            return evaluationMode ? EvaluationMaxProbeTimeoutMs : NormalMaxProbeTimeoutMs;
+        }
+
+        private int GetStaleAfterMs()
+        {
+            return evaluationMode ? EvaluationStaleAfterMs : NormalStaleAfterMs;
+        }
+
+        private int GetMissesBeforeDegrade()
+        {
+            return evaluationMode ? EvaluationMissesBeforeDegrade : NormalMissesBeforeDegrade;
+        }
+
+        private bool IsEvaluationWarmupActive_NoLock()
+        {
+            if (!evaluationMode)
+                return false;
+
+            if (evaluationModeSinceUtc == DateTime.MinValue)
+                return false;
+
+            return (DateTime.UtcNow - evaluationModeSinceUtc).TotalMilliseconds < EvaluationWarmupMs;
         }
 
         private int ComputeProbeTimeout_NoLock()
         {
             double basis = tunnelLatencyMs > 0 ? tunnelLatencyMs : state.StablePingMs;
             if (basis <= 0)
-                return BaseProbeTimeoutMs;
+                return GetBaseProbeTimeoutMs();
 
             int timeout = (int)Math.Round(basis * 2.8 + 80.0);
 
-            if (timeout < BaseProbeTimeoutMs)
-                timeout = BaseProbeTimeoutMs;
-            if (timeout > MaxProbeTimeoutMs)
-                timeout = MaxProbeTimeoutMs;
+            if (timeout < GetBaseProbeTimeoutMs())
+                timeout = GetBaseProbeTimeoutMs();
+
+            if (timeout > GetMaxProbeTimeoutMs())
+                timeout = GetMaxProbeTimeoutMs();
 
             return timeout;
         }
@@ -430,10 +880,7 @@ namespace WTFnetApp
                     misses++;
             }
 
-            // Misses are always bad outcomes.
             bad += misses;
-
-            // Add only the missing outcomes that were not in successRtts.
             total += (target.OutcomeCount - target.SuccessCount);
 
             if (total <= 0)
@@ -531,7 +978,7 @@ namespace WTFnetApp
             if (ageMs > 300) confidence -= 0.06;
             if (ageMs > 600) confidence -= 0.10;
             if (ageMs > 1000) confidence -= 0.14;
-            if (ageMs > StaleAfterMs) confidence -= 0.25;
+            if (ageMs > GetStaleAfterMs()) confidence -= 0.25;
 
             confidence -= target.LossRate * 0.35;
             confidence -= target.BadQualityRate * 0.20;
@@ -543,7 +990,7 @@ namespace WTFnetApp
             if (target.JitterMs > 22.0)
                 confidence -= 0.10;
 
-            if (target.ConsecutiveMisses >= MissesBeforeDegrade)
+            if (target.ConsecutiveMisses >= GetMissesBeforeDegrade())
                 confidence -= 0.25;
             else if (target.ConsecutiveMisses == 3)
                 confidence -= 0.12;
@@ -561,6 +1008,8 @@ namespace WTFnetApp
         private void RecomputeState_NoLock()
         {
             FastPingState next = new FastPingState();
+
+            next.IsEvaluationMode = evaluationMode;
 
             next.PrimaryTarget = primary.Host;
             next.SecondaryTarget = secondary.Host;
@@ -600,7 +1049,8 @@ namespace WTFnetApp
             next.BaselinePingMs = bestBaselineProbe;
             next.JitterMs = bestJitterProbe;
 
-            next.SpikeDetected = IsSpike_NoLock(bestInstantProbe, bestStableProbe, bestFloorProbe);
+            next.SpikeDetected = !IsEvaluationWarmupActive_NoLock() &&
+                                 IsSpike_NoLock(bestInstantProbe, bestStableProbe, bestFloorProbe);
 
             next.LossRate = Math.Max(primary.LossRate, secondary.LossRate);
             next.BadQualityRate = Math.Max(primary.BadQualityRate, secondary.BadQualityRate);
@@ -641,6 +1091,9 @@ namespace WTFnetApp
 
         private bool ComputeOffBaseline_NoLock(FastPingState s)
         {
+            if (IsEvaluationWarmupActive_NoLock())
+                return false;
+
             if (s.BaselinePingMs <= 0 || s.InstantPingMs <= 0)
                 return false;
 
@@ -662,12 +1115,20 @@ namespace WTFnetApp
         private bool HasHardDegrade_NoLock()
         {
             return
-                primary.ConsecutiveMisses >= MissesBeforeDegrade ||
-                secondary.ConsecutiveMisses >= MissesBeforeDegrade;
+                primary.ConsecutiveMisses >= GetMissesBeforeDegrade() ||
+                secondary.ConsecutiveMisses >= GetMissesBeforeDegrade();
         }
 
         private FastPingHealthState ComputeHealthState_NoLock(FastPingState s)
         {
+            if (IsEvaluationWarmupActive_NoLock())
+            {
+                if (s.IsStale || s.Confidence < 0.20)
+                    return FastPingHealthState.Stale;
+
+                return FastPingHealthState.Healthy;
+            }
+
             bool hardDegrade = HasHardDegrade_NoLock();
 
             if (s.IsStale || s.Confidence < 0.20)
@@ -696,7 +1157,7 @@ namespace WTFnetApp
             if (target.LastSuccessUtc == DateTime.MinValue)
                 return false;
 
-            return (DateTime.UtcNow - target.LastSuccessUtc).TotalMilliseconds <= StaleAfterMs;
+            return (DateTime.UtcNow - target.LastSuccessUtc).TotalMilliseconds <= GetStaleAfterMs();
         }
 
         private double ChooseBestStableProbe_NoLock(bool primaryFresh, bool secondaryFresh)
@@ -938,6 +1399,53 @@ namespace WTFnetApp
         }
     }
 
+    public sealed class EvaluationSample
+    {
+        public DateTime TimeUtc;
+        public string ProbeName;
+        public string Host;
+        public double RttMs;
+        public bool Success;
+        public bool Timeout;
+        public bool Exception;
+        public bool Burst;
+    }
+
+    public sealed class EvaluationStats
+    {
+        public int TotalSamples;
+        public int SuccessCount;
+        public int TimeoutCount;
+        public int ExceptionCount;
+
+        public int BurstSampleCount;
+        public int BurstSuccessCount;
+        public int BurstTimeoutCount;
+        public int BurstExceptionCount;
+
+        public double SuccessRate;
+        public double TimeoutRate;
+        public double ExceptionRate;
+
+        public double BurstSuccessRate;
+        public double BurstTimeoutRate;
+        public double BurstExceptionRate;
+
+        public double MinMs = -1;
+        public double MedianMs = -1;
+        public double P90Ms = -1;
+        public double P95Ms = -1;
+        public double MaxMs = -1;
+        public double JitterMs = -1;
+
+        public bool IsValid;
+
+        public EvaluationStats Clone()
+        {
+            return (EvaluationStats)MemberwiseClone();
+        }
+    }
+
     public enum FastPingHealthState
     {
         Healthy,
@@ -989,6 +1497,7 @@ namespace WTFnetApp
         public bool SpikeDetected;
         public bool IsStale;
         public bool OffBaseline;
+        public bool IsEvaluationMode;
 
         public FastPingHealthState HealthState;
 

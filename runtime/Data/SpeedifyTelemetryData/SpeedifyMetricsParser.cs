@@ -325,6 +325,19 @@ namespace WTFnetApp
             snapshot.ConnectedServerPublicIp = structuredState.Tunnel.ConnectedServerPublicIp;
             snapshot.ConnectedServerName = structuredState.Tunnel.ConnectedServerName;
 
+            snapshot.TunnelCurrentState = structuredState.Tunnel.CurrentState;
+            snapshot.TunnelCurrentMode = structuredState.Tunnel.CurrentMode;
+
+            snapshot.HasConnectionStats = structuredState.HasConnectionStats;
+            snapshot.HasNetworks = structuredState.HasNetworks;
+            snapshot.HasSessionStats = structuredState.HasSessionStats;
+            snapshot.HasCurrentState = structuredState.HasCurrentState;
+            snapshot.HasConnectedServer = structuredState.HasConnectedServer;
+            snapshot.StructuredCoreComplete = structuredState.IsCoreComplete;
+            snapshot.ParseWarningCount = structuredState.ParseWarnings != null
+                ? structuredState.ParseWarnings.Count
+                : 0;
+
             SpeedifyLinkState firstReal = GetFirstUsableConnectedLink();
             SpeedifyLinkState secondReal = GetSecondUsableConnectedLink(firstReal);
 
@@ -428,6 +441,57 @@ namespace WTFnetApp
                 projected.RemoteIp = link.RemoteIp;
 
                 snapshot.Links.Add(projected);
+            }
+
+            snapshot.SessionWindows.Clear();
+
+            foreach (SpeedifySessionWindowStats src in structuredState.SessionWindows)
+            {
+                if (src == null)
+                    continue;
+
+                snapshot.SessionWindows.Add(new SpeedifySessionWindowStats
+                {
+                    WindowKey = src.WindowKey,
+
+                    BytesRecv = src.BytesRecv,
+                    BytesSent = src.BytesSent,
+                    EncryptedBytesRecv = src.EncryptedBytesRecv,
+                    EncryptedBytesSent = src.EncryptedBytesSent,
+
+                    MaxDownloadMbps = src.MaxDownloadMbps,
+                    MaxUploadMbps = src.MaxUploadMbps,
+
+                    NumFailovers = src.NumFailovers,
+                    NumSessions = src.NumSessions,
+                    RetransBytes = src.RetransBytes,
+                    TotalConnectedMinutes = src.TotalConnectedMinutes,
+
+                    DownBenefitNumConnections = src.DownBenefitNumConnections,
+                    DownBenefitCombinedMbps = src.DownBenefitCombinedMbps,
+                    DownBenefitFastestConnMbps = src.DownBenefitFastestConnMbps,
+
+                    UpBenefitNumConnections = src.UpBenefitNumConnections,
+                    UpBenefitCombinedMbps = src.UpBenefitCombinedMbps,
+                    UpBenefitFastestConnMbps = src.UpBenefitFastestConnMbps,
+
+                    TunBytesIn = src.TunBytesIn,
+                    TunBytesOut = src.TunBytesOut,
+                    TunDroppedIncoming = src.TunDroppedIncoming,
+                    TunPacketWaits = src.TunPacketWaits,
+                    TunReadQueue = src.TunReadQueue,
+
+                    PacketHandlerBytesIn = src.PacketHandlerBytesIn,
+                    PacketHandlerBytesOut = src.PacketHandlerBytesOut,
+                    PacketHandlerDroppedOut = src.PacketHandlerDroppedOut,
+                    PacketHandlerRetries = src.PacketHandlerRetries,
+
+                    TotalFailoverSaves = src.TotalFailoverSaves,
+                    TotalRedundantSaves = src.TotalRedundantSaves,
+                    TotalSpeedSaves = src.TotalSpeedSaves,
+                    TotalStreams = src.TotalStreams,
+                    UniqueSaves = src.UniqueSaves
+                });
             }
 
             return snapshot;

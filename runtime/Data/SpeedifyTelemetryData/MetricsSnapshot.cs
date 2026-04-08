@@ -89,6 +89,22 @@ namespace WTFnetApp
         public double LagPressure;
         public double RetransmissionRate;
         public string IssueSource;
+
+        // Structured-state passthrough
+        public string TunnelCurrentState;
+        public string TunnelCurrentMode;
+
+        public bool HasConnectionStats;
+        public bool HasNetworks;
+        public bool HasSessionStats;
+        public bool HasCurrentState;
+        public bool HasConnectedServer;
+        public bool StructuredCoreComplete;
+
+        public int ParseWarningCount;
+
+        // Session windows
+        public readonly List<SpeedifySessionWindowStats> SessionWindows = new List<SpeedifySessionWindowStats>();
     }
 
     public sealed class LinkSnapshot

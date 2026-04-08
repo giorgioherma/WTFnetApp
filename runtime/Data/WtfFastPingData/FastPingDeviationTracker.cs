@@ -7,6 +7,8 @@ namespace WTFnetApp
         private const int StartConfirmSamples = 3;
         private const int RecoveryConfirmSamples = 6;
         private const int OngoingSummarySeconds = 30;
+        private const int AggregatedSummarySeconds = 5;
+
         private const double CriticalSpikeDeltaMs = 45.0;
         private const double CriticalJitterMs = 22.0;
         private const double WarningSpikeDeltaMs = 25.0;
@@ -21,10 +23,12 @@ namespace WTFnetApp
         private DateTime stateStartUtc = DateTime.MinValue;
         private DateTime lastSummaryUtc = DateTime.MinValue;
         private DateTime lastSampleUtc = DateTime.MinValue;
+        private DateTime lastAggregatedLogUtc = DateTime.MinValue;
 
         private bool baselineLogged;
 
         private readonly RunningStats ongoingStats = new RunningStats();
+        private readonly AggregatedWindowStats aggregatedStats = new AggregatedWindowStats();
 
         public void Reset()
         {
@@ -35,8 +39,10 @@ namespace WTFnetApp
             stateStartUtc = DateTime.MinValue;
             lastSummaryUtc = DateTime.MinValue;
             lastSampleUtc = DateTime.MinValue;
+            lastAggregatedLogUtc = DateTime.MinValue;
             baselineLogged = false;
             ongoingStats.Reset();
+            aggregatedStats.Reset();
         }
 
         public void Update(FastPingState state)
@@ -45,6 +51,8 @@ namespace WTFnetApp
                 return;
 
             lastSampleUtc = DateTime.UtcNow;
+            aggregatedStats.Add(state);
+            MaybeLogAggregatedSummary();
 
             if (!baselineLogged && state.BaselinePingMs > 0 && state.StablePingMs > 0)
             {
@@ -240,6 +248,30 @@ namespace WTFnetApp
             ongoingStats.Add(state);
         }
 
+        private void MaybeLogAggregatedSummary()
+        {
+            DateTime now = DateTime.UtcNow;
+
+            if (lastAggregatedLogUtc != DateTime.MinValue &&
+                (now - lastAggregatedLogUtc).TotalSeconds < AggregatedSummarySeconds)
+                return;
+
+            if (aggregatedStats.ValidPingCount < 3)
+                return;
+
+            double avg = aggregatedStats.AvgPingMs;
+            double max = aggregatedStats.MaxPingMs;
+            double p95 = aggregatedStats.GetP95PingMs();
+            double jitter = aggregatedStats.AvgJitterMs;
+            double loss = aggregatedStats.AvgLossRate;
+
+            Logger.Log("fastping-agg",
+                $"avg={avg:0} max={max:0} p95={p95:0} j={jitter:0} loss={loss:0.00}");
+
+            lastAggregatedLogUtc = now;
+            aggregatedStats.Reset();
+        }
+
         private TrackerState ClassifyState(FastPingState state)
         {
             bool isStale = state.IsStale || state.HealthState == FastPingHealthState.Stale;
@@ -328,6 +360,7 @@ namespace WTFnetApp
         {
             if (value <= 0)
                 return "-1";
+
             return value.ToString("0.0") + "ms";
         }
 
@@ -335,6 +368,7 @@ namespace WTFnetApp
         {
             if (value == 0)
                 return "0.0ms";
+
             return value.ToString("+0.0;-0.0;0.0") + "ms";
         }
 
@@ -342,6 +376,7 @@ namespace WTFnetApp
         {
             if (value < 0)
                 return "-1";
+
             return (value * 100.0).ToString("0.0") + "%";
         }
 
@@ -349,6 +384,7 @@ namespace WTFnetApp
         {
             if (value < 0)
                 return "-1";
+
             return value.ToString("0.00");
         }
 
@@ -449,6 +485,104 @@ namespace WTFnetApp
                 AvgConfidence = confidenceSum / sampleCount;
                 AvgLossRate = lossSum / sampleCount;
                 AvgBadQualityRate = badQualitySum / sampleCount;
+            }
+        }
+
+        private sealed class AggregatedWindowStats
+        {
+            private const int MaxPingSamples = 256;
+
+            private readonly double[] pingSamples = new double[MaxPingSamples];
+            private int pingSampleCount;
+
+            private int sampleCount;
+            private double pingSum;
+            private double jitterSum;
+            private double lossSum;
+
+            public int ValidPingCount
+            {
+                get { return pingSampleCount; }
+            }
+
+            public double AvgPingMs
+            {
+                get { return pingSampleCount > 0 ? pingSum / pingSampleCount : 0.0; }
+            }
+
+            public double AvgJitterMs
+            {
+                get { return sampleCount > 0 ? jitterSum / sampleCount : 0.0; }
+            }
+
+            public double AvgLossRate
+            {
+                get { return sampleCount > 0 ? lossSum / sampleCount : 0.0; }
+            }
+
+            public double MaxPingMs { get; private set; }
+
+            public void Reset()
+            {
+                pingSampleCount = 0;
+                sampleCount = 0;
+                pingSum = 0;
+                jitterSum = 0;
+                lossSum = 0;
+                MaxPingMs = 0;
+                Array.Clear(pingSamples, 0, pingSamples.Length);
+            }
+
+            public void Add(FastPingState state)
+            {
+                if (state == null)
+                    return;
+
+                sampleCount++;
+
+                if (state.JitterMs > 0)
+                    jitterSum += state.JitterMs;
+
+                if (state.LossRate >= 0)
+                    lossSum += state.LossRate;
+
+                double ping = state.DisplayedPingMs > 0 ? state.DisplayedPingMs : state.InstantPingMs;
+                if (ping > 0)
+                {
+                    if (pingSampleCount < MaxPingSamples)
+                    {
+                        pingSamples[pingSampleCount] = ping;
+                        pingSampleCount++;
+                    }
+
+                    pingSum += ping;
+
+                    if (ping > MaxPingMs)
+                        MaxPingMs = ping;
+                }
+            }
+
+            public double GetP95PingMs()
+            {
+                if (pingSampleCount == 0)
+                    return 0.0;
+
+                double[] copy = new double[pingSampleCount];
+                Array.Copy(pingSamples, copy, pingSampleCount);
+                Array.Sort(copy);
+
+                if (pingSampleCount == 1)
+                    return copy[0];
+
+                double rawIndex = (pingSampleCount - 1) * 0.95;
+                int low = (int)Math.Floor(rawIndex);
+                int high = (int)Math.Ceiling(rawIndex);
+
+                if (low == high)
+                    return copy[low];
+
+                double fraction = rawIndex - low;
+                return copy[low] + ((copy[high] - copy[low]) * fraction);
             }
         }
     }
