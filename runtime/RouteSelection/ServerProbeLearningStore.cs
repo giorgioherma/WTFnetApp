@@ -1,5 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
 
 namespace WTFnetApp
 {
@@ -141,14 +144,58 @@ namespace WTFnetApp
                        SpikeDensityPerMinute.HasBadBand;
             }
         }
+
+        public bool IsTrustedLearning
+        {
+            get
+            {
+                return HasUsefulLearning &&
+                       (SampleCountGood >= ServerProbeLearningStore.MinimumGoodSamples ||
+                        SampleCountBad >= ServerProbeLearningStore.MinimumBadSamples);
+            }
+        }
     }
 
     public sealed class ServerProbeLearningStore
     {
+        private const int PersistenceVersion = 1;
+
+        public const int MinimumGoodSamples = 5;
+        public const int MinimumBadSamples = 5;
+
         private readonly Dictionary<string, LearnedProbeStateProfile> profiles =
             new Dictionary<string, LearnedProbeStateProfile>(StringComparer.OrdinalIgnoreCase);
 
         private bool defaultsSeeded;
+
+        public sealed class HistoricalRouteOrderingScore
+        {
+            public double Score { get; set; } = double.MaxValue;
+            public bool IsTrusted { get; set; }
+            public bool HasGoodBias { get; set; }
+            public bool HasBadBias { get; set; }
+            public string Reason { get; set; }
+        }
+
+        public sealed class LearningAgeInfo
+        {
+            public double InfluenceFactor { get; set; } = 1.0;
+            public string AgeLabel { get; set; } = "fresh";
+        }
+
+        public enum LearningStoreLoadStatus
+        {
+            Loaded = 0,
+            Missing = 1,
+            Invalid = 2,
+            Error = 3
+        }
+
+        public sealed class LearningStoreLoadResult
+        {
+            public LearningStoreLoadStatus Status { get; set; }
+            public int ProfilesApplied { get; set; }
+        }
 
         public void SeedDefaultsIfEmpty()
         {
@@ -224,6 +271,245 @@ namespace WTFnetApp
             profile = CreateEmptyProfile(normalizedRouteKey, normalizedBucket);
             profiles[exactKey] = profile;
             return profile;
+        }
+
+        public LearnedProbeStateProfile GetProfileForReadiness(string routeKey, string timeBucketKey)
+        {
+            LearnedProbeStateProfile profile = GetProfile(routeKey, timeBucketKey);
+            if (profile != null && profile.IsTrustedLearning)
+                return profile;
+
+            return GetProfile("*", timeBucketKey);
+        }
+
+        public HistoricalRouteOrderingScore EvaluateHistoricalOrderingScore(
+            string routeKey,
+            string timeBucketKey)
+        {
+            LearnedProbeStateProfile profile = GetExactProfileIfExists(routeKey, timeBucketKey);
+
+            if (profile == null || !profile.IsTrustedLearning)
+            {
+                return new HistoricalRouteOrderingScore
+                {
+                    Score = 1000.0,
+                    IsTrusted = false,
+                    Reason = "default order | untrusted profile"
+                };
+            }
+
+            LearningAgeInfo age = GetLearningAgeInfo(profile.LastUpdatedUtc);
+
+            int goodSamples = profile.SampleCountGood;
+            int badSamples = profile.SampleCountBad;
+
+            bool goodBias = goodSamples >= badSamples + 2;
+            bool badBias = badSamples >= goodSamples + 2;
+
+            double avgJitterGoodMax = profile.AvgJitterMs.HasGoodBand ? profile.AvgJitterMs.GoodMax : 14.0;
+            double jitterRangeGoodMax = profile.JitterRangeMs.HasGoodBand ? profile.JitterRangeMs.GoodMax : 16.0;
+            double p95GoodMax = profile.P95PingMs.HasGoodBand ? profile.P95PingMs.GoodMax : 110.0;
+            double spikeGoodMax = profile.SpikeDensityPerMinute.HasGoodBand ? profile.SpikeDensityPerMinute.GoodMax : 7.0;
+
+            double score =
+                (avgJitterGoodMax * 1.80) +
+                (jitterRangeGoodMax * 1.20) +
+                (p95GoodMax * 0.12) +
+                (spikeGoodMax * 4.00);
+
+            score += Math.Min(16.0, badSamples * 0.90);
+            score -= Math.Min(10.0, goodSamples * 0.65);
+
+            if (badBias)
+                score += 10.0;
+            else if (goodBias)
+                score -= 5.0;
+
+            // Conservative aging: move old learning toward neutral ordering pressure.
+            const double neutralScore = 56.0;
+            score = (score * age.InfluenceFactor) + (neutralScore * (1.0 - age.InfluenceFactor));
+
+            score = Math.Max(0.0, score);
+
+            string reason =
+                badBias ? "trusted bad profile" :
+                goodBias ? "trusted good profile" :
+                "trusted mixed profile";
+
+            if (age.AgeLabel != "fresh")
+                reason += " | " + age.AgeLabel + " influence reduced";
+            else
+                reason += " | fresh";
+
+            return new HistoricalRouteOrderingScore
+            {
+                Score = score,
+                IsTrusted = true,
+                HasGoodBias = goodBias,
+                HasBadBias = badBias,
+                Reason = reason
+            };
+        }
+
+        public static LearningAgeInfo GetLearningAgeInfo(DateTime lastUpdatedUtc)
+        {
+            if (lastUpdatedUtc <= DateTime.MinValue || lastUpdatedUtc > DateTime.UtcNow.AddMinutes(2))
+            {
+                return new LearningAgeInfo
+                {
+                    InfluenceFactor = 1.0,
+                    AgeLabel = "fresh"
+                };
+            }
+
+            double ageDays = (DateTime.UtcNow - lastUpdatedUtc).TotalDays;
+
+            if (ageDays <= 3.0)
+            {
+                return new LearningAgeInfo
+                {
+                    InfluenceFactor = 1.0,
+                    AgeLabel = "fresh"
+                };
+            }
+
+            if (ageDays <= 14.0)
+            {
+                return new LearningAgeInfo
+                {
+                    InfluenceFactor = 0.75,
+                    AgeLabel = "aging"
+                };
+            }
+
+            if (ageDays <= 45.0)
+            {
+                return new LearningAgeInfo
+                {
+                    InfluenceFactor = 0.55,
+                    AgeLabel = "stale"
+                };
+            }
+
+            return new LearningAgeInfo
+            {
+                InfluenceFactor = 0.35,
+                AgeLabel = "very-stale"
+            };
+        }
+
+        public LearningStoreLoadResult LoadFromJsonFile(string filePath)
+        {
+            LearningStoreLoadResult result = new LearningStoreLoadResult
+            {
+                Status = LearningStoreLoadStatus.Missing
+            };
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                    return result;
+
+                string json = File.ReadAllText(filePath);
+                if (string.IsNullOrWhiteSpace(json))
+                {
+                    result.Status = LearningStoreLoadStatus.Invalid;
+                    return result;
+                }
+
+                LearningStorePersistenceModel model =
+                    JsonSerializer.Deserialize<LearningStorePersistenceModel>(
+                        json,
+                        new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+                if (model == null || model.Profiles == null)
+                {
+                    result.Status = LearningStoreLoadStatus.Invalid;
+                    return result;
+                }
+
+                int applied = 0;
+
+                foreach (LearningProfilePersistenceModel persisted in model.Profiles)
+                {
+                    if (persisted == null)
+                        continue;
+
+                    if (string.IsNullOrWhiteSpace(persisted.RouteKey) ||
+                        string.IsNullOrWhiteSpace(persisted.TimeBucketKey))
+                        continue;
+
+                    LearnedProbeStateProfile profile =
+                        GetOrCreateOwnedProfile(
+                            NormalizeRouteKey(persisted.RouteKey),
+                            NormalizeTimeBucket(persisted.TimeBucketKey));
+
+                    profile.ProfileKey = BuildProfileKey(profile.RouteKey, profile.TimeBucketKey);
+                    profile.SampleCountGood = Math.Max(0, persisted.SampleCountGood);
+                    profile.SampleCountBad = Math.Max(0, persisted.SampleCountBad);
+                    profile.LastUpdatedUtc = persisted.LastUpdatedUtc;
+
+                    ApplyBand(profile.AvgJitterMs, persisted.AvgJitterMs);
+                    ApplyBand(profile.JitterRangeMs, persisted.JitterRangeMs);
+                    ApplyBand(profile.P95PingMs, persisted.P95PingMs);
+                    ApplyBand(profile.SpikeDensityPerMinute, persisted.SpikeDensityPerMinute);
+
+                    applied++;
+                }
+
+                result.Status = LearningStoreLoadStatus.Loaded;
+                result.ProfilesApplied = applied;
+                return result;
+            }
+            catch (JsonException)
+            {
+                result.Status = LearningStoreLoadStatus.Invalid;
+                return result;
+            }
+            catch
+            {
+                result.Status = LearningStoreLoadStatus.Error;
+                return result;
+            }
+        }
+
+        public bool SaveToJsonFile(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+                return false;
+
+            try
+            {
+                string directory = Path.GetDirectoryName(filePath);
+                if (!string.IsNullOrWhiteSpace(directory))
+                    Directory.CreateDirectory(directory);
+
+                LearningStorePersistenceModel model = new LearningStorePersistenceModel
+                {
+                    Version = PersistenceVersion,
+                    Profiles = profiles.Values
+                        .OrderBy(x => x.ProfileKey, StringComparer.OrdinalIgnoreCase)
+                        .Select(ToPersistenceProfile)
+                        .ToList()
+                };
+
+                string json =
+                    JsonSerializer.Serialize(
+                        model,
+                        new JsonSerializerOptions { WriteIndented = true });
+
+                File.WriteAllText(filePath, json);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public int GetProfileCount()
+        {
+            return profiles.Count;
         }
 
         public void UpdateFromResult(ProbeScoreResult result)
@@ -365,6 +651,17 @@ namespace WTFnetApp
             return profile;
         }
 
+        private LearnedProbeStateProfile GetExactProfileIfExists(string routeKey, string timeBucketKey)
+        {
+            string profileKey = BuildProfileKey(routeKey, timeBucketKey);
+
+            LearnedProbeStateProfile profile;
+            if (profiles.TryGetValue(profileKey, out profile))
+                return profile;
+
+            return null;
+        }
+
         private static LearnedProbeStateProfile CreateEmptyProfile(string routeKey, string timeBucketKey)
         {
             return new LearnedProbeStateProfile
@@ -408,6 +705,79 @@ namespace WTFnetApp
                 return Math.Max(0, snapshot.P95JitterMs - snapshot.AvgJitterMs);
 
             return -1;
+        }
+
+        private static void ApplyBand(LearnedMetricBand target, LearnedMetricBandPersistenceModel source)
+        {
+            if (target == null || source == null)
+                return;
+
+            target.GoodMin = source.GoodMin;
+            target.GoodMax = source.GoodMax;
+            target.BadMin = source.BadMin;
+            target.BadMax = source.BadMax;
+        }
+
+        private static LearnedMetricBandPersistenceModel ToPersistenceBand(LearnedMetricBand band)
+        {
+            if (band == null)
+                return new LearnedMetricBandPersistenceModel();
+
+            return new LearnedMetricBandPersistenceModel
+            {
+                GoodMin = band.GoodMin,
+                GoodMax = band.GoodMax,
+                BadMin = band.BadMin,
+                BadMax = band.BadMax
+            };
+        }
+
+        private static LearningProfilePersistenceModel ToPersistenceProfile(LearnedProbeStateProfile profile)
+        {
+            if (profile == null)
+                return null;
+
+            return new LearningProfilePersistenceModel
+            {
+                ProfileKey = profile.ProfileKey,
+                RouteKey = profile.RouteKey,
+                TimeBucketKey = profile.TimeBucketKey,
+                SampleCountGood = profile.SampleCountGood,
+                SampleCountBad = profile.SampleCountBad,
+                LastUpdatedUtc = profile.LastUpdatedUtc,
+                AvgJitterMs = ToPersistenceBand(profile.AvgJitterMs),
+                JitterRangeMs = ToPersistenceBand(profile.JitterRangeMs),
+                P95PingMs = ToPersistenceBand(profile.P95PingMs),
+                SpikeDensityPerMinute = ToPersistenceBand(profile.SpikeDensityPerMinute)
+            };
+        }
+
+        private sealed class LearningStorePersistenceModel
+        {
+            public int Version { get; set; }
+            public List<LearningProfilePersistenceModel> Profiles { get; set; } = new List<LearningProfilePersistenceModel>();
+        }
+
+        private sealed class LearningProfilePersistenceModel
+        {
+            public string ProfileKey { get; set; }
+            public string RouteKey { get; set; }
+            public string TimeBucketKey { get; set; }
+            public int SampleCountGood { get; set; }
+            public int SampleCountBad { get; set; }
+            public DateTime LastUpdatedUtc { get; set; }
+            public LearnedMetricBandPersistenceModel AvgJitterMs { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel JitterRangeMs { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel P95PingMs { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel SpikeDensityPerMinute { get; set; } = new LearnedMetricBandPersistenceModel();
+        }
+
+        private sealed class LearnedMetricBandPersistenceModel
+        {
+            public double GoodMin { get; set; } = -1;
+            public double GoodMax { get; set; } = -1;
+            public double BadMin { get; set; } = -1;
+            public double BadMax { get; set; } = -1;
         }
     }
 }

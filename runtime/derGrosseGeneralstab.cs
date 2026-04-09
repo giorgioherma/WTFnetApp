@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -47,6 +48,7 @@ namespace WTFnetApp
 
         private const string SpeedifyCliPath = @"C:\Program Files (x86)\Speedify\speedify_cli.exe";
         private const string SpeedifyExePath = @"C:\Program Files (x86)\Speedify\Speedify.exe";
+        private const string LearningStoreFileName = "route-learning-store.json";
 
         // =========================
         // FIXED FAIR PROBE TARGETS
@@ -124,6 +126,7 @@ namespace WTFnetApp
         private void InitializeRouteSelection()
         {
             probeLearningStore.SeedDefaultsIfEmpty();
+            LoadLearningStoreFromDisk();
 
             startupProbeCoordinator = new StartupProbeCoordinator(
                 disableSpeedifyAsync: DisableSpeedifyAsync,
@@ -362,7 +365,10 @@ namespace WTFnetApp
                 return;
             }
 
-            lastStartupProbeResult = await startupProbeCoordinator.RunAsync(candidates, CancellationToken.None);
+            string timeBucket = ProbeScoring.GetCurrentTimeBucketKey(DateTime.Now);
+            List<ProbeCandidateDefinition> orderedCandidates = OrderStartupCandidatesByLearning(candidates, timeBucket);
+
+            lastStartupProbeResult = await startupProbeCoordinator.RunAsync(orderedCandidates, CancellationToken.None);
 
             if (lastStartupProbeResult == null)
             {
@@ -371,7 +377,25 @@ namespace WTFnetApp
             }
 
             ApplyLearningFromStartupProbe(lastStartupProbeResult);
-            await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
+            SaveLearningStoreToDisk();
+
+            StartupApplyDecision applyDecision = BuildStartupApplyDecision(lastStartupProbeResult);
+            Logger.Log("startup",
+                "applyDecision=" + applyDecision.Kind +
+                " | reason=" + applyDecision.Reason);
+
+            if (applyDecision.Kind == StartupApplyDecisionKind.ApplyWinner)
+            {
+                await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
+            }
+            else if (applyDecision.Kind == StartupApplyDecisionKind.KeepRaw)
+            {
+                await DisableSpeedifyAsync();
+            }
+            else
+            {
+                Logger.Log("startup", "keeping current route state (no winner apply)");
+            }
 
             Logger.Log("startup", lastStartupProbeResult.SummaryText ?? "startup probe finished");
 
@@ -405,6 +429,98 @@ namespace WTFnetApp
             return list;
         }
 
+        private List<ProbeCandidateDefinition> OrderStartupCandidatesByLearning(
+            List<ProbeCandidateDefinition> candidates,
+            string timeBucketKey)
+        {
+            if (candidates == null || candidates.Count == 0)
+                return candidates ?? new List<ProbeCandidateDefinition>();
+
+            List<HistoricalCandidateOrderingEntry> entries = new List<HistoricalCandidateOrderingEntry>();
+
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                ProbeCandidateDefinition candidate = candidates[i];
+                if (candidate == null)
+                    continue;
+
+                ServerProbeLearningStore.HistoricalRouteOrderingScore historical =
+                    probeLearningStore.EvaluateHistoricalOrderingScore(candidate.RouteKey, timeBucketKey);
+
+                entries.Add(new HistoricalCandidateOrderingEntry
+                {
+                    Candidate = candidate,
+                    OriginalIndex = i,
+                    HistoricalScore = historical?.Score ?? 1000.0,
+                    Trusted = historical != null && historical.IsTrusted,
+                    BadBias = historical != null && historical.HasBadBias,
+                    Reason = historical?.Reason ?? "default order | no profile"
+                });
+            }
+
+            LogCandidateOrdering(entries, "original");
+
+            bool hasTrusted = entries.Any(x => x.Trusted);
+            if (!hasTrusted)
+            {
+                Logger.Log("startup", "startup ordering | trusted learning unavailable | using catalog default order");
+                return entries
+                    .OrderBy(x => x.OriginalIndex)
+                    .Select(x => x.Candidate)
+                    .ToList();
+            }
+
+            List<HistoricalCandidateOrderingEntry> ordered = entries
+                .OrderBy(x => ComputeOrderingGroup(x))
+                .ThenBy(x => x.Trusted ? x.HistoricalScore : x.OriginalIndex)
+                .ThenBy(x => x.OriginalIndex)
+                .ToList();
+
+            LogCandidateOrdering(ordered, "reordered");
+
+            return ordered.Select(x => x.Candidate).ToList();
+        }
+
+        private static int ComputeOrderingGroup(HistoricalCandidateOrderingEntry entry)
+        {
+            if (entry == null)
+                return 3;
+
+            if (!entry.Trusted)
+                return 1;
+
+            if (entry.BadBias)
+                return 2;
+
+            return 0;
+        }
+
+        private void LogCandidateOrdering(
+            List<HistoricalCandidateOrderingEntry> entries,
+            string label)
+        {
+            if (entries == null || entries.Count == 0)
+                return;
+
+            string text = string.Join(" | ", entries.Select(x =>
+                (x.Candidate?.RouteKey ?? "unknown") +
+                " => histScore=" + x.HistoricalScore.ToString("0.0") +
+                " | " + (x.Trusted ? "trusted" : "untrusted") +
+                " | " + x.Reason));
+
+            Logger.Log("startup", "startup ordering | " + label + " | " + text);
+        }
+
+        private sealed class HistoricalCandidateOrderingEntry
+        {
+            public ProbeCandidateDefinition Candidate { get; set; }
+            public int OriginalIndex { get; set; }
+            public double HistoricalScore { get; set; }
+            public bool Trusted { get; set; }
+            public bool BadBias { get; set; }
+            public string Reason { get; set; }
+        }
+
         private void ApplyLearningFromStartupProbe(StartupProbeResult result)
         {
             if (result == null || result.AllResults == null)
@@ -422,6 +538,54 @@ namespace WTFnetApp
             }
         }
 
+        private void LoadLearningStoreFromDisk()
+        {
+            string path = GetLearningStorePath();
+            ServerProbeLearningStore.LearningStoreLoadResult loadResult =
+                probeLearningStore.LoadFromJsonFile(path);
+
+            if (loadResult.Status == ServerProbeLearningStore.LearningStoreLoadStatus.Loaded)
+            {
+                Logger.Log("startup", "learning store loaded | profiles=" + loadResult.ProfilesApplied + " | path=" + path);
+                return;
+            }
+
+            if (loadResult.Status == ServerProbeLearningStore.LearningStoreLoadStatus.Missing)
+            {
+                Logger.Log("startup", "learning store missing | seeded defaults only | path=" + path);
+                return;
+            }
+
+            if (loadResult.Status == ServerProbeLearningStore.LearningStoreLoadStatus.Invalid)
+            {
+                Logger.Log("startup", "learning store invalid | using seeded defaults | path=" + path);
+                return;
+            }
+
+            Logger.Log("startup", "learning store load error | using seeded defaults | path=" + path);
+        }
+
+        private void SaveLearningStoreToDisk()
+        {
+            string path = GetLearningStorePath();
+            bool saved = probeLearningStore.SaveToJsonFile(path);
+
+            if (saved)
+                Logger.Log("startup", "learning store saved | profiles=" + probeLearningStore.GetProfileCount() + " | path=" + path);
+            else
+                Logger.Log("startup", "learning store save failed | path=" + path);
+        }
+
+        private static string GetLearningStorePath()
+        {
+            string baseDir =
+                System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                    "WTFnetApp");
+
+            return System.IO.Path.Combine(baseDir, LearningStoreFileName);
+        }
+
         private async Task ApplyWinnerAfterStartupProbeAsync(ProbeScoreResult winner)
         {
             if (winner == null || winner.Candidate == null)
@@ -436,6 +600,83 @@ namespace WTFnetApp
 
             Logger.Log("startup", "applying winner target | " + winner.Candidate);
             await ActivateSpeedifyTargetAsync(winner.Candidate.ConnectTarget);
+        }
+
+        private StartupApplyDecision BuildStartupApplyDecision(StartupProbeResult result)
+        {
+            if (result == null || result.Winner == null)
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "no winner result"
+                };
+            }
+
+            ProbeWinnerConfidenceKind confidenceKind = result.WinnerConfidence != null
+                ? result.WinnerConfidence.Kind
+                : ProbeWinnerConfidenceKind.NoClearWinner;
+
+            bool winnerCleanStabilization =
+                result.Winner.Runtime != null &&
+                result.Winner.Runtime.StabilizationReached &&
+                !result.Winner.Runtime.StabilizationTimedOut;
+
+            bool winnerFallbackStabilization =
+                result.Winner.Runtime != null &&
+                result.Winner.Runtime.StabilizationTimedOut;
+
+            bool rawFallbackStabilization =
+                result.Baseline != null &&
+                result.Baseline.Runtime != null &&
+                result.Baseline.Runtime.StabilizationTimedOut;
+
+            if (confidenceKind == ProbeWinnerConfidenceKind.HighConfidence && winnerCleanStabilization)
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = StartupApplyDecisionKind.ApplyWinner,
+                    Reason = "high confidence + clean stabilization"
+                };
+            }
+
+            if (confidenceKind == ProbeWinnerConfidenceKind.NoClearWinner &&
+                (winnerFallbackStabilization || rawFallbackStabilization))
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = StartupApplyDecisionKind.KeepRaw,
+                    Reason = "no clear winner + weak stabilization"
+                };
+            }
+
+            if (confidenceKind == ProbeWinnerConfidenceKind.Tentative && winnerFallbackStabilization)
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "tentative winner + fallback stabilization"
+                };
+            }
+
+            return new StartupApplyDecision
+            {
+                Kind = StartupApplyDecisionKind.ApplyWinner,
+                Reason = "default apply path"
+            };
+        }
+
+        private enum StartupApplyDecisionKind
+        {
+            ApplyWinner = 0,
+            KeepCurrent = 1,
+            KeepRaw = 2
+        }
+
+        private sealed class StartupApplyDecision
+        {
+            public StartupApplyDecisionKind Kind { get; set; }
+            public string Reason { get; set; }
         }
 
         private async Task EnsureSpeedifyProcessRunningAsync()

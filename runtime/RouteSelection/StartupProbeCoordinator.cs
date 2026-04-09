@@ -8,6 +8,10 @@ namespace WTFnetApp
 {
     public sealed class StartupProbeCoordinator
     {
+        private static readonly TimeSpan CandidateStabilizeMinWait = TimeSpan.FromSeconds(2.5);
+        private static readonly TimeSpan CandidateStabilizeMaxWait = TimeSpan.FromSeconds(16.0);
+        private const int CandidateStabilizeConsecutiveChecks = 3;
+
         private readonly Func<Task<bool>> disableSpeedifyAsync;
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
@@ -84,6 +88,16 @@ namespace WTFnetApp
 
             Log("startup-probe | raw readiness | " + readiness.Kind + " | " + readiness.Reason);
 
+            bool rawStabilized =
+                await WaitForRouteStabilizationAsync(
+                    routeLabel: "raw",
+                    cancellationToken: cancellationToken);
+
+            if (rawStabilized)
+                Log("raw measure | started after stabilization");
+            else
+                Log("raw measure | started with fallback (stabilization timeout)");
+
             ProbeCandidateRuntimeData rawRuntime =
                 await captureProbeAsync(
                     rawCandidate,
@@ -91,6 +105,11 @@ namespace WTFnetApp
                     TimeSpan.FromSeconds(12));
 
             rawRuntime.TimeBucketKey = timeBucket;
+            rawRuntime.StabilizationReached = rawStabilized;
+            rawRuntime.StabilizationTimedOut = !rawStabilized;
+            rawRuntime.Notes = rawStabilized
+                ? rawRuntime.Notes
+                : AppendNote(rawRuntime.Notes, "raw-stabilization-timeout");
 
             ProbeScoreResult rawScore = ProbeScoring.ScoreCandidate(rawRuntime);
             rawScore.IsShortlisted = true;
@@ -116,7 +135,7 @@ namespace WTFnetApp
                 bool activated = await activateSpeedifyAsync(candidate.ConnectTarget);
                 if (!activated)
                 {
-                    Log("startup-probe | activation failed | " + candidate);
+                    Log("startup-probe | discard | " + candidate + " | discardReason=activation failed");
                     continue;
                 }
 
@@ -131,6 +150,16 @@ namespace WTFnetApp
                 Log("startup-probe | candidate readiness | " + candidate +
                     " | " + candidateReadiness.Kind + " | " + candidateReadiness.Reason);
 
+                bool stabilized =
+                    await WaitForRouteStabilizationAsync(
+                        routeLabel: candidate.ToString(),
+                        cancellationToken);
+
+                if (stabilized)
+                    Log("candidate measure | " + candidate + " | started after stabilization");
+                else
+                    Log("candidate measure | " + candidate + " | started with fallback (stabilization timeout)");
+
                 ProbeCandidateRuntimeData runtime =
                     await captureProbeAsync(
                         candidate,
@@ -138,10 +167,18 @@ namespace WTFnetApp
                         TimeSpan.FromSeconds(10));
 
                 runtime.TimeBucketKey = timeBucket;
+                runtime.StabilizationReached = stabilized;
+                runtime.StabilizationTimedOut = !stabilized;
+                runtime.Notes = stabilized
+                    ? runtime.Notes
+                    : AppendNote(runtime.Notes, "stabilization-timeout");
 
                 ProbeScoreResult score = ProbeScoring.ScoreCandidate(runtime);
 
-                bool discard = ProbeScoring.ShouldDiscardEarly(score, rawScore, leader);
+                ProbeDiscardDecision discardDecision =
+                    ProbeScoring.EvaluateDiscardDecision(score, rawScore, leader);
+
+                bool discard = discardDecision.ShouldDiscard;
 
                 if (discard)
                 {
@@ -149,9 +186,11 @@ namespace WTFnetApp
                     output.AllResults.Add(score);
 
                     Log("startup-probe | discard | " + candidate +
+                        " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
                         " | " + ProbeScoring.BuildShortText(score) +
                         " | overall=" + score.OverallStabilityScore.ToString("0.0") +
-                        " | jitterScore=" + score.JitterStabilityScore.ToString("0.0"));
+                        " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                        " | explain=" + ProbeScoring.BuildRouteExplanation(score));
 
                     continue;
                 }
@@ -169,7 +208,8 @@ namespace WTFnetApp
                 Log("startup-probe | keep | " + candidate +
                     " | " + ProbeScoring.BuildShortText(score) +
                     " | overall=" + score.OverallStabilityScore.ToString("0.0") +
-                    " | jitterScore=" + score.JitterStabilityScore.ToString("0.0"));
+                    " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                    " | explain=" + ProbeScoring.BuildRouteExplanation(score));
             }
 
             output.Shortlist = output.Shortlist
@@ -184,6 +224,24 @@ namespace WTFnetApp
 
             if (output.Winner != null)
                 output.Winner.IsWinner = true;
+
+            ProbeScoreResult runnerUp = output.Shortlist
+                .Where(x => x != null && x != output.Winner)
+                .OrderBy(x => x.OverallStabilityScore)
+                .FirstOrDefault();
+
+            LearnedProbeStateProfile winnerLearned = null;
+            if (output.Winner?.Candidate != null)
+            {
+                winnerLearned = learningStore.GetProfile(
+                    output.Winner.Candidate.RouteKey,
+                    timeBucket);
+            }
+
+            output.WinnerConfidence = ProbeScoring.EvaluateWinnerConfidence(
+                output.Winner,
+                runnerUp,
+                winnerLearned);
 
             output.SummaryText = BuildSummary(output);
 
@@ -223,7 +281,7 @@ namespace WTFnetApp
                 FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow = getShortWindowSnapshot();
 
                 LearnedProbeStateProfile learned =
-                    learningStore.GetProfile(routeKey, timeBucketKey);
+                    learningStore.GetProfileForReadiness(routeKey, timeBucketKey);
 
                 ProbeReadinessResult readiness =
                     ProbeScoring.EvaluateReadiness(
@@ -253,6 +311,107 @@ namespace WTFnetApp
             }
         }
 
+        private async Task<bool> WaitForRouteStabilizationAsync(
+            string routeLabel,
+            CancellationToken cancellationToken)
+        {
+            DateTime startedUtc = DateTime.UtcNow;
+            DateTime earliestCheckUtc = startedUtc + CandidateStabilizeMinWait;
+            DateTime hardStopUtc = startedUtc + CandidateStabilizeMaxWait;
+
+            int stableChecks = 0;
+
+            string normalizedLabel = string.IsNullOrWhiteSpace(routeLabel) ? "unknown" : routeLabel;
+            string prefix = string.Equals(normalizedLabel, "raw", StringComparison.OrdinalIgnoreCase)
+                ? "raw stabilize | "
+                : "candidate stabilize | " + normalizedLabel + " | ";
+
+            Log(prefix + "started");
+
+            while (true)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                DateTime nowUtc = DateTime.UtcNow;
+
+                if (nowUtc < earliestCheckUtc)
+                {
+                    await Task.Delay(250, cancellationToken);
+                    continue;
+                }
+
+                bool timeoutReached = nowUtc >= hardStopUtc;
+                if (timeoutReached)
+                {
+                    double elapsed = (nowUtc - startedUtc).TotalSeconds;
+                    Log(prefix +
+                        "timeout | after=" + elapsed.ToString("0.0") +
+                        "s | using fallback measurement");
+                    return false;
+                }
+
+                FastPingState fastPingState = getFastPingState();
+                FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow = getShortWindowSnapshot();
+
+                bool stableNow = IsCandidateStabilized(shortWindow, fastPingState);
+
+                if (stableNow)
+                {
+                    stableChecks++;
+                    Log(prefix + "stableCheck=" + stableChecks + "/" + CandidateStabilizeConsecutiveChecks);
+
+                    if (stableChecks >= CandidateStabilizeConsecutiveChecks)
+                    {
+                        double elapsed = (nowUtc - startedUtc).TotalSeconds;
+                        Log(prefix + "reached | after=" + elapsed.ToString("0.0") + "s");
+                        return true;
+                    }
+                }
+                else
+                {
+                    stableChecks = 0;
+                }
+
+                await Task.Delay(400, cancellationToken);
+            }
+        }
+
+        private static bool IsCandidateStabilized(
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow,
+            FastPingState fastPingState)
+        {
+            if (shortWindow == null || !shortWindow.IsValid || fastPingState == null)
+                return false;
+
+            if (fastPingState.IsStale)
+                return false;
+
+            if (fastPingState.Confidence < 0.62)
+                return false;
+
+            if (shortWindow.StaleRate > 0.10)
+                return false;
+
+            if (shortWindow.SpikeDensityPerMinute > 6.0)
+                return false;
+
+            if (shortWindow.AvgJitterMs > 18.0)
+                return false;
+
+            return true;
+        }
+
+        private static string AppendNote(string notes, string suffix)
+        {
+            if (string.IsNullOrWhiteSpace(suffix))
+                return notes;
+
+            if (string.IsNullOrWhiteSpace(notes))
+                return suffix;
+
+            return notes + " | " + suffix;
+        }
+
         private static void TrimShortlist(List<ProbeScoreResult> shortlist, int maxKeep)
         {
             if (shortlist == null)
@@ -270,19 +429,44 @@ namespace WTFnetApp
                 return "startup-probe | no result";
 
             string winner = result.Winner != null
-                ? result.Winner.Candidate + " (" + ProbeScoring.BuildShortText(result.Winner) + ")"
+                ? result.Winner.Candidate +
+                  " | overall=" + result.Winner.OverallStabilityScore.ToString("0.0") +
+                  " | badge=" + ProbeScoring.GetBadgeLabel(result.Winner)
                 : "none";
+
+            ProbeScoreResult runnerUp = result.Shortlist != null
+                ? result.Shortlist
+                    .Where(x => x != null && x != result.Winner)
+                    .OrderBy(x => x.OverallStabilityScore)
+                    .FirstOrDefault()
+                : null;
+
+            string winnerConfidence = result.WinnerConfidence != null
+                ? result.WinnerConfidence.Kind +
+                  " (" + result.WinnerConfidence.ConfidenceScore.ToString("0.0") + ")" +
+                  " | " + result.WinnerConfidence.Reason
+                : "not-evaluated";
+
+            string winnerReason = ProbeScoring.BuildWinnerReason(
+                result.Winner,
+                runnerUp,
+                result.WinnerConfidence);
 
             string shortlist = result.Shortlist != null && result.Shortlist.Count > 0
                 ? string.Join(" | ",
                     result.Shortlist.Select(x =>
                         x.Candidate + " => " +
-                        ProbeScoring.BuildShortText(x) +
-                        " | overall=" + x.OverallStabilityScore.ToString("0.0") +
-                        " | jitterScore=" + x.JitterStabilityScore.ToString("0.0")))
+                        "overall=" + x.OverallStabilityScore.ToString("0.0") +
+                        " | jitterScore=" + x.JitterStabilityScore.ToString("0.0") +
+                        " | warning=" + ProbeScoring.GetWarningLabel(x) +
+                        " | badge=" + ProbeScoring.GetBadgeLabel(x) +
+                        " | explain=" + ProbeScoring.BuildRouteExplanation(x)))
                 : "none";
 
-            return "startup-probe | winner=" + winner + " | shortlist=" + shortlist;
+            return "startup-probe | winner=" + winner +
+                   " | winnerConfidence=" + winnerConfidence +
+                   " | winnerReason=" + winnerReason +
+                   " | shortlist=" + shortlist;
         }
 
         private void Log(string message)
@@ -299,6 +483,7 @@ namespace WTFnetApp
 
         public List<ProbeScoreResult> AllResults { get; set; } = new List<ProbeScoreResult>();
         public List<ProbeScoreResult> Shortlist { get; set; } = new List<ProbeScoreResult>();
+        public ProbeWinnerConfidenceResult WinnerConfidence { get; set; }
 
         public string SummaryText { get; set; }
     }

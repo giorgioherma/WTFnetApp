@@ -23,6 +23,13 @@ namespace WTFnetApp
         Smoothest = 1
     }
 
+    public enum ProbeWinnerConfidenceKind
+    {
+        NoClearWinner = 0,
+        Tentative = 1,
+        HighConfidence = 2
+    }
+
     public enum ProbeReadinessKind
     {
         NotReady = 0,
@@ -94,6 +101,9 @@ namespace WTFnetApp
 
         public bool IsValid { get; set; } = true;
         public string Notes { get; set; }
+
+        public bool StabilizationReached { get; set; }
+        public bool StabilizationTimedOut { get; set; }
     }
 
     public sealed class ProbeScoreResult
@@ -117,6 +127,20 @@ namespace WTFnetApp
         public string BadgeText { get; set; }
 
         public double JitterRangeMs { get; set; } = -1;
+    }
+
+    public sealed class ProbeWinnerConfidenceResult
+    {
+        public ProbeWinnerConfidenceKind Kind { get; set; } = ProbeWinnerConfidenceKind.NoClearWinner;
+        public double ConfidenceScore { get; set; }
+        public string Reason { get; set; }
+        public double GapToRunnerUpScore { get; set; }
+    }
+
+    public sealed class ProbeDiscardDecision
+    {
+        public bool ShouldDiscard { get; set; }
+        public string ReasonCategory { get; set; }
     }
 
     public static class ProbeScoring
@@ -252,26 +276,55 @@ namespace WTFnetApp
             ProbeScoreResult baseline,
             ProbeScoreResult currentLeader)
         {
+            return EvaluateDiscardDecision(candidate, baseline, currentLeader).ShouldDiscard;
+        }
+
+        public static ProbeDiscardDecision EvaluateDiscardDecision(
+            ProbeScoreResult candidate,
+            ProbeScoreResult baseline,
+            ProbeScoreResult currentLeader)
+        {
+            ProbeDiscardDecision decision = new ProbeDiscardDecision
+            {
+                ShouldDiscard = false,
+                ReasonCategory = "kept"
+            };
+
             if (candidate == null)
-                return true;
+            {
+                decision.ShouldDiscard = true;
+                decision.ReasonCategory = "unusable probe";
+                return decision;
+            }
 
             if (candidate.WarningLevel == ProbeWarningLevel.Risky)
-                return true;
+            {
+                decision.ShouldDiscard = true;
+                decision.ReasonCategory =
+                    candidate.Runtime != null && !candidate.Runtime.IsValid
+                        ? "unusable probe"
+                        : "risky threshold";
+                return decision;
+            }
 
             if (baseline != null &&
                 baseline.WarningLevel != ProbeWarningLevel.Risky &&
                 candidate.OverallStabilityScore > baseline.OverallStabilityScore + 28.0)
             {
-                return true;
+                decision.ShouldDiscard = true;
+                decision.ReasonCategory = "worse than raw baseline";
+                return decision;
             }
 
             if (currentLeader != null &&
                 candidate.OverallStabilityScore > currentLeader.OverallStabilityScore + 30.0)
             {
-                return true;
+                decision.ShouldDiscard = true;
+                decision.ReasonCategory = "worse than current leader";
+                return decision;
             }
 
-            return false;
+            return decision;
         }
 
         public static ProbeReadinessResult EvaluateReadiness(
@@ -324,23 +377,41 @@ namespace WTFnetApp
 
             if (learned != null && learned.HasUsefulLearning)
             {
-                bool goodStable =
-                    learned.AvgJitterMs.IsInGoodBand(avgJitter) &&
-                    learned.P95PingMs.IsInGoodBand(p95Ping) &&
-                    learned.SpikeDensityPerMinute.IsInGoodBand(spikeDensity);
+                bool trustedLearning = learned.IsTrustedLearning;
+                ServerProbeLearningStore.LearningAgeInfo age =
+                    ServerProbeLearningStore.GetLearningAgeInfo(learned.LastUpdatedUtc);
 
-                bool badStable =
-                    learned.AvgJitterMs.IsInBadBand(avgJitter) ||
-                    learned.JitterRangeMs.IsInBadBand(jitterRange) ||
-                    learned.P95PingMs.IsInBadBand(p95Ping) ||
-                    learned.SpikeDensityPerMinute.IsInBadBand(spikeDensity);
+                int goodMatches = 0;
+                if (learned.AvgJitterMs.IsInGoodBand(avgJitter)) goodMatches++;
+                if (learned.JitterRangeMs.IsInGoodBand(jitterRange)) goodMatches++;
+                if (learned.P95PingMs.IsInGoodBand(p95Ping)) goodMatches++;
+                if (learned.SpikeDensityPerMinute.IsInGoodBand(spikeDensity)) goodMatches++;
+
+                int badMatches = 0;
+                if (learned.AvgJitterMs.IsInBadBand(avgJitter)) badMatches++;
+                if (learned.JitterRangeMs.IsInBadBand(jitterRange)) badMatches++;
+                if (learned.P95PingMs.IsInBadBand(p95Ping)) badMatches++;
+                if (learned.SpikeDensityPerMinute.IsInBadBand(spikeDensity)) badMatches++;
+
+                int requiredGoodMatches =
+                    trustedLearning && age.InfluenceFactor < 0.55 ? 4 :
+                    3;
+
+                int requiredBadMatches =
+                    trustedLearning && age.InfluenceFactor < 0.75 ? 2 :
+                    1;
+
+                bool goodStable = goodMatches >= requiredGoodMatches;
+                bool badStable = badMatches >= requiredBadMatches;
 
                 if (goodStable)
                 {
                     return new ProbeReadinessResult
                     {
                         Kind = ProbeReadinessKind.GoodStable,
-                        Reason = "learned good range"
+                        Reason = trustedLearning
+                            ? "learned good range | " + age.AgeLabel
+                            : "seeded good range"
                     };
                 }
 
@@ -349,7 +420,9 @@ namespace WTFnetApp
                     return new ProbeReadinessResult
                     {
                         Kind = ProbeReadinessKind.BadStable,
-                        Reason = "learned bad range"
+                        Reason = trustedLearning
+                            ? "learned bad range | " + age.AgeLabel
+                            : "seeded bad range"
                     };
                 }
             }
@@ -413,6 +486,149 @@ namespace WTFnetApp
                 parts.Add("Clean");
 
             return string.Join(" / ", parts);
+        }
+
+        public static string GetWarningLabel(ProbeScoreResult result)
+        {
+            if (result == null)
+                return "unknown";
+
+            if (result.WarningLevel == ProbeWarningLevel.Risky)
+                return "risky";
+
+            if (result.WarningLevel == ProbeWarningLevel.Borderline)
+                return "borderline";
+
+            return "clean";
+        }
+
+        public static string GetBadgeLabel(ProbeScoreResult result)
+        {
+            if (result == null || result.Badge == ProbeBadgeKind.None)
+                return "none";
+
+            return result.Badge == ProbeBadgeKind.Smoothest ? "smoothest" : "none";
+        }
+
+        public static string BuildRouteExplanation(ProbeScoreResult result)
+        {
+            if (result == null || result.Runtime == null)
+                return "no probe data";
+
+            string warning = GetWarningLabel(result);
+            string primary = GetPrimaryInstabilityReason(result);
+            string badge = result.Badge == ProbeBadgeKind.Smoothest ? ", smoothest jitter" : string.Empty;
+
+            if (warning == "clean")
+                return "clean stability profile" + badge;
+
+            return warning + ", " + primary + badge;
+        }
+
+        public static string BuildWinnerReason(
+            ProbeScoreResult winner,
+            ProbeScoreResult runnerUp,
+            ProbeWinnerConfidenceResult confidence)
+        {
+            if (winner == null)
+                return "no winner";
+
+            string gapText = "no runner-up";
+            if (runnerUp != null)
+            {
+                double gap = Math.Max(0.0, runnerUp.OverallStabilityScore - winner.OverallStabilityScore);
+                gapText = gap >= 8.0 ? "clear score gap" : gap >= 3.0 ? "moderate score gap" : "narrow score gap";
+            }
+
+            string confidenceText = confidence != null
+                ? confidence.Kind.ToString()
+                : "NoClearWinner";
+
+            return gapText + " + " + confidenceText + " confidence";
+        }
+
+        public static ProbeWinnerConfidenceResult EvaluateWinnerConfidence(
+            ProbeScoreResult winner,
+            ProbeScoreResult runnerUp,
+            LearnedProbeStateProfile learned)
+        {
+            ProbeWinnerConfidenceResult result = new ProbeWinnerConfidenceResult();
+
+            if (winner == null || winner.Runtime == null)
+            {
+                result.Reason = "winner metrics unavailable";
+                return result;
+            }
+
+            double gap = 30.0;
+            if (runnerUp != null)
+                gap = Math.Max(0.0, runnerUp.OverallStabilityScore - winner.OverallStabilityScore);
+
+            result.GapToRunnerUpScore = gap;
+
+            double gapPoints =
+                gap >= 22.0 ? 45.0 :
+                gap >= 14.0 ? 34.0 :
+                gap >= 8.0 ? 22.0 :
+                gap >= 4.0 ? 12.0 :
+                4.0;
+
+            double confidence = Safe(winner.Runtime.AvgConfidence);
+            double samplePoints =
+                confidence >= 0.90 ? 28.0 :
+                confidence >= 0.80 ? 24.0 :
+                confidence >= 0.70 ? 18.0 :
+                confidence >= 0.60 ? 12.0 :
+                confidence >= 0.50 ? 6.0 :
+                2.0;
+
+            double staleRate = Safe(winner.Runtime.StaleRate);
+            double stalePenalty =
+                staleRate >= 0.18 ? 16.0 :
+                staleRate >= 0.12 ? 10.0 :
+                staleRate >= 0.07 ? 5.0 :
+                0.0;
+
+            double learningPoints = 0.0;
+            string learningText = "seed/default-backed";
+            if (learned != null && learned.IsTrustedLearning)
+            {
+                int totalSamples = learned.SampleCountGood + learned.SampleCountBad;
+                if (totalSamples >= 10) learningPoints = 14.0;
+                else if (totalSamples >= 5) learningPoints = 10.0;
+                else learningPoints = 6.0;
+
+                ServerProbeLearningStore.LearningAgeInfo age =
+                    ServerProbeLearningStore.GetLearningAgeInfo(learned.LastUpdatedUtc);
+
+                learningPoints *= age.InfluenceFactor;
+                learningText = "learning-backed (" + age.AgeLabel + ")";
+            }
+
+            double warningPenalty =
+                winner.WarningLevel == ProbeWarningLevel.Risky ? 24.0 :
+                winner.WarningLevel == ProbeWarningLevel.Borderline ? 12.0 :
+                0.0;
+
+            double finalScore = gapPoints + samplePoints + learningPoints - stalePenalty - warningPenalty;
+            finalScore = Math.Max(0.0, Math.Min(100.0, finalScore));
+
+            result.ConfidenceScore = finalScore;
+
+            if (finalScore >= 72.0 && gap >= 8.0 && winner.WarningLevel == ProbeWarningLevel.None)
+                result.Kind = ProbeWinnerConfidenceKind.HighConfidence;
+            else if (finalScore >= 45.0 && gap >= 3.0)
+                result.Kind = ProbeWinnerConfidenceKind.Tentative;
+            else
+                result.Kind = ProbeWinnerConfidenceKind.NoClearWinner;
+
+            string gapText = gap >= 8.0 ? "clear lead" : gap >= 3.0 ? "narrow lead" : "near tie";
+            string sampleText = confidence >= 0.70 ? "good sample quality" : "limited sample quality";
+            string staleText = stalePenalty > 0 ? "stale penalty applied" : "fresh samples";
+
+            result.Reason = gapText + ", " + sampleText + ", " + learningText + ", " + staleText;
+
+            return result;
         }
 
         private static ProbeWarningLevel ClassifyWarning(ProbeCandidateRuntimeData runtime)
@@ -541,6 +757,34 @@ namespace WTFnetApp
                 " p95=" + F(runtime.P95PingMs) +
                 " spkD=" + F(runtime.SpikeDensityPerMinute) +
                 " loss=" + F(EffectiveLossRate(runtime.AvgLossRate) * 100.0);
+        }
+
+        private static string GetPrimaryInstabilityReason(ProbeScoreResult result)
+        {
+            if (result == null || result.Runtime == null)
+                return "limited metrics";
+
+            ProbeCandidateRuntimeData runtime = result.Runtime;
+
+            if (Safe(runtime.SpikeDensityPerMinute) >= BorderlineSpikeDensity)
+                return "higher spike density";
+
+            if (Safe(result.JitterRangeMs) >= BorderlineJitterRangeMs)
+                return "high jitter range";
+
+            if (Safe(runtime.AvgJitterMs) >= BorderlineAvgJitterMs)
+                return "high average jitter";
+
+            if (Safe(runtime.P95PingMs) >= BorderlineP95PingMs)
+                return "high p95 latency";
+
+            if (EffectiveLossRate(runtime.AvgLossRate) >= BorderlineLossRate)
+                return "loss pressure";
+
+            if (Safe(runtime.StaleRate) >= BorderlineStaleRate)
+                return "stale sample pressure";
+
+            return "mixed instability signals";
         }
 
         private static double Safe(double value)
