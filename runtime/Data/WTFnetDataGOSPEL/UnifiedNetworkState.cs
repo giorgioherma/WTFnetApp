@@ -7,7 +7,8 @@ namespace WTFnetApp
     {
         None = 0,
         FastPing = 1,
-        Speedify = 2
+        Speedify = 2,
+        FastPingWithSpeedify = 3
     }
 
     public enum UnifiedNetworkHealthState
@@ -234,6 +235,7 @@ namespace WTFnetApp
         public double FastPingJitterMs = -1;
         public double FastPingDisplayedPingMs = -1;
         public double FastPingTunnelLatencyMs = -1;
+        public double DeltaFastPingVsSpeedifyMs = -1;
 
         public double FastPingConfidence = 0;
         public double FastPingLossRate = 0;
@@ -368,16 +370,13 @@ namespace WTFnetApp
 
         private string BuildTunnelState()
         {
-            if (SourceKind == UnifiedNetworkSourceKind.FastPing)
-                return "No Tunnel";
-
             if (TunnelConnected)
                 return "Tunnel OK";
 
             if (HasSpeedify || SpeedifyAvailable)
                 return "Tunnel Down";
 
-            return "Unknown";
+            return "No Tunnel";
         }
 
         private string FormatPingText(double pingMs)
@@ -398,22 +397,6 @@ namespace WTFnetApp
 
         private string GetPingColorKey(double pingMs)
         {
-            if (SourceKind == UnifiedNetworkSourceKind.FastPing)
-            {
-                if (pingMs > 0)
-                {
-                    if (pingMs <= 50)
-                        return "green";
-
-                    if (pingMs <= 90)
-                        return "yellow";
-
-                    return "red";
-                }
-
-                return "gray";
-            }
-
             if (IsStale || pingMs <= 0)
                 return "gray";
 
@@ -435,6 +418,8 @@ namespace WTFnetApp
                     return "gray";
 
                 case UnifiedNetworkHealthState.Unknown:
+                    return "gray";
+
                 default:
                     break;
             }

@@ -301,7 +301,7 @@ namespace WTFnetApp
 
             lock (unifiedCsvLockObj)
             {
-                string source = SafeCsv(s.SourceKind);
+                string source = SafeCsv(GetUnifiedSourceForCsv(s.SourceKind));
                 string health = SafeCsv(s.HealthState);
                 string server = SafeCsv(s.ConnectedServerName);
                 string mode = SafeCsv(s.SpeedifyCurrentMode);
@@ -523,7 +523,7 @@ namespace WTFnetApp
             return string.Join(";", new[]
             {
                 now.ToString("yyyy-MM-dd HH:mm:ss.fff"),
-                SafeCsv(s.SourceKind),
+                SafeCsv(GetUnifiedSourceForCsv(s.SourceKind)),
                 SafeCsv(s.HealthState),
                 SafeCsv(s.HealthReason),
                 SafeCsv(s.Notes),
@@ -901,6 +901,14 @@ namespace WTFnetApp
         private static string B(bool v)
         {
             return v ? "1" : "0";
+        }
+
+        private static UnifiedNetworkSourceKind GetUnifiedSourceForCsv(UnifiedNetworkSourceKind sourceKind)
+        {
+            if (sourceKind == UnifiedNetworkSourceKind.FastPingWithSpeedify)
+                return UnifiedNetworkSourceKind.FastPing;
+
+            return sourceKind;
         }
 
         private static string SafeCsv(object value)
