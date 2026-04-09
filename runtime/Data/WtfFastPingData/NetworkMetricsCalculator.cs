@@ -28,10 +28,6 @@ namespace WTFnetApp
             state.SpikeDetected = fastPing.SpikeDetected;
             state.IsStale = fastPing.IsStale;
 
-            state.TunnelConnected = false;
-            state.ActiveConnectionCount = 0;
-            state.BackupConnectionCount = 0;
-
             state.PrimaryLatencySource = "fastping";
             state.PrimaryJitterSource = "fastping";
             state.PrimaryConfidenceSource = "fastping";

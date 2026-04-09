@@ -34,29 +34,32 @@ namespace WTFnetApp
             if (hasFastPing)
                 ApplyFastPingFields(state, fastPing);
 
-            if (speedifyUsable)
+            if (hasFastPing)
+            {
+                state.SourceKind = speedifyUsable
+                    ? UnifiedNetworkSourceKind.FastPingWithSpeedify
+                    : UnifiedNetworkSourceKind.FastPing;
+
+                NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing);
+                NetworkQualityEvaluator.ClassifyFastPing(state);
+
+                state.HealthReason = "Resolved from FastPing";
+                state.Notes = speedifyUsable
+                    ? "Primary source: FastPing probes; Speedify telemetry attached as context."
+                    : "Speedify telemetry unavailable or stale; using probe-derived metrics.";
+
+                if (speedifyUsable)
+                    ApplySpeedifyContextOnly(state, snapshot, fastPing);
+            }
+            else if (speedifyUsable)
             {
                 state.SourceKind = UnifiedNetworkSourceKind.Speedify;
 
                 NetworkMetricsCalculator.ResolveFromSpeedify(state, snapshot);
                 NetworkQualityEvaluator.ClassifySpeedify(state, snapshot);
 
-                state.HealthReason = "Resolved from Speedify";
-                state.Notes = "Primary source: fresh Speedify telemetry.";
-
-                // let FastPing still influence interpretation a bit
-                if (hasFastPing)
-                    ApplyFastPingOverlaySignals(state, fastPing);
-            }
-            else if (hasFastPing)
-            {
-                state.SourceKind = UnifiedNetworkSourceKind.FastPing;
-
-                NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing);
-                NetworkQualityEvaluator.ClassifyFastPing(state);
-
-                state.HealthReason = "Resolved from FastPing";
-                state.Notes = "Speedify telemetry unavailable or stale; using probe-derived metrics.";
+                state.HealthReason = "Resolved from Speedify fallback";
+                state.Notes = "FastPing unavailable; using fresh Speedify telemetry as fallback.";
             }
             else
             {
@@ -71,54 +74,41 @@ namespace WTFnetApp
             return state;
         }
 
-        private static void ApplyFastPingOverlaySignals(UnifiedNetworkState state, FastPingState fastPing)
+        private static void ApplySpeedifyContextOnly(UnifiedNetworkState state, MetricsSnapshot snapshot, FastPingState fastPing)
         {
-            if (state == null || fastPing == null)
+            if (state == null || snapshot == null || fastPing == null)
                 return;
-
-            bool fastPingLooksBad =
-                fastPing.SpikeDetected ||
-                fastPing.IsStale ||
-                fastPing.Confidence < 0.60 ||
-                fastPing.LossRate >= 0.20 ||
-                fastPing.BadQualityRate >= 0.30 ||
-                (fastPing.BaselinePingMs > 0 && fastPing.DisplayedPingMs > fastPing.BaselinePingMs + 20);
-
-            bool fastPingLooksVeryBad =
-                fastPing.IsStale ||
-                fastPing.LossRate >= 0.35 ||
-                (fastPing.BaselinePingMs > 0 && fastPing.DisplayedPingMs > fastPing.BaselinePingMs + 35);
-
-            // keep Speedify as source, but raise awareness if probe sees trouble
-            if (fastPingLooksBad)
-            {
-                state.Notes =
-                    AppendNote(state.Notes,
-                    "FastPing indicates instability while Speedify is active.");
-
-                if (state.HealthState == UnifiedNetworkHealthState.Healthy)
-                    state.HealthState = UnifiedNetworkHealthState.OffBaseline;
-            }
-
-            if (fastPingLooksVeryBad)
-            {
-                state.Notes =
-                    AppendNote(state.Notes,
-                    "FastPing indicates severe instability while Speedify is active.");
-
-                if (state.HealthState == UnifiedNetworkHealthState.Healthy ||
-                    state.HealthState == UnifiedNetworkHealthState.OffBaseline)
-                {
-                    state.HealthState = UnifiedNetworkHealthState.Warning;
-                }
-            }
 
             state.JitterPressure = Math.Max(
                 state.JitterPressure,
-                ComputeJitterPressure(fastPing.JitterMs));
+                ComputeJitterPressure(ChoosePositive(
+                    snapshot.AggregateJitterMs,
+                    snapshot.Jitter,
+                    snapshot.MicroJitter)));
 
-            if (fastPing.SpikeDetected)
-                state.JitterPressure = Math.Max(state.JitterPressure, 0.75);
+            double speedifyReferenceLatency = ChoosePositive(
+                snapshot.AggregateLatencyMs,
+                snapshot.LatencyMs,
+                snapshot.Adapter1Latency);
+
+            if (speedifyReferenceLatency > 0 && fastPing.StablePingMs > 0)
+            {
+                state.DeltaFastPingVsSpeedifyMs = Math.Abs(speedifyReferenceLatency - fastPing.StablePingMs);
+
+                if (state.DeltaFastPingVsSpeedifyMs >= 10)
+                {
+                    state.Notes = AppendNote(
+                        state.Notes,
+                        "Speedify telemetry differs noticeably from end-to-end probes.");
+                }
+
+                if (state.DeltaFastPingVsSpeedifyMs >= 20)
+                {
+                    state.Notes = AppendNote(
+                        state.Notes,
+                        "Large tunnel-vs-probe mismatch detected.");
+                }
+            }
         }
 
         private static bool IsSpeedifyFresh(MetricsSnapshot snapshot)
@@ -346,6 +336,7 @@ namespace WTFnetApp
             state.SourceKind = UnifiedNetworkSourceKind.None;
             state.HealthState = UnifiedNetworkHealthState.Unknown;
             state.HealthReason = "No telemetry available";
+            state.DeltaFastPingVsSpeedifyMs = -1;
             state.PrimaryLatencySource = "none";
             state.PrimaryJitterSource = "none";
             state.PrimaryConfidenceSource = "none";
