@@ -118,14 +118,16 @@ namespace WTFnetApp
                 : AppendNote(rawRuntime.Notes, "raw-stabilization-timeout");
 
             ProbeScoreResult rawScore = ProbeScoring.ScoreCandidate(rawRuntime);
+            LearnedProbeStateProfile rawLearned = learningStore.GetProfile(rawCandidate.RouteKey, timeBucket);
+            rawScore.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(rawScore, rawLearned);
             rawScore.IsShortlisted = true;
 
             output.Baseline = rawScore;
             output.AllResults.Add(rawScore);
             output.Shortlist.Add(rawScore);
 
-            List<ProbeScoreResult> keptRankedResults = new List<ProbeScoreResult> { rawScore };
             ProbeScoreResult leader = rawScore;
+            Log("startup-probe | leader initialized -> " + FormatLeaderLabel(leader));
 
             foreach (ProbeCandidateDefinition candidate in ordered)
             {
@@ -143,6 +145,10 @@ namespace WTFnetApp
                 if (!activated)
                 {
                     Log("startup-probe | discard | " + candidate + " | discardReason=activation failed");
+                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
+                    bool restored = await RestoreLeaderRouteAsync(leader, cancellationToken);
+                    if (!restored)
+                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
                     continue;
                 }
 
@@ -189,6 +195,13 @@ namespace WTFnetApp
                     : AppendNote(runtime.Notes, "stabilization-timeout");
 
                 ProbeScoreResult score = ProbeScoring.ScoreCandidate(runtime);
+                LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
+                score.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(score, candidateLearned);
+
+                Log("startup-probe | compare | " + candidate +
+                    " | composite=" + score.StartupSelectionScore.ToString("0.0") +
+                    " | stability=" + score.OverallStabilityScore.ToString("0.0") +
+                    " | warning=" + ProbeScoring.GetWarningLabel(score));
 
                 ProbeDiscardDecision discardDecision =
                     ProbeScoring.EvaluateDiscardDecision(score, rawScore, leader);
@@ -207,22 +220,37 @@ namespace WTFnetApp
                         " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
                         " | explain=" + ProbeScoring.BuildRouteExplanation(score));
 
+                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
+                    bool restored = await RestoreLeaderRouteAsync(leader, cancellationToken);
+                    if (!restored)
+                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
                     continue;
                 }
 
                 output.AllResults.Add(score);
-                keptRankedResults.Add(score);
                 score.IsShortlisted = true;
                 output.Shortlist.Add(score);
 
-                // Display shortlist: top performers with raw baseline pinned for fallback comparison visibility.
-                TrimDisplayShortlistKeepingRaw(output.Shortlist, 3, rawScore);
+                // Display shortlist: top performers by startup composite score.
+                TrimShortlistByStartupScore(output.Shortlist, 3);
 
-                leader = keptRankedResults
-                    .OrderBy(x => x.OverallStabilityScore)
-                    .FirstOrDefault() ?? rawScore;
+                bool candidateBeatsLeader = score.StartupSelectionScore < leader.StartupSelectionScore;
+                if (candidateBeatsLeader)
+                {
+                    leader = score;
+                    Log("startup-probe | leader promoted -> " + FormatLeaderLabel(leader) +
+                        " | composite=" + leader.StartupSelectionScore.ToString("0.0"));
+                }
+                else
+                {
+                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
+                    bool restored = await RestoreLeaderRouteAsync(leader, cancellationToken);
+                    if (!restored)
+                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
+                }
 
                 Log("startup-probe | keep | " + candidate +
+                    " | composite=" + score.StartupSelectionScore.ToString("0.0") +
                     " | " + ProbeScoring.BuildShortText(score) +
                     " | overall=" + score.OverallStabilityScore.ToString("0.0") +
                     " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
@@ -230,21 +258,19 @@ namespace WTFnetApp
             }
 
             output.Shortlist = output.Shortlist
-                .OrderBy(x => x.OverallStabilityScore)
+                .OrderBy(x => x.StartupSelectionScore)
                 .ToList();
 
             ProbeScoring.AssignSmoothestBadge(output.Shortlist);
 
-            output.Winner = output.Shortlist
-                .OrderBy(x => x.OverallStabilityScore)
-                .FirstOrDefault() ?? rawScore;
+            output.Winner = leader ?? rawScore;
 
             if (output.Winner != null)
                 output.Winner.IsWinner = true;
 
             ProbeScoreResult runnerUp = output.Shortlist
-                .Where(x => x != null && x != output.Winner)
-                .OrderBy(x => x.OverallStabilityScore)
+                .Where(x => x != null && !ReferenceEquals(x, output.Winner))
+                .OrderBy(x => x.StartupSelectionScore)
                 .FirstOrDefault();
 
             LearnedProbeStateProfile winnerLearned = null;
@@ -258,7 +284,8 @@ namespace WTFnetApp
             output.WinnerConfidence = ProbeScoring.EvaluateWinnerConfidence(
                 output.Winner,
                 runnerUp,
-                winnerLearned);
+                winnerLearned,
+                x => x.StartupSelectionScore);
 
             output.SummaryText = BuildSummary(output);
 
@@ -429,27 +456,77 @@ namespace WTFnetApp
             return notes + " | " + suffix;
         }
 
-        private static void TrimDisplayShortlistKeepingRaw(List<ProbeScoreResult> shortlist, int maxKeep, ProbeScoreResult rawBaseline)
+        private StartupProbeResult BuildUnreliableResult(
+            StartupProbeResult output,
+            ProbeScoreResult leader,
+            ProbeScoreResult rawScore,
+            string reason)
+        {
+            output.Winner = leader ?? rawScore;
+
+            if (output.Winner != null)
+                output.Winner.IsWinner = true;
+
+            output.SummaryText =
+                "startup-probe | unreliable | reason=" + (reason ?? "leader-restore-failed") +
+                " | heldLeader=" + FormatLeaderLabel(leader);
+
+            output.WinnerConfidence = new ProbeWinnerConfidenceResult
+            {
+                Kind = ProbeWinnerConfidenceKind.NoClearWinner,
+                ConfidenceScore = 0.0,
+                Reason = "startup probe marked unreliable"
+            };
+
+            Log(output.SummaryText);
+            return output;
+        }
+
+        private async Task<bool> RestoreLeaderRouteAsync(ProbeScoreResult leader, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (leader?.Candidate == null || leader.Candidate.Kind == ProbeCandidateKind.Raw)
+            {
+                bool disabled = await disableSpeedifyAsync();
+                if (disabled)
+                    Log("startup-probe | leader restored -> " + FormatLeaderLabel(leader));
+                else
+                    Log("startup-probe | leader restore failed -> " + FormatLeaderLabel(leader));
+                return disabled;
+            }
+
+            bool activated = await activateSpeedifyAsync(leader.Candidate.ConnectTarget);
+            if (activated)
+                Log("startup-probe | leader restored -> " + FormatLeaderLabel(leader));
+            else
+                Log("startup-probe | leader restore failed -> " + FormatLeaderLabel(leader));
+            return activated;
+        }
+
+        private static string FormatLeaderLabel(ProbeScoreResult leader)
+        {
+            if (leader?.Candidate == null)
+                return "unknown";
+
+            if (leader.Candidate.Kind == ProbeCandidateKind.Raw)
+                return "raw";
+
+            return string.IsNullOrWhiteSpace(leader.Candidate.DisplayName)
+                ? leader.Candidate.RouteKey ?? "speedify"
+                : leader.Candidate.DisplayName;
+        }
+
+        private static void TrimShortlistByStartupScore(List<ProbeScoreResult> shortlist, int maxKeep)
         {
             if (shortlist == null)
                 return;
 
-            shortlist.Sort((a, b) => a.OverallStabilityScore.CompareTo(b.OverallStabilityScore));
+            shortlist.Sort((a, b) => a.StartupSelectionScore.CompareTo(b.StartupSelectionScore));
 
             while (shortlist.Count > maxKeep)
             {
-                int removeIndex = shortlist.Count - 1;
-
-                if (rawBaseline != null && ReferenceEquals(shortlist[removeIndex], rawBaseline))
-                {
-                    int nonRawFromTail = shortlist.FindLastIndex(
-                        x => x != null && !ReferenceEquals(x, rawBaseline));
-
-                    if (nonRawFromTail >= 0)
-                        removeIndex = nonRawFromTail;
-                }
-
-                shortlist.RemoveAt(removeIndex);
+                shortlist.RemoveAt(shortlist.Count - 1);
             }
         }
 
@@ -460,14 +537,15 @@ namespace WTFnetApp
 
             string winner = result.Winner != null
                 ? result.Winner.Candidate +
+                  " | composite=" + result.Winner.StartupSelectionScore.ToString("0.0") +
                   " | overall=" + result.Winner.OverallStabilityScore.ToString("0.0") +
                   " | badge=" + ProbeScoring.GetBadgeLabel(result.Winner)
                 : "none";
 
             ProbeScoreResult runnerUp = result.Shortlist != null
                 ? result.Shortlist
-                    .Where(x => x != null && x != result.Winner)
-                    .OrderBy(x => x.OverallStabilityScore)
+                    .Where(x => x != null && !ReferenceEquals(x, result.Winner))
+                    .OrderBy(x => x.StartupSelectionScore)
                     .FirstOrDefault()
                 : null;
 
@@ -480,12 +558,17 @@ namespace WTFnetApp
             string winnerReason = ProbeScoring.BuildWinnerReason(
                 result.Winner,
                 runnerUp,
-                result.WinnerConfidence);
+                result.WinnerConfidence,
+                x => x.StartupSelectionScore);
 
             string shortlist = result.Shortlist != null && result.Shortlist.Count > 0
                 ? string.Join(" | ",
-                    result.Shortlist.Select(x =>
+                    result.Shortlist
+                        .OrderBy(x => x.StartupSelectionScore)
+                        .Select(x =>
                         x.Candidate + " => " +
+                        "composite=" + x.StartupSelectionScore.ToString("0.0") +
+                        " | " +
                         "overall=" + x.OverallStabilityScore.ToString("0.0") +
                         " | jitterScore=" + x.JitterStabilityScore.ToString("0.0") +
                         " | warning=" + ProbeScoring.GetWarningLabel(x) +
