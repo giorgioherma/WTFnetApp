@@ -66,11 +66,6 @@ namespace WTFnetApp
             }
         }
 
-        public MetricsSnapshot ParseConnectionStats(string json)
-        {
-            return ParseEvent("report_connection_stats", json);
-        }
-
         private void ParseConnectionStatsIntoStructured(JsonElement root)
         {
             DateTime nowUtc = DateTime.UtcNow;
@@ -96,6 +91,7 @@ namespace WTFnetApp
                     string guid = ReadString(row, "guid");
                     string protocol = ReadString(row, "protocol");
                     string key = BuildLinkKey(row);
+
                     Logger.Log("speedify-conn-row",
                         "guid=" + guid +
                         " | protocol=" + protocol +
@@ -104,7 +100,6 @@ namespace WTFnetApp
                         " | isp=" + ReadString(row, "isp") +
                         " | ltMs=" + ReadDoubleOrDefault(row, "ltMs", -1) +
                         " | jtMs=" + ReadDoubleOrDefault(row, "jtMs", -1));
-
 
                     bool isAggregate = string.Equals(guid, "speedify", StringComparison.OrdinalIgnoreCase);
                     bool isProxy = string.Equals(protocol, "proxy", StringComparison.OrdinalIgnoreCase);
@@ -141,7 +136,7 @@ namespace WTFnetApp
                     link.Type = FirstNonEmpty(link.Type, ReadString(row, "type"));
 
                     link.Connected = ReadBool(row, "cnnct");
-                    link.IsProxy = isProxy;
+                    link.IsProxy = false;
                     link.IsAggregate = false;
                     link.Offline = ReadBoolWithFallback(row, "offline", link.Offline);
                     link.Sleeping = ReadBoolWithFallback(row, "sleeping", link.Sleeping);
@@ -827,7 +822,7 @@ namespace WTFnetApp
                 if (keepAggregateRows && link.IsAggregate)
                     continue;
 
-                if (link.LastSeenGeneration != generation)
+                if (link.LastSeenGeneration < generation - 1)
                     structuredState.Links.RemoveAt(i);
             }
         }
