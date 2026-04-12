@@ -72,6 +72,11 @@ namespace WTFnetApp
             StabilizeMinWait = TimeSpan.FromSeconds(2.5),
             StabilizeMaxWait = TimeSpan.FromSeconds(16.0),
             StabilizeConsecutiveChecks = 3,
+            TransitionGrace = TimeSpan.FromSeconds(1.8),
+            SettleZoneMaxWait = TimeSpan.FromSeconds(9.0),
+            SettleZoneConsecutiveChecks = 3,
+            MeasurementStartGuard = TimeSpan.FromSeconds(0.9),
+            UnstableObserveDuration = TimeSpan.FromSeconds(2.0),
             ObserveDuration = TimeSpan.FromSeconds(10.0)
         };
 
@@ -918,20 +923,17 @@ namespace WTFnetApp
 
             await RunSpeedifyCliAsync("disconnect");
 
-            const int maxWaitMs = 12000;
-            const int pollMs = 350;
-            int waited = 0;
+            bool disconnected = await WaitForSpeedifyConnectivityStateAsync(
+                shouldBeConnected: false,
+                connectTarget: "raw",
+                maxWaitMs: 12000,
+                pollMs: 300,
+                requiredStableChecks: 3);
 
-            while (waited < maxWaitMs)
+            if (disconnected)
             {
-                if (!IsSpeedifyCurrentlyConnected())
-                {
-                    Logger.Log("startup", "Speedify disabled for raw baseline");
-                    return true;
-                }
-
-                await Task.Delay(pollMs);
-                waited += pollMs;
+                Logger.Log("startup", "Speedify disabled for raw baseline");
+                return true;
             }
 
             Logger.Log("startup", "Speedify did not fully disconnect in time");
@@ -953,20 +955,17 @@ namespace WTFnetApp
 
             await RunSpeedifyCliAsync("connect " + connectTarget);
 
-            const int maxWaitMs = 15000;
-            const int pollMs = 400;
-            int waited = 0;
+            bool connected = await WaitForSpeedifyConnectivityStateAsync(
+                shouldBeConnected: true,
+                connectTarget: connectTarget,
+                maxWaitMs: 15000,
+                pollMs: 300,
+                requiredStableChecks: 3);
 
-            while (waited < maxWaitMs)
+            if (connected)
             {
-                if (IsSpeedifyCurrentlyConnected() && HasRecentSpeedifySnapshot())
-                {
-                    Logger.Log("startup", "Speedify target active | " + connectTarget);
-                    return true;
-                }
-
-                await Task.Delay(pollMs);
-                waited += pollMs;
+                Logger.Log("startup", "Speedify target active | " + connectTarget);
+                return true;
             }
 
             Logger.Log("startup", "Speedify target did not become active in time | " + connectTarget);
@@ -988,6 +987,86 @@ namespace WTFnetApp
                 return false;
 
             return snapshot.TunnelConnected;
+        }
+
+        private async Task<bool> WaitForSpeedifyConnectivityStateAsync(
+            bool shouldBeConnected,
+            string connectTarget,
+            int maxWaitMs,
+            int pollMs,
+            int requiredStableChecks)
+        {
+            int stableChecks = 0;
+            int waited = 0;
+
+            while (waited < maxWaitMs)
+            {
+                MetricsSnapshot snapshot;
+                lock (publishSync)
+                {
+                    snapshot = lastSnapshot;
+                }
+
+                bool stateMatch = IsSpeedifyStateConsistent(snapshot, shouldBeConnected, connectTarget);
+                if (stateMatch)
+                {
+                    stableChecks++;
+                    if (stableChecks >= requiredStableChecks)
+                        return true;
+                }
+                else
+                {
+                    stableChecks = 0;
+                }
+
+                await Task.Delay(pollMs);
+                waited += pollMs;
+            }
+
+            return false;
+        }
+
+        private bool IsSpeedifyStateConsistent(MetricsSnapshot snapshot, bool shouldBeConnected, string connectTarget)
+        {
+            _ = connectTarget;
+
+            if (snapshot == null || !HasRecentSpeedifySnapshot())
+                return false;
+
+            if (IsTunnelStateChurning(snapshot))
+                return false;
+
+            if (!shouldBeConnected)
+                return !snapshot.TunnelConnected;
+
+            if (!snapshot.TunnelConnected)
+                return false;
+
+            if (snapshot.ActiveConnectionCount <= 0)
+                return false;
+
+            bool hasIdentity =
+                !string.IsNullOrWhiteSpace(snapshot.ConnectedServerPublicIp) ||
+                !string.IsNullOrWhiteSpace(snapshot.ConnectedServerName);
+
+            if (!hasIdentity)
+                return false;
+
+            return true;
+        }
+
+        private static bool IsTunnelStateChurning(MetricsSnapshot snapshot)
+        {
+            if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.TunnelCurrentState))
+                return false;
+
+            string state = snapshot.TunnelCurrentState.Trim();
+            if (state.Length == 0)
+                return false;
+
+            return state.IndexOf("connect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   state.IndexOf("reconnect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   state.IndexOf("disconnect", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private async Task<ProbeCandidateRuntimeData> CaptureProbeRuntimeAsync(
