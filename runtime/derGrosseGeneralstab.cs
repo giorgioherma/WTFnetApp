@@ -409,6 +409,7 @@ namespace WTFnetApp
             }
             else
             {
+                // KeepCurrent intentionally keeps the held leader route already restored/held by startup probe flow.
                 Logger.Log("startup", "keeping current route state (no winner apply)");
             }
 
