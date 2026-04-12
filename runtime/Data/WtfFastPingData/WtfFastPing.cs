@@ -6,19 +6,19 @@ namespace WTFnetApp
 {
     public sealed class WtfFastPing
     {
-        private const int NormalProbeIntervalMs = 250;
-        private const int NormalPerTargetPeriodMs = 500;
-        private const int NormalBaseProbeTimeoutMs = 500;
-        private const int NormalMaxProbeTimeoutMs = 900;
-        private const int NormalStaleAfterMs = 2400;
-        private const int NormalMissesBeforeDegrade = 5;
+        private const int NormalProbeIntervalMs = 350;
+        private const int NormalPerTargetPeriodMs = 700;
+        private const int NormalBaseProbeTimeoutMs = 700;
+        private const int NormalMaxProbeTimeoutMs = 1800;
+        private const int NormalStaleAfterMs = 3200;
+        private const int NormalMissesBeforeDegrade = 6;
 
-        private const int EvaluationProbeIntervalMs = 650;
-        private const int EvaluationPerTargetPeriodMs = 1300;
-        private const int EvaluationBaseProbeTimeoutMs = 900;
-        private const int EvaluationMaxProbeTimeoutMs = 1500;
-        private const int EvaluationStaleAfterMs = 5000;
-        private const int EvaluationMissesBeforeDegrade = 4;
+        private const int EvaluationProbeIntervalMs = 850;
+        private const int EvaluationPerTargetPeriodMs = 1700;
+        private const int EvaluationBaseProbeTimeoutMs = 1100;
+        private const int EvaluationMaxProbeTimeoutMs = 2600;
+        private const int EvaluationStaleAfterMs = 6500;
+        private const int EvaluationMissesBeforeDegrade = 5;
 
         private const double StableAlpha = 0.35;
         private const double HugeSpikeStableAlpha = 0.10;
@@ -266,11 +266,13 @@ namespace WTFnetApp
                         DateTime now = DateTime.UtcNow;
                         bool primaryDue =
                             !string.IsNullOrWhiteSpace(primary.Host) &&
+                            !IsBackoffActive_NoLock(primary) &&
                             (lastPrimaryProbeUtc == DateTime.MinValue ||
                              (now - lastPrimaryProbeUtc).TotalMilliseconds >= GetPerTargetPeriodMs());
 
                         bool secondaryDue =
                             !string.IsNullOrWhiteSpace(secondary.Host) &&
+                            !IsBackoffActive_NoLock(secondary) &&
                             (lastSecondaryProbeUtc == DateTime.MinValue ||
                              (now - lastSecondaryProbeUtc).TotalMilliseconds >= GetPerTargetPeriodMs());
 
@@ -393,6 +395,8 @@ namespace WTFnetApp
                     }
                     else
                     {
+                        bool isTimeout = reply.Status == IPStatus.TimedOut;
+
                         Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host);
                         RegisterMiss_NoLock(target);
                         RecordEvaluationSample_NoLock(
@@ -400,8 +404,8 @@ namespace WTFnetApp
                             host,
                             -1,
                             false,
-                            true,
-                            false,
+                            isTimeout,
+                            !isTimeout,
                             false);
                     }
 
@@ -491,16 +495,18 @@ namespace WTFnetApp
                         }
                         else
                         {
-                            Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host + " [burst]");
+                            bool isTimeout = reply.Status == IPStatus.TimedOut;
+
+                            Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host);
                             RegisterMiss_NoLock(target);
                             RecordEvaluationSample_NoLock(
                                 target.Name,
                                 host,
                                 -1,
                                 false,
-                                true,
-                                false,
-                                true);
+                                isTimeout,
+                                !isTimeout,
+                                false);
                         }
 
                         RecomputeState_NoLock();
@@ -712,6 +718,13 @@ namespace WTFnetApp
             return evaluationMode ? EvaluationMissesBeforeDegrade : NormalMissesBeforeDegrade;
         }
 
+        private static bool IsBackoffActive_NoLock(ProbeTargetState target)
+        {
+            return target != null &&
+                   target.MissBackoffUntilUtc != DateTime.MinValue &&
+                   DateTime.UtcNow < target.MissBackoffUntilUtc;
+        }
+
         private bool IsEvaluationWarmupActive_NoLock()
         {
             if (!evaluationMode)
@@ -731,10 +744,16 @@ namespace WTFnetApp
                 return GetBaseProbeTimeoutMs();
 
             // More forgiving for LTE / transient radio delay
-            int timeout = (int)Math.Round(basis * 3.4 + 120.0);
+            int timeout = (int)Math.Round(basis * 4.4 + 220.0);
 
             if (state.JitterMs > 0)
-                timeout += (int)Math.Round(Math.Min(180.0, state.JitterMs * 4.0));
+                timeout += (int)Math.Round(Math.Min(350.0, state.JitterMs * 6.0));
+
+            if (state.LossRate > 0.18)
+                timeout += 180;
+
+            if (state.BadQualityRate > 0.20)
+                timeout += 120;
 
             if (timeout < GetBaseProbeTimeoutMs())
                 timeout = GetBaseProbeTimeoutMs();
@@ -752,6 +771,7 @@ namespace WTFnetApp
 
             target.LastSuccessUtc = now;
             target.ConsecutiveMisses = 0;
+            target.MissBackoffUntilUtc = DateTime.MinValue;
             target.LastSampleMs = sample;
 
             PushOutcome_NoLock(target, true);
@@ -788,6 +808,18 @@ namespace WTFnetApp
         {
             target.ConsecutiveMisses++;
             PushOutcome_NoLock(target, false);
+
+            int backoffMs = 0;
+
+            if (target.ConsecutiveMisses >= 5)
+                backoffMs = evaluationMode ? 2200 : 1400;
+            else if (target.ConsecutiveMisses == 4)
+                backoffMs = evaluationMode ? 1600 : 1000;
+            else if (target.ConsecutiveMisses == 3)
+                backoffMs = evaluationMode ? 1100 : 700;
+
+            if (backoffMs > 0)
+                target.MissBackoffUntilUtc = DateTime.UtcNow.AddMilliseconds(backoffMs);
 
             target.LossRate = ComputeLossRate_NoLock(target);
             UpdateBadQualityRate_NoLock(target);
@@ -1016,10 +1048,10 @@ namespace WTFnetApp
                 return 0.0;
 
             double ageMs = (DateTime.UtcNow - target.LastSuccessUtc).TotalMilliseconds;
-            if (ageMs > 350) confidence -= 0.04;
-            if (ageMs > 700) confidence -= 0.07;
-            if (ageMs > 1200) confidence -= 0.10;
-            if (ageMs > GetStaleAfterMs()) confidence -= 0.22;
+            if (ageMs > 700) confidence -= 0.03;
+            if (ageMs > 1300) confidence -= 0.05;
+            if (ageMs > 2200) confidence -= 0.08;
+            if (ageMs > GetStaleAfterMs()) confidence -= 0.18;
 
             confidence -= target.LossRate * 0.28;
             confidence -= target.BadQualityRate * 0.16;
@@ -1476,6 +1508,7 @@ namespace WTFnetApp
             public double Confidence;
 
             public int ConsecutiveMisses;
+            public DateTime MissBackoffUntilUtc = DateTime.MinValue;
 
             public readonly double[] SuccessRtts = new double[12];
             public readonly DateTime[] SuccessTimes = new DateTime[12];
@@ -1503,6 +1536,7 @@ namespace WTFnetApp
                 BadQualityRate = 0;
                 Confidence = 0;
                 ConsecutiveMisses = 0;
+                MissBackoffUntilUtc = DateTime.MinValue;
 
                 Array.Clear(SuccessRtts, 0, SuccessRtts.Length);
                 Array.Clear(SuccessTimes, 0, SuccessTimes.Length);
