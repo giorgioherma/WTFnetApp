@@ -398,6 +398,25 @@ namespace WTFnetApp
             double staleRate = Safe(runtime.StaleRate);
             double badRate = Safe(runtime.AvgBadQualityRate);
             double confidence = Safe(runtime.AvgConfidence);
+            double avgPing = Safe(runtime.AvgPingMs);
+            double p95Ping = Safe(runtime.P95PingMs);
+
+            bool catastrophicStaleTimeoutPattern =
+                (staleRate >= 0.80 && effectiveLoss >= 0.65) ||
+                (staleRate >= 0.65 && badRate >= 0.70) ||
+                (effectiveLoss >= 0.80 && runtime.AvgConfidence >= 0 && confidence < 0.20);
+
+            if (catastrophicStaleTimeoutPattern)
+            {
+                reason = "fail-fast catastrophic stale/timeout";
+                return true;
+            }
+
+            if (avgPing >= 1800.0 || p95Ping >= 2500.0)
+            {
+                reason = "fail-fast catastrophic latency";
+                return true;
+            }
 
             if (spikeDensity >= 12.0)
             {
@@ -497,6 +516,20 @@ namespace WTFnetApp
             double spikeDensity = shortWindow.SpikeDensityPerMinute;
             double jitterRange = ComputeJitterRange(shortWindow);
             double effectiveLoss = EffectiveLossRate(shortWindow.AvgLossRate);
+            double staleRate = Safe(shortWindow.StaleRate);
+
+            bool transitionChurn =
+                fastPingState.Confidence < 0.62 &&
+                (spikeDensity >= 8.5 || staleRate >= 0.25 || effectiveLoss >= 0.22);
+
+            if (transitionChurn)
+            {
+                return new ProbeReadinessResult
+                {
+                    Kind = ProbeReadinessKind.NotReady,
+                    Reason = "transition churn"
+                };
+            }
 
             if (learned != null && learned.HasUsefulLearning)
             {
