@@ -116,6 +116,15 @@ namespace WTFnetApp
                         continue;
                     }
 
+                    if (isProxy)
+                    {
+                        SpeedifyLinkState canonicalLink = FindCanonicalLinkByGuid(guid);
+                        if (canonicalLink != null)
+                            MarkLinkSeen(canonicalLink, generation);
+
+                        continue;
+                    }
+
                     SpeedifyLinkState link = GetOrCreateLink(key);
                     MarkLinkSeen(link, generation);
 
@@ -624,6 +633,31 @@ namespace WTFnetApp
             link.Key = key;
             structuredState.Links.Add(link);
             return link;
+        }
+
+        private SpeedifyLinkState FindCanonicalLinkByGuid(string guid)
+        {
+            if (string.IsNullOrWhiteSpace(guid))
+                return null;
+
+            SpeedifyLinkState proxyMatch = null;
+
+            foreach (SpeedifyLinkState existing in structuredState.Links)
+            {
+                if (existing == null)
+                    continue;
+
+                if (!string.Equals(existing.Guid, guid, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (!existing.IsProxy && !existing.IsAggregate)
+                    return existing;
+
+                if (proxyMatch == null)
+                    proxyMatch = existing;
+            }
+
+            return proxyMatch;
         }
 
         private SpeedifySessionWindowStats ParseWindow(string windowKey, JsonElement root)
