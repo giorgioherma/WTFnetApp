@@ -107,6 +107,13 @@ namespace WTFnetApp
 
         public ProbeReadinessKind ReadinessKind { get; set; } = ProbeReadinessKind.NotReady;
         public string ReadinessReason { get; set; }
+
+        public bool ReachedUsableState { get; set; }
+        public bool MeasurementStarted { get; set; }
+        public bool MeasurementCompleted { get; set; }
+        public bool MeasurementStoppedEarly { get; set; }
+        public string MeasurementStopReason { get; set; }
+        public string DiscardReason { get; set; }
     }
 
     public sealed class ProbeScoreResult
@@ -195,11 +202,27 @@ namespace WTFnetApp
                 Runtime = runtime
             };
 
-            if (runtime == null || runtime.Candidate == null || !runtime.IsValid)
+            if (runtime == null || runtime.Candidate == null)
             {
                 result.WarningLevel = ProbeWarningLevel.Risky;
-                result.WarningText = "invalid";
-                result.SummaryText = "invalid probe";
+                result.WarningText = "unusable";
+                result.SummaryText = "unusable probe";
+                return result;
+            }
+
+            if (!runtime.ReachedUsableState || !runtime.MeasurementStarted)
+            {
+                result.WarningLevel = ProbeWarningLevel.Risky;
+                result.WarningText = "unusable";
+                result.SummaryText = runtime.DiscardReason ?? "unusable-before-measurement";
+                return result;
+            }
+
+            if (HasFundamentallyBrokenSamples(runtime))
+            {
+                result.WarningLevel = ProbeWarningLevel.Risky;
+                result.WarningText = "unusable";
+                result.SummaryText = "unusable-measurement-samples";
                 return result;
             }
 
@@ -233,6 +256,11 @@ namespace WTFnetApp
                 ConfidencePenalty(runtime.AvgConfidence) +
                 SpeedifyPenalty(runtime);
 
+            if (runtime.MeasurementStoppedEarly)
+            {
+                result.OverallStabilityScore += ComputeEarlyStopPenalty(runtime.MeasurementStopReason);
+            }
+
             result.StartupSelectionScore = result.OverallStabilityScore;
 
             result.WarningLevel = ClassifyWarning(runtime);
@@ -263,17 +291,6 @@ namespace WTFnetApp
             double badQualityPenalty = Safe(runtime.AvgBadQualityRate) * 100.0 * 0.12;
             double confidencePenalty = Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 14.0;
 
-            double readinessAdjustment =
-                runtime.ReadinessKind == ProbeReadinessKind.GoodStable ? -2.5 :
-                runtime.ReadinessKind == ProbeReadinessKind.BadStable ? 3.0 :
-                runtime.ReadinessKind == ProbeReadinessKind.TimeoutFallback ? 1.5 :
-                4.0;
-
-            double stabilizationAdjustment =
-                runtime.StabilizationReached && !runtime.StabilizationTimedOut ? -2.0 :
-                runtime.StabilizationTimedOut ? 3.0 :
-                1.0;
-
             double warningAdjustment =
                 candidate.WarningLevel == ProbeWarningLevel.Risky ? 18.0 :
                 candidate.WarningLevel == ProbeWarningLevel.Borderline ? 6.0 :
@@ -286,8 +303,6 @@ namespace WTFnetApp
                    lossPenalty +
                    badQualityPenalty +
                    confidencePenalty +
-                   readinessAdjustment +
-                   stabilizationAdjustment +
                    warningAdjustment +
                    learningAdjustment;
         }
@@ -348,16 +363,6 @@ namespace WTFnetApp
                 return decision;
             }
 
-            if (candidate.WarningLevel == ProbeWarningLevel.Risky)
-            {
-                decision.ShouldDiscard = true;
-                decision.ReasonCategory =
-                    candidate.Runtime != null && !candidate.Runtime.IsValid
-                        ? "unusable probe"
-                        : "risky threshold";
-                return decision;
-            }
-
             if (baseline != null &&
                 baseline.WarningLevel != ProbeWarningLevel.Risky &&
                 candidate.StartupSelectionScore > baseline.StartupSelectionScore + 28.0)
@@ -384,15 +389,37 @@ namespace WTFnetApp
         {
             reason = null;
 
-            if (candidate == null || candidate.Runtime == null || !candidate.Runtime.IsValid)
+            if (candidate == null || candidate.Runtime == null)
             {
                 reason = "unusable probe";
                 return true;
             }
 
-            ProbeCandidateRuntimeData runtime = candidate.Runtime;
-            double avgJitter = Safe(runtime.AvgJitterMs);
-            double jitterRange = Safe(ComputeJitterRange(runtime));
+            if (!candidate.Runtime.ReachedUsableState || !candidate.Runtime.MeasurementStarted)
+            {
+                reason = "unusable-before-measurement";
+                return true;
+            }
+
+            if (HasFundamentallyBrokenSamples(candidate.Runtime))
+            {
+                reason = "unusable measurement samples";
+                return true;
+            }
+
+            return TryGetMeasuredCatastrophicStopReason(candidate.Runtime, out reason);
+        }
+
+        public static bool TryGetMeasuredCatastrophicStopReason(ProbeCandidateRuntimeData runtime, out string reason)
+        {
+            reason = null;
+
+            if (runtime == null)
+            {
+                reason = "unusable probe";
+                return true;
+            }
+
             double spikeDensity = Safe(runtime.SpikeDensityPerMinute);
             double effectiveLoss = EffectiveLossRate(runtime.AvgLossRate);
             double staleRate = Safe(runtime.StaleRate);
@@ -408,218 +435,35 @@ namespace WTFnetApp
 
             if (catastrophicStaleTimeoutPattern)
             {
-                reason = "fail-fast catastrophic stale/timeout";
+                reason = "early-stop catastrophic stale/timeout";
                 return true;
             }
 
             if (avgPing >= 1800.0 || p95Ping >= 2500.0)
             {
-                reason = "fail-fast catastrophic latency";
+                reason = "early-stop catastrophic latency";
                 return true;
             }
 
-            if (spikeDensity >= 12.0)
+            if (effectiveLoss >= 0.55 && staleRate >= 0.45)
             {
-                reason = "fail-fast severe spikes";
+                reason = "early-stop catastrophic loss";
                 return true;
             }
 
-            if (avgJitter >= 28.0 || jitterRange >= 30.0)
-            {
-                reason = "fail-fast severe jitter";
-                return true;
-            }
-
-            if (effectiveLoss >= 0.20)
-            {
-                reason = "fail-fast severe loss";
-                return true;
-            }
-
-            if (staleRate >= 0.30)
-            {
-                reason = "fail-fast severe stale";
-                return true;
-            }
-
-            if (badRate >= 0.35)
-            {
-                reason = "fail-fast severe quality";
-                return true;
-            }
-
-            if (runtime.AvgConfidence >= 0 && confidence < 0.30)
-            {
-                reason = "fail-fast low confidence";
-                return true;
-            }
-
-            bool unhealthyTunnel =
+            bool tunnelCollapsed =
                 runtime.Candidate != null &&
                 runtime.Candidate.Kind == ProbeCandidateKind.Speedify &&
                 (!runtime.TunnelConnected || runtime.ActiveConnectionCount <= 0) &&
-                (runtime.AggregateCongested || spikeDensity >= 8.0);
+                (runtime.AggregateCongested || spikeDensity >= 10.0 || effectiveLoss >= 0.35);
 
-            if (unhealthyTunnel)
+            if (tunnelCollapsed)
             {
-                reason = "fail-fast tunnel health";
+                reason = "early-stop tunnel collapse";
                 return true;
             }
 
             return false;
-        }
-
-        public static ProbeReadinessResult EvaluateReadiness(
-            FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow,
-            FastPingState fastPingState,
-            LearnedProbeStateProfile learned,
-            bool timeoutReached)
-        {
-            if (timeoutReached)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.TimeoutFallback,
-                    Reason = "max wait reached"
-                };
-            }
-
-            if (fastPingState == null || shortWindow == null || !shortWindow.IsValid)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.NotReady,
-                    Reason = "not enough samples"
-                };
-            }
-
-            if (fastPingState.IsStale)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.NotReady,
-                    Reason = "stale"
-                };
-            }
-
-            if (fastPingState.Confidence < 0.55)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.NotReady,
-                    Reason = "low confidence"
-                };
-            }
-
-            double avgJitter = shortWindow.AvgJitterMs;
-            double p95Ping = shortWindow.P95PingMs;
-            double spikeDensity = shortWindow.SpikeDensityPerMinute;
-            double jitterRange = ComputeJitterRange(shortWindow);
-            double effectiveLoss = EffectiveLossRate(shortWindow.AvgLossRate);
-            double staleRate = Safe(shortWindow.StaleRate);
-
-            bool transitionChurn =
-                fastPingState.Confidence < 0.62 &&
-                (spikeDensity >= 8.5 || staleRate >= 0.25 || effectiveLoss >= 0.22);
-
-            if (transitionChurn)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.NotReady,
-                    Reason = "transition churn"
-                };
-            }
-
-            if (learned != null && learned.HasUsefulLearning)
-            {
-                bool trustedLearning = learned.IsTrustedLearning;
-                ServerProbeLearningStore.LearningAgeInfo age =
-                    ServerProbeLearningStore.GetLearningAgeInfo(learned.LastUpdatedUtc);
-
-                int goodMatches = 0;
-                if (learned.AvgJitterMs.IsInGoodBand(avgJitter)) goodMatches++;
-                if (learned.JitterRangeMs.IsInGoodBand(jitterRange)) goodMatches++;
-                if (learned.P95PingMs.IsInGoodBand(p95Ping)) goodMatches++;
-                if (learned.SpikeDensityPerMinute.IsInGoodBand(spikeDensity)) goodMatches++;
-
-                int badMatches = 0;
-                if (learned.AvgJitterMs.IsInBadBand(avgJitter)) badMatches++;
-                if (learned.JitterRangeMs.IsInBadBand(jitterRange)) badMatches++;
-                if (learned.P95PingMs.IsInBadBand(p95Ping)) badMatches++;
-                if (learned.SpikeDensityPerMinute.IsInBadBand(spikeDensity)) badMatches++;
-
-                int requiredGoodMatches =
-                    trustedLearning && age.InfluenceFactor < 0.55 ? 4 :
-                    3;
-
-                int requiredBadMatches =
-                    trustedLearning && age.InfluenceFactor < 0.75 ? 2 :
-                    1;
-
-                bool goodStable = goodMatches >= requiredGoodMatches;
-                bool badStable = badMatches >= requiredBadMatches;
-
-                if (goodStable)
-                {
-                    return new ProbeReadinessResult
-                    {
-                        Kind = ProbeReadinessKind.GoodStable,
-                        Reason = trustedLearning
-                            ? "learned good range | " + age.AgeLabel
-                            : "seeded good range"
-                    };
-                }
-
-                if (badStable)
-                {
-                    return new ProbeReadinessResult
-                    {
-                        Kind = ProbeReadinessKind.BadStable,
-                        Reason = trustedLearning
-                            ? "learned bad range | " + age.AgeLabel
-                            : "seeded bad range"
-                    };
-                }
-            }
-
-            bool fixedGood =
-                fastPingState.Confidence >= 0.65 &&
-                !fastPingState.SpikeDetected &&
-                fastPingState.JitterMs >= 0 &&
-                fastPingState.JitterMs <= 12 &&
-                shortWindow.SpikeDensityPerMinute <= 4.0 &&
-                effectiveLoss <= 0.08;
-
-            if (fixedGood)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.GoodStable,
-                    Reason = "fixed good threshold"
-                };
-            }
-
-            bool fixedBadStable =
-                shortWindow.AvgJitterMs >= 16.0 ||
-                shortWindow.P95PingMs >= 110.0 ||
-                shortWindow.SpikeDensityPerMinute >= 7.0 ||
-                effectiveLoss >= 0.18;
-
-            if (fixedBadStable)
-            {
-                return new ProbeReadinessResult
-                {
-                    Kind = ProbeReadinessKind.BadStable,
-                    Reason = "fixed bad threshold"
-                };
-            }
-
-            return new ProbeReadinessResult
-            {
-                Kind = ProbeReadinessKind.NotReady,
-                Reason = "still settling"
-            };
         }
 
         public static string BuildShortText(ProbeScoreResult result)
@@ -913,20 +757,6 @@ namespace WTFnetApp
             return -1;
         }
 
-        private static double ComputeJitterRange(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
-        {
-            if (snapshot == null)
-                return -1;
-
-            if (snapshot.MinJitterMs >= 0 && snapshot.MaxJitterMs >= 0)
-                return Math.Max(0, snapshot.MaxJitterMs - snapshot.MinJitterMs);
-
-            if (snapshot.AvgJitterMs >= 0 && snapshot.P95JitterMs >= 0)
-                return Math.Max(0, snapshot.P95JitterMs - snapshot.AvgJitterMs);
-
-            return -1;
-        }
-
         private static double EffectiveLossRate(double lossRate)
         {
             double safeLoss = Safe(lossRate);
@@ -954,6 +784,9 @@ namespace WTFnetApp
 
         private static string BuildSummary(ProbeCandidateRuntimeData runtime, ProbeScoreResult result)
         {
+            if (runtime.MeasurementStoppedEarly)
+                return "Measured early-stop | reason=" + (runtime.MeasurementStopReason ?? "catastrophic");
+
             string warning =
                 result.WarningLevel == ProbeWarningLevel.Risky ? "Risky" :
                 result.WarningLevel == ProbeWarningLevel.Borderline ? "Borderline" :
@@ -999,6 +832,45 @@ namespace WTFnetApp
         private static double Safe(double value)
         {
             return value < 0 || double.IsNaN(value) || double.IsInfinity(value) ? 0.0 : value;
+        }
+
+        private static bool HasFundamentallyBrokenSamples(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null)
+                return true;
+
+            bool hasAnyCoreMetric =
+                runtime.AvgPingMs >= 0 ||
+                runtime.P95PingMs >= 0 ||
+                runtime.AvgJitterMs >= 0 ||
+                runtime.SpikeDensityPerMinute >= 0 ||
+                runtime.AvgLossRate >= 0 ||
+                runtime.StaleRate >= 0;
+
+            if (!hasAnyCoreMetric)
+                return true;
+
+            if (runtime.AvgConfidence >= 0 && runtime.AvgConfidence < 0.05 && runtime.StaleRate >= 0.95)
+                return true;
+
+            return false;
+        }
+
+        private static double ComputeEarlyStopPenalty(string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason))
+                return 35.0;
+
+            if (reason.IndexOf("catastrophic latency", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 60.0;
+
+            if (reason.IndexOf("catastrophic stale", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 55.0;
+
+            if (reason.IndexOf("tunnel collapse", StringComparison.OrdinalIgnoreCase) >= 0)
+                return 50.0;
+
+            return 40.0;
         }
 
         private static string F(double value)

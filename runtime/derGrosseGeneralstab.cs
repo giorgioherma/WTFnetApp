@@ -66,17 +66,11 @@ namespace WTFnetApp
 
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
-            ReadinessMinWait = TimeSpan.FromSeconds(4.0),
-            ReadinessMaxWait = TimeSpan.FromSeconds(10.0),
-            ReadinessConsecutiveChecks = 3,
-            StabilizeMinWait = TimeSpan.FromSeconds(2.5),
-            StabilizeMaxWait = TimeSpan.FromSeconds(16.0),
-            StabilizeConsecutiveChecks = 3,
-            TransitionGrace = TimeSpan.FromSeconds(1.8),
-            SettleZoneMaxWait = TimeSpan.FromSeconds(9.0),
-            SettleZoneConsecutiveChecks = 3,
+            TransitionGrace = TimeSpan.FromSeconds(2.0),
+            HardIgnoreDuration = TimeSpan.FromSeconds(2.5),
+            ProvisionalDuration = TimeSpan.FromSeconds(2.5),
+            MainMeasureDuration = TimeSpan.FromSeconds(10.0),
             MeasurementStartGuard = TimeSpan.FromSeconds(0.9),
-            UnstableObserveDuration = TimeSpan.FromSeconds(2.0),
             ObserveDuration = TimeSpan.FromSeconds(10.0)
         };
 
@@ -406,6 +400,7 @@ namespace WTFnetApp
 
             if (applyDecision.Kind == StartupApplyDecisionKind.ApplyWinner)
             {
+                // Coordinator already restored final winner once at end of probe flow.
                 await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
             }
             else if (applyDecision.Kind == StartupApplyDecisionKind.KeepRaw)
@@ -614,13 +609,11 @@ namespace WTFnetApp
 
             if (winner.Candidate.Kind == ProbeCandidateKind.Raw)
             {
-                Logger.Log("startup", "winner is raw baseline -> keeping speedify disabled");
-                await DisableSpeedifyAsync();
+                Logger.Log("startup", "winner is raw baseline -> already finalized by coordinator");
                 return;
             }
 
-            Logger.Log("startup", "applying winner target | " + winner.Candidate);
-            await ActivateSpeedifyTargetAsync(winner.Candidate.ConnectTarget);
+            Logger.Log("startup", "winner target already active from coordinator restore | " + winner.Candidate);
         }
 
         private StartupApplyDecision BuildStartupApplyDecision(StartupProbeResult result)
@@ -638,26 +631,12 @@ namespace WTFnetApp
                 ? result.WinnerConfidence.Kind
                 : ProbeWinnerConfidenceKind.NoClearWinner;
 
-            bool winnerCleanStabilization =
-                result.Winner.Runtime != null &&
-                result.Winner.Runtime.StabilizationReached &&
-                !result.Winner.Runtime.StabilizationTimedOut;
-
-            bool winnerFallbackStabilization =
-                result.Winner.Runtime != null &&
-                result.Winner.Runtime.StabilizationTimedOut;
-
-            bool rawFallbackStabilization =
-                result.Baseline != null &&
-                result.Baseline.Runtime != null &&
-                result.Baseline.Runtime.StabilizationTimedOut;
-
-            if (confidenceKind == ProbeWinnerConfidenceKind.HighConfidence && winnerCleanStabilization)
+            if (confidenceKind == ProbeWinnerConfidenceKind.HighConfidence)
             {
                 return new StartupApplyDecision
                 {
                     Kind = StartupApplyDecisionKind.ApplyWinner,
-                    Reason = "high confidence + clean stabilization"
+                    Reason = "high confidence winner"
                 };
             }
 
@@ -681,24 +660,6 @@ namespace WTFnetApp
                 {
                     Kind = result.Baseline != null ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
                     Reason = "no clear winner"
-                };
-            }
-
-            if (!winnerCleanStabilization)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "winner stabilization not clean"
-                };
-            }
-
-            if (winnerFallbackStabilization || rawFallbackStabilization)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "fallback stabilization detected"
                 };
             }
 
@@ -761,8 +722,8 @@ namespace WTFnetApp
                 ? result.WinnerConfidence.ConfidenceScore.ToString("0.0")
                 : "--";
             string warning = winner != null ? winner.WarningLevel.ToString() : "None";
-            string stabilized = runtime != null && runtime.StabilizationReached ? "yes" : "no";
-            string fallback = runtime != null && runtime.StabilizationTimedOut ? "yes" : "no";
+            string measured = runtime != null && runtime.MeasurementStarted ? "yes" : "no";
+            string earlyStop = runtime != null && runtime.MeasurementStoppedEarly ? "yes" : "no";
 
             string baselineGap = "--";
             if (winner != null && result.Baseline != null)
@@ -779,8 +740,8 @@ namespace WTFnetApp
                    " | confidence=" + confidenceKind +
                    "@" + confidenceScore +
                    " | warning=" + warning +
-                   " | stabilized=" + stabilized +
-                   " | fallback=" + fallback +
+                   " | measured=" + measured +
+                   " | earlyStop=" + earlyStop +
                    " | baselineGap=" + baselineGap +
                    " | runnerUpGap=" + runnerUpGap;
         }
