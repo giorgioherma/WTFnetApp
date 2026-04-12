@@ -428,6 +428,12 @@ namespace WTFnetApp
                     return result;
                 }
 
+                if (model.Version != 0 && model.Version != PersistenceVersion)
+                {
+                    result.Status = LearningStoreLoadStatus.Invalid;
+                    return result;
+                }
+
                 int applied = 0;
 
                 foreach (LearningProfilePersistenceModel persisted in model.Profiles)
@@ -522,13 +528,8 @@ namespace WTFnetApp
 
             LearnedProbeStateProfile profile = GetOrCreateOwnedProfile(routeKey, timeBucketKey);
 
-            bool isGood =
-                result.WarningLevel == ProbeWarningLevel.None &&
-                !result.IsDiscardedEarly;
-
-            bool isBad =
-                result.WarningLevel == ProbeWarningLevel.Risky ||
-                result.IsDiscardedEarly;
+            bool isGood = IsStrongGoodResult(result);
+            bool isBad = IsStrongBadResult(result);
 
             if (!isGood && !isBad)
             {
@@ -562,7 +563,42 @@ namespace WTFnetApp
             profile.LastUpdatedUtc = DateTime.UtcNow;
         }
 
-        public void UpdateFromRawReadinessSnapshot(
+        private static bool IsStrongGoodResult(ProbeScoreResult result)
+        {
+            if (result == null || result.Runtime == null)
+                return false;
+
+            if (result.IsDiscardedEarly)
+                return false;
+
+            if (result.WarningLevel != ProbeWarningLevel.None)
+                return false;
+
+            if (!result.Runtime.StabilizationReached || result.Runtime.StabilizationTimedOut)
+                return false;
+
+            double confidence = result.Runtime.AvgConfidence;
+            if (confidence >= 0 && confidence < 0.70)
+                return false;
+
+            return true;
+        }
+
+        private static bool IsStrongBadResult(ProbeScoreResult result)
+        {
+            if (result == null || result.Runtime == null)
+                return false;
+
+            if (result.IsDiscardedEarly || result.WarningLevel == ProbeWarningLevel.Risky)
+                return true;
+
+            if (result.Runtime.StabilizationTimedOut && result.WarningLevel != ProbeWarningLevel.None)
+                return true;
+
+            return false;
+        }
+
+        public void UpdateFromReadinessSnapshot(
             string routeKey,
             string timeBucketKey,
             FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot,
