@@ -16,7 +16,6 @@ namespace WTFnetApp
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
-        private DateTime transitionGraceUntilUtc = DateTime.MinValue;
 
         public StartupProbeCoordinator(
             Func<Task<bool>> disableSpeedifyAsync,
@@ -78,21 +77,11 @@ namespace WTFnetApp
 
             await BeginTransitionGraceAsync("raw-disable", cancellationToken);
 
-            bool rawSettled =
-                await WaitForPlausibleSettleZoneAsync(
-                    rawCandidate,
-                    cancellationToken);
-
-            if (!rawSettled)
-                Log("startup-probe | raw settle zone timeout | proceeding cautiously");
-
-            ProbeReadinessResult readiness =
-                await WaitForReadinessAsync(
-                    routeKey: rawCandidate.RouteKey,
-                    timeBucketKey: timeBucket,
-                    minWait: timing.ReadinessMinWait,
-                    maxWait: timing.ReadinessMaxWait,
-                    cancellationToken: cancellationToken);
+            ProbeReadinessResult readiness = new ProbeReadinessResult
+            {
+                Kind = ProbeReadinessKind.TimeoutFallback,
+                Reason = "fixed-settle measurement"
+            };
 
             output.RawReadiness = readiness;
             learningStore.UpdateFromReadinessSnapshot(
@@ -103,30 +92,30 @@ namespace WTFnetApp
 
             Log("startup-probe | raw readiness | " + readiness.Kind + " | " + readiness.Reason);
 
-            bool rawStabilized =
-                await WaitForRouteStabilizationAsync(
-                    routeLabel: "raw",
-                    cancellationToken: cancellationToken);
+            bool rawUsable = IsCandidateUsableForMeasurement(rawCandidate, out string rawUsableReason);
+            if (!rawUsable)
+            {
+                Log("startup-probe | raw unusable before measurement | reason=" + rawUsableReason);
+                return BuildUnreliableResult(output, null, null, "raw-unusable-before-measurement");
+            }
 
-            if (rawStabilized)
-                Log("raw measure | started after stabilization");
-            else
-                Log("raw measure | started with fallback (stabilization timeout)");
+            Log("startup-probe | raw usable -> measurement start");
 
-            ProbeCandidateRuntimeData rawRuntime =
-                await captureProbeAsync(
-                    rawCandidate,
-                    timing.MeasurementStartGuard,
-                    timing.ObserveDuration);
+            ProbeCandidateRuntimeData rawRuntime = await RunSegmentedMeasurementAsync(
+                rawCandidate,
+                cancellationToken);
+
+            if (rawRuntime == null)
+                return BuildUnreliableResult(output, null, null, "raw-measurement-failed");
 
             rawRuntime.TimeBucketKey = timeBucket;
-            rawRuntime.StabilizationReached = rawStabilized;
-            rawRuntime.StabilizationTimedOut = !rawStabilized;
+            rawRuntime.StabilizationReached = true;
+            rawRuntime.StabilizationTimedOut = false;
+            rawRuntime.ReachedUsableState = true;
+            rawRuntime.MeasurementStarted = true;
+            rawRuntime.MeasurementCompleted = true;
             rawRuntime.ReadinessKind = readiness.Kind;
             rawRuntime.ReadinessReason = readiness.Reason;
-            rawRuntime.Notes = rawStabilized
-                ? rawRuntime.Notes
-                : AppendNote(rawRuntime.Notes, "raw-stabilization-timeout");
 
             ProbeScoreResult rawScore = ProbeScoring.ScoreCandidate(rawRuntime);
             LearnedProbeStateProfile rawLearned = learningStore.GetProfile(rawCandidate.RouteKey, timeBucket);
@@ -160,42 +149,20 @@ namespace WTFnetApp
                 }
 
                 await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
-
-                bool candidateSettled =
-                    await WaitForPlausibleSettleZoneAsync(
-                        candidate,
-                        cancellationToken);
-
-                if (!candidateSettled)
+                bool candidateUsable = IsCandidateUsableForMeasurement(candidate, out string candidateUsableReason);
+                if (!candidateUsable)
                 {
-                    Log("startup-probe | discard | " + candidate + " | discardReason=settle-zone-timeout");
+                    Log("startup-probe | discard | " + candidate + " | discardReason=unusable-before-measurement | reason=" + candidateUsableReason);
                     continue;
                 }
 
-                await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
+                Log("startup-probe | candidate usable -> measurement start | " + candidate);
 
-                bool candidateSettled =
-                    await WaitForPlausibleSettleZoneAsync(
-                        candidate,
-                        cancellationToken);
-
-                if (!candidateSettled)
+                ProbeReadinessResult candidateReadiness = new ProbeReadinessResult
                 {
-                    Log("startup-probe | discard | " + candidate + " | discardReason=settle-zone-timeout");
-                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
-                    bool restoredBySettleTimeout = await RestoreLeaderRouteAsync(leader, cancellationToken);
-                    if (!restoredBySettleTimeout)
-                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
-                    continue;
-                }
-
-                ProbeReadinessResult candidateReadiness =
-                    await WaitForReadinessAsync(
-                        routeKey: candidate.RouteKey,
-                        timeBucketKey: timeBucket,
-                        minWait: timing.ReadinessMinWait,
-                        maxWait: timing.ReadinessMaxWait,
-                        cancellationToken: cancellationToken);
+                    Kind = ProbeReadinessKind.TimeoutFallback,
+                    Reason = "fixed-settle measurement"
+                };
 
                 learningStore.UpdateFromReadinessSnapshot(
                     candidate.RouteKey,
@@ -206,50 +173,30 @@ namespace WTFnetApp
                 Log("startup-probe | candidate readiness | " + candidate +
                     " | " + candidateReadiness.Kind + " | " + candidateReadiness.Reason);
 
-                bool stabilized =
-                    await WaitForRouteStabilizationAsync(
-                        routeLabel: candidate.ToString(),
-                        cancellationToken);
-
-                if (stabilized)
-                    Log("candidate measure | " + candidate + " | started after stabilization");
-                else
-                {
-                    Log("candidate measure | " + candidate + " | skipped (stabilization timeout)");
-                }
-
-                TimeSpan observeDuration = stabilized
-                    ? timing.ObserveDuration
-                    : timing.UnstableObserveDuration;
-
-                ProbeCandidateRuntimeData runtime = await captureProbeAsync(
+                ProbeCandidateRuntimeData runtime = await RunSegmentedMeasurementAsync(
                     candidate,
-                    timing.MeasurementStartGuard,
-                    observeDuration);
+                    cancellationToken);
+
+                if (runtime == null)
+                {
+                    Log("startup-probe | discard | " + candidate + " | discardReason=measurement-capture-failed");
+                    continue;
+                }
 
                 runtime.TimeBucketKey = timeBucket;
-                runtime.StabilizationReached = stabilized;
-                runtime.StabilizationTimedOut = !stabilized;
+                runtime.StabilizationReached = true;
+                runtime.StabilizationTimedOut = false;
                 runtime.ReadinessKind = candidateReadiness.Kind;
                 runtime.ReadinessReason = candidateReadiness.Reason;
-                runtime.Notes = stabilized
-                    ? runtime.Notes
-                    : AppendNote(runtime.Notes, "stabilization-timeout");
-
-                if (!stabilized)
-                {
-                    runtime.Notes = AppendNote(runtime.Notes, "unstable-for-run");
-                    runtime.IsValid = false;
-                }
 
                 ProbeScoreResult score = ProbeScoring.ScoreCandidate(runtime);
                 LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
                 score.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(score, candidateLearned);
 
-                if (!runtime.IsValid)
+                if (!runtime.MeasurementStarted)
                 {
                     Log("startup-probe | compare | " + candidate +
-                        " | invalid/disregarded | warning=" + ProbeScoring.GetWarningLabel(score));
+                        " | unusable-before-measurement | discardReason=" + (runtime.DiscardReason ?? "unknown"));
                 }
                 else
                 {
@@ -269,21 +216,13 @@ namespace WTFnetApp
                     score.IsDiscardedEarly = true;
                     output.AllResults.Add(score);
 
-                    if (!runtime.IsValid)
-                    {
-                        Log("startup-probe | discard | " + candidate +
-                            " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
-                            " | invalid/disregarded");
-                    }
-                    else
-                    {
-                        Log("startup-probe | discard | " + candidate +
-                            " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
-                            " | " + ProbeScoring.BuildShortText(score) +
-                            " | overall=" + score.OverallStabilityScore.ToString("0.0") +
-                            " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
-                            " | explain=" + ProbeScoring.BuildRouteExplanation(score));
-                    }
+                    Log("startup-probe | discarded-after-measurement | " + candidate +
+                        " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
+                        " | measured=" + (runtime.MeasurementStarted ? "yes" : "no") +
+                        " | " + ProbeScoring.BuildShortText(score) +
+                        " | overall=" + score.OverallStabilityScore.ToString("0.0") +
+                        " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                        " | explain=" + ProbeScoring.BuildRouteExplanation(score));
                     continue;
                 }
 
@@ -355,178 +294,6 @@ namespace WTFnetApp
             return output;
         }
 
-        public async Task<ProbeReadinessResult> WaitForReadinessAsync(
-            string routeKey,
-            string timeBucketKey,
-            TimeSpan minWait,
-            TimeSpan maxWait,
-            CancellationToken cancellationToken = default)
-        {
-            DateTime startedUtc = DateTime.UtcNow;
-            DateTime earliestCheckUtc = startedUtc + minWait;
-            DateTime hardStopUtc = startedUtc + maxWait;
-
-            int consecutiveStableMatches = 0;
-
-            while (true)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                DateTime nowUtc = DateTime.UtcNow;
-
-                if (IsWithinTransitionGrace(nowUtc))
-                {
-                    await Task.Delay(200, cancellationToken);
-                    continue;
-                }
-
-                if (nowUtc < earliestCheckUtc)
-                {
-                    await Task.Delay(250, cancellationToken);
-                    continue;
-                }
-
-                bool timeoutReached = nowUtc >= hardStopUtc;
-
-                FastPingState fastPingState = getFastPingState();
-                FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow = getShortWindowSnapshot();
-
-                LearnedProbeStateProfile learned =
-                    learningStore.GetProfileForReadiness(routeKey, timeBucketKey);
-
-                ProbeReadinessResult readiness =
-                    ProbeScoring.EvaluateReadiness(
-                        shortWindow,
-                        fastPingState,
-                        learned,
-                        timeoutReached);
-
-                if (readiness.Kind == ProbeReadinessKind.GoodStable ||
-                    readiness.Kind == ProbeReadinessKind.BadStable)
-                {
-                    consecutiveStableMatches++;
-                }
-                else if (readiness.Kind == ProbeReadinessKind.TimeoutFallback)
-                {
-                    return readiness;
-                }
-                else
-                {
-                    consecutiveStableMatches = 0;
-                }
-
-                if (consecutiveStableMatches >= timing.ReadinessConsecutiveChecks)
-                    return readiness;
-
-                await Task.Delay(350, cancellationToken);
-            }
-        }
-
-        private async Task<bool> WaitForRouteStabilizationAsync(
-            string routeLabel,
-            CancellationToken cancellationToken)
-        {
-            DateTime startedUtc = DateTime.UtcNow;
-            DateTime earliestCheckUtc = startedUtc + timing.StabilizeMinWait;
-            DateTime hardStopUtc = startedUtc + timing.StabilizeMaxWait;
-
-            int stableChecks = 0;
-
-            string normalizedLabel = string.IsNullOrWhiteSpace(routeLabel) ? "unknown" : routeLabel;
-            string prefix = string.Equals(normalizedLabel, "raw", StringComparison.OrdinalIgnoreCase)
-                ? "raw stabilize | "
-                : "candidate stabilize | " + normalizedLabel + " | ";
-
-            Log(prefix + "started");
-
-            while (true)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                DateTime nowUtc = DateTime.UtcNow;
-
-                if (IsWithinTransitionGrace(nowUtc))
-                {
-                    await Task.Delay(220, cancellationToken);
-                    continue;
-                }
-
-                if (nowUtc < earliestCheckUtc)
-                {
-                    await Task.Delay(250, cancellationToken);
-                    continue;
-                }
-
-                bool timeoutReached = nowUtc >= hardStopUtc;
-                if (timeoutReached)
-                {
-                    double elapsed = (nowUtc - startedUtc).TotalSeconds;
-                    Log(prefix +
-                        "timeout | after=" + elapsed.ToString("0.0") +
-                        "s | using fallback measurement");
-                    return false;
-                }
-
-                FastPingState fastPingState = getFastPingState();
-                FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow = getShortWindowSnapshot();
-
-                bool stableNow = IsCandidateStabilized(shortWindow, fastPingState);
-
-                if (stableNow)
-                {
-                    stableChecks++;
-                    Log(prefix + "stableCheck=" + stableChecks + "/" + timing.StabilizeConsecutiveChecks);
-
-                    if (stableChecks >= timing.StabilizeConsecutiveChecks)
-                    {
-                        double elapsed = (nowUtc - startedUtc).TotalSeconds;
-                        Log(prefix + "reached | after=" + elapsed.ToString("0.0") + "s");
-                        return true;
-                    }
-                }
-                else
-                {
-                    stableChecks = 0;
-                }
-
-                await Task.Delay(400, cancellationToken);
-            }
-        }
-
-        private static bool IsCandidateStabilized(
-            FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindow,
-            FastPingState fastPingState)
-        {
-            if (shortWindow == null || !shortWindow.IsValid || fastPingState == null)
-                return false;
-
-            if (fastPingState.IsStale)
-                return false;
-
-            if (fastPingState.Confidence < 0.52)
-                return false;
-
-            if (!fastPingState.PrimaryFresh && !fastPingState.SecondaryFresh)
-                return false;
-
-            if (shortWindow.StaleRate > 0.22)
-                return false;
-
-            if (shortWindow.SpikeDensityPerMinute > 14.0)
-                return false;
-
-            if (shortWindow.AvgJitterMs > 34.0)
-                return false;
-
-            if (shortWindow.AvgLossRate >= 0.45)
-                return false;
-
-            if (shortWindow.P95PingMs >= 900.0)
-                return false;
-
-            return true;
-        }
-
         private static string AppendNote(string notes, string suffix)
         {
             if (string.IsNullOrWhiteSpace(suffix))
@@ -540,96 +307,398 @@ namespace WTFnetApp
 
         private async Task BeginTransitionGraceAsync(string reason, CancellationToken cancellationToken)
         {
-            DateTime untilUtc = DateTime.UtcNow + timing.TransitionGrace;
-            transitionGraceUntilUtc = untilUtc;
-
             Log("startup-probe | transition grace | " + reason +
                 " | " + timing.TransitionGrace.TotalMilliseconds.ToString("0") + "ms");
 
             await Task.Delay(timing.TransitionGrace, cancellationToken);
         }
 
-        private bool IsWithinTransitionGrace(DateTime nowUtc)
-        {
-            return nowUtc < transitionGraceUntilUtc;
-        }
-
-        private async Task<bool> WaitForPlausibleSettleZoneAsync(
+        private bool IsCandidateUsableForMeasurement(
             ProbeCandidateDefinition candidate,
-            CancellationToken cancellationToken)
+            out string reason)
         {
-            bool speedifyCandidate = candidate != null && candidate.Kind == ProbeCandidateKind.Speedify;
+            reason = "usable";
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
+            FastPingState state = getFastPingState();
 
-            DateTime startedUtc = DateTime.UtcNow;
-            DateTime hardStopUtc = startedUtc + timing.SettleZoneMaxWait;
-            int stableChecks = 0;
-
-            string label = candidate != null ? candidate.ToString() : "unknown";
-            Log("startup-probe | settle zone | " + label + " | started");
-
-            while (DateTime.UtcNow < hardStopUtc)
+            if (state == null || window == null || !window.IsValid)
             {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                FastPingState state = getFastPingState();
-                FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
-
-                bool settled = IsInPlausibleSettleZone(window, state, speedifyCandidate);
-                if (settled)
-                {
-                    stableChecks++;
-                    if (stableChecks >= timing.SettleZoneConsecutiveChecks)
-                    {
-                        double elapsed = (DateTime.UtcNow - startedUtc).TotalSeconds;
-                        Log("startup-probe | settle zone | " + label + " | reached after=" + elapsed.ToString("0.0") + "s");
-                        return true;
-                    }
-                }
-                else
-                {
-                    stableChecks = 0;
-                }
-
-                await Task.Delay(300, cancellationToken);
+                reason = "missing probe telemetry";
+                return false;
             }
 
-            Log("startup-probe | settle zone | " + label + " | timeout");
-            return false;
-        }
-
-        private static bool IsInPlausibleSettleZone(
-            FastPingSignalAnalyzer.FastPingAggregateSnapshot window,
-            FastPingState state,
-            bool speedifyCandidate)
-        {
-            if (state == null || window == null || !window.IsValid)
-                return false;
-
             if (state.IsStale)
+            {
+                reason = "stale route state";
                 return false;
+            }
 
             if (!state.PrimaryFresh && !state.SecondaryFresh)
+            {
+                reason = "no fresh probes";
                 return false;
+            }
 
             if (state.Confidence < 0.30)
-                return false;
-
-            if (speedifyCandidate)
             {
-                if (window.StaleRate > 0.55)
-                    return false;
+                reason = "confidence too low";
+                return false;
+            }
 
-                if (window.AvgLossRate > 0.70)
-                    return false;
+            bool churn =
+                state.Confidence < 0.25 &&
+                (window.StaleRate >= 0.35 || window.AvgLossRate >= 0.35);
+            if (churn)
+            {
+                reason = "reconnect/disconnect churn";
+                return false;
+            }
 
-                if (window.SpikeDensityPerMinute > 20.0)
-                    return false;
+            if (window.StaleRate >= 0.80)
+            {
+                reason = "catastrophic stale";
+                return false;
+            }
 
-                if (window.AvgJitterMs > 60.0)
-                    return false;
+            if (window.AvgLossRate >= 0.80)
+            {
+                reason = "catastrophic loss";
+                return false;
+            }
+
+            if (window.P95PingMs >= 2200.0 || window.AvgPingMs >= 1600.0)
+            {
+                reason = "catastrophic latency";
+                return false;
             }
 
             return true;
+        }
+
+        private static ProbeCandidateRuntimeData MergeMeasuredRuntime(
+            ProbeCandidateRuntimeData first,
+            ProbeCandidateRuntimeData second,
+            TimeSpan firstDuration,
+            TimeSpan secondDuration)
+        {
+            if (first == null)
+                return second;
+
+            if (second == null)
+                return first;
+
+            double w1 = Math.Max(0.0, firstDuration.TotalSeconds);
+            double w2 = Math.Max(0.0, secondDuration.TotalSeconds);
+            if (w1 <= 0.0 && w2 <= 0.0)
+            {
+                w1 = 1.0;
+                w2 = 1.0;
+            }
+
+            ProbeCandidateRuntimeData merged = new ProbeCandidateRuntimeData
+            {
+                Candidate = second.Candidate ?? first.Candidate,
+                TimeBucketKey = second.TimeBucketKey ?? first.TimeBucketKey,
+                AvgPingMs = Weighted(first.AvgPingMs, second.AvgPingMs, w1, w2),
+                MaxPingMs = MaxKnown(first.MaxPingMs, second.MaxPingMs),
+                P95PingMs = Weighted(first.P95PingMs, second.P95PingMs, w1, w2),
+                AvgJitterMs = Weighted(first.AvgJitterMs, second.AvgJitterMs, w1, w2),
+                MinJitterMs = MinKnown(first.MinJitterMs, second.MinJitterMs),
+                MaxJitterMs = MaxKnown(first.MaxJitterMs, second.MaxJitterMs),
+                P95JitterMs = Weighted(first.P95JitterMs, second.P95JitterMs, w1, w2),
+                AvgLossRate = Weighted(first.AvgLossRate, second.AvgLossRate, w1, w2),
+                AvgBadQualityRate = Weighted(first.AvgBadQualityRate, second.AvgBadQualityRate, w1, w2),
+                AvgConfidence = Weighted(first.AvgConfidence, second.AvgConfidence, w1, w2),
+                SpikeDensityPerMinute = Weighted(first.SpikeDensityPerMinute, second.SpikeDensityPerMinute, w1, w2),
+                StaleRate = Weighted(first.StaleRate, second.StaleRate, w1, w2),
+                TunnelConnected = first.TunnelConnected || second.TunnelConnected,
+                AggregateCongested = first.AggregateCongested || second.AggregateCongested,
+                ActiveConnectionCount = Math.Max(first.ActiveConnectionCount, second.ActiveConnectionCount),
+                BackupConnectionCount = Math.Max(first.BackupConnectionCount, second.BackupConnectionCount),
+                IsValid = first.IsValid || second.IsValid,
+                Notes = AppendNote(first.Notes, second.Notes),
+                ReachedUsableState = first.ReachedUsableState || second.ReachedUsableState,
+                MeasurementStarted = first.MeasurementStarted || second.MeasurementStarted,
+                MeasurementCompleted = first.MeasurementCompleted || second.MeasurementCompleted,
+                MeasurementStoppedEarly = first.MeasurementStoppedEarly || second.MeasurementStoppedEarly,
+                MeasurementStopReason = second.MeasurementStopReason ?? first.MeasurementStopReason,
+                DiscardReason = second.DiscardReason ?? first.DiscardReason,
+                StabilizationReached = first.StabilizationReached || second.StabilizationReached,
+                StabilizationTimedOut = first.StabilizationTimedOut || second.StabilizationTimedOut,
+                ReadinessKind = second.ReadinessKind != ProbeReadinessKind.NotReady ? second.ReadinessKind : first.ReadinessKind,
+                ReadinessReason = second.ReadinessReason ?? first.ReadinessReason
+            };
+
+            return merged;
+        }
+
+        private static double Weighted(double a, double b, double wa, double wb)
+        {
+            bool aKnown = a >= 0;
+            bool bKnown = b >= 0;
+            if (!aKnown && !bKnown)
+                return -1;
+            if (!aKnown)
+                return b;
+            if (!bKnown)
+                return a;
+            return ((a * wa) + (b * wb)) / Math.Max(0.0001, wa + wb);
+        }
+
+        private static double MaxKnown(double a, double b)
+        {
+            if (a < 0 && b < 0) return -1;
+            if (a < 0) return b;
+            if (b < 0) return a;
+            return Math.Max(a, b);
+        }
+
+        private static double MinKnown(double a, double b)
+        {
+            if (a < 0 && b < 0) return -1;
+            if (a < 0) return b;
+            if (b < 0) return a;
+            return Math.Min(a, b);
+        }
+
+        private async Task<ProbeCandidateRuntimeData> RunSegmentedMeasurementAsync(
+            ProbeCandidateDefinition candidate,
+            CancellationToken cancellationToken)
+        {
+            TimeSpan hardIgnore = timing.HardIgnoreDuration;
+            TimeSpan provisional = timing.ProvisionalDuration;
+            TimeSpan main = timing.MainMeasureDuration > TimeSpan.Zero
+                ? timing.MainMeasureDuration
+                : timing.ObserveDuration;
+
+            if (hardIgnore > TimeSpan.Zero)
+            {
+                Log("startup-probe | hard-ignore start | " + candidate +
+                    " | durationMs=" + hardIgnore.TotalMilliseconds.ToString("0"));
+                (bool hardCatastrophic, string hardStopReason) =
+                    await WaitWithCatastrophicChecksAsync(candidate, hardIgnore, cancellationToken);
+                if (hardCatastrophic)
+                    return await BuildEarlyStopRuntimeAsync(candidate, hardStopReason ?? "early-stop catastrophic during hard-ignore");
+            }
+
+            ProbeCandidateRuntimeData provisionalRuntime = null;
+            if (provisional > TimeSpan.Zero)
+            {
+                provisionalRuntime = await captureProbeAsync(
+                    candidate,
+                    timing.MeasurementStartGuard,
+                    provisional);
+
+                provisionalRuntime.ReachedUsableState = true;
+                provisionalRuntime.MeasurementStarted = true;
+                provisionalRuntime.Notes = AppendNote(provisionalRuntime.Notes, "measured-provisional");
+
+                if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(provisionalRuntime, out string provisionalStopReason))
+                {
+                    provisionalRuntime.MeasurementStoppedEarly = true;
+                    provisionalRuntime.MeasurementCompleted = false;
+                    provisionalRuntime.MeasurementStopReason = provisionalStopReason;
+                    provisionalRuntime.Notes = AppendNote(provisionalRuntime.Notes, provisionalStopReason);
+                    Log("startup-probe | candidate measured-early-stop | " + candidate + " | reason=" + provisionalStopReason);
+                    return provisionalRuntime;
+                }
+            }
+
+            ProbeCandidateRuntimeData mainRuntime = await captureProbeAsync(
+                candidate,
+                TimeSpan.Zero,
+                main);
+
+            mainRuntime.ReachedUsableState = true;
+            mainRuntime.MeasurementStarted = true;
+            mainRuntime.Notes = AppendNote(mainRuntime.Notes, "measured-main");
+
+            if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(mainRuntime, out string mainStopReason))
+            {
+                mainRuntime.MeasurementStoppedEarly = true;
+                mainRuntime.MeasurementCompleted = false;
+                mainRuntime.MeasurementStopReason = mainStopReason;
+                mainRuntime.Notes = AppendNote(mainRuntime.Notes, mainStopReason);
+                Log("startup-probe | candidate measured-early-stop | " + candidate + " | reason=" + mainStopReason);
+                return mainRuntime;
+            }
+
+            ProbeCandidateRuntimeData merged = provisionalRuntime != null
+                ? MergePersistenceAwareRuntime(
+                    provisionalRuntime,
+                    mainRuntime,
+                    provisional,
+                    main)
+                : mainRuntime;
+
+            merged.ReachedUsableState = true;
+            merged.MeasurementStarted = true;
+            merged.MeasurementCompleted = true;
+            merged.MeasurementStoppedEarly = false;
+            Log("startup-probe | candidate measured-full | " + candidate);
+
+            return merged;
+        }
+
+        private async Task<(bool IsCatastrophic, string Reason)> WaitWithCatastrophicChecksAsync(
+            ProbeCandidateDefinition candidate,
+            TimeSpan duration,
+            CancellationToken cancellationToken)
+        {
+            DateTime endUtc = DateTime.UtcNow + duration;
+            while (DateTime.UtcNow < endUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (TryGetCatastrophicReasonFromCurrentWindow(out string reason))
+                {
+                    Log("startup-probe | catastrophic detected during hard-ignore | " + candidate);
+                    return (true, reason);
+                }
+
+                await Task.Delay(250, cancellationToken);
+            }
+
+            return (false, null);
+        }
+
+        private async Task<ProbeCandidateRuntimeData> BuildEarlyStopRuntimeAsync(
+            ProbeCandidateDefinition candidate,
+            string reason)
+        {
+            ProbeCandidateRuntimeData runtime = await captureProbeAsync(candidate, TimeSpan.Zero, TimeSpan.Zero);
+            if (runtime == null)
+                return null;
+
+            runtime.ReachedUsableState = true;
+            runtime.MeasurementStarted = true;
+            runtime.MeasurementStoppedEarly = true;
+            runtime.MeasurementCompleted = false;
+            runtime.MeasurementStopReason = reason;
+            runtime.Notes = AppendNote(runtime.Notes, reason);
+            Log("startup-probe | candidate measured-early-stop | " + candidate + " | reason=" + reason);
+            return runtime;
+        }
+
+        private bool TryGetCatastrophicReasonFromCurrentWindow(out string reason)
+        {
+            reason = null;
+
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
+            FastPingState state = getFastPingState();
+            if (window == null || !window.IsValid)
+                return false;
+
+            if (window.P95PingMs >= 2500.0 || window.AvgPingMs >= 1800.0)
+            {
+                reason = "early-stop catastrophic latency";
+                return true;
+            }
+
+            if (window.StaleRate >= 0.80 && window.AvgLossRate >= 0.65)
+            {
+                reason = "early-stop catastrophic stale/timeout";
+                return true;
+            }
+
+            if (window.AvgLossRate >= 0.70 && window.StaleRate >= 0.45)
+            {
+                reason = "early-stop catastrophic loss";
+                return true;
+            }
+
+            if (state != null && state.Confidence >= 0 && state.Confidence < 0.08 && window.StaleRate >= 0.80)
+            {
+                reason = "early-stop tunnel collapse";
+                return true;
+            }
+
+            return false;
+        }
+
+        private ProbeCandidateRuntimeData MergePersistenceAwareRuntime(
+            ProbeCandidateRuntimeData provisional,
+            ProbeCandidateRuntimeData main,
+            TimeSpan provisionalDuration,
+            TimeSpan mainDuration)
+        {
+            ProbeCandidateRuntimeData merged = MergeMeasuredRuntime(provisional, main, provisionalDuration, mainDuration);
+
+            merged.SpikeDensityPerMinute = PersistenceAwareMetric(
+                provisional.SpikeDensityPerMinute,
+                main.SpikeDensityPerMinute,
+                x => x >= 8.0,
+                provisionalDuration,
+                mainDuration);
+            merged.StaleRate = PersistenceAwareMetric(
+                provisional.StaleRate,
+                main.StaleRate,
+                x => x >= 0.15,
+                provisionalDuration,
+                mainDuration);
+            merged.AvgLossRate = PersistenceAwareMetric(
+                provisional.AvgLossRate,
+                main.AvgLossRate,
+                x => x >= 0.18,
+                provisionalDuration,
+                mainDuration);
+            merged.AvgJitterMs = PersistenceAwareMetric(
+                provisional.AvgJitterMs,
+                main.AvgJitterMs,
+                x => x >= 18.0,
+                provisionalDuration,
+                mainDuration);
+            merged.P95PingMs = PersistenceAwareMetric(
+                provisional.P95PingMs,
+                main.P95PingMs,
+                x => x >= 120.0,
+                provisionalDuration,
+                mainDuration);
+            merged.AvgBadQualityRate = PersistenceAwareMetric(
+                provisional.AvgBadQualityRate,
+                main.AvgBadQualityRate,
+                x => x >= 0.25,
+                provisionalDuration,
+                mainDuration);
+
+            bool provisionalOnlyBad =
+                IsBad(provisional.SpikeDensityPerMinute, x => x >= 8.0) && !IsBad(main.SpikeDensityPerMinute, x => x >= 8.0) ||
+                IsBad(provisional.StaleRate, x => x >= 0.15) && !IsBad(main.StaleRate, x => x >= 0.15) ||
+                IsBad(provisional.AvgLossRate, x => x >= 0.18) && !IsBad(main.AvgLossRate, x => x >= 0.18) ||
+                IsBad(provisional.AvgJitterMs, x => x >= 18.0) && !IsBad(main.AvgJitterMs, x => x >= 18.0) ||
+                IsBad(provisional.P95PingMs, x => x >= 120.0) && !IsBad(main.P95PingMs, x => x >= 120.0);
+
+            merged.Notes = AppendNote(merged.Notes, provisionalOnlyBad ? "provisional-softened" : "provisional-persistent-or-clean");
+
+            return merged;
+        }
+
+        private static double PersistenceAwareMetric(
+            double provisionalValue,
+            double mainValue,
+            Func<double, bool> isBad,
+            TimeSpan provisionalDuration,
+            TimeSpan mainDuration)
+        {
+            if (provisionalValue < 0)
+                return mainValue;
+            if (mainValue < 0)
+                return provisionalValue;
+
+            bool provisionalBad = IsBad(provisionalValue, isBad);
+            bool mainBad = IsBad(mainValue, isBad);
+
+            if (provisionalBad && !mainBad)
+                return (mainValue * 0.85) + (provisionalValue * 0.15);
+
+            double wp = Math.Max(0.1, provisionalDuration.TotalSeconds);
+            double wm = Math.Max(0.1, mainDuration.TotalSeconds);
+            return ((provisionalValue * wp) + (mainValue * wm)) / (wp + wm);
+        }
+
+        private static bool IsBad(double value, Func<double, bool> isBad)
+        {
+            return value >= 0 && isBad != null && isBad(value);
         }
 
         private StartupProbeResult BuildUnreliableResult(
@@ -783,17 +852,11 @@ namespace WTFnetApp
 
     public sealed class StartupProbeTimingConfig
     {
-        public TimeSpan ReadinessMinWait { get; set; } = TimeSpan.FromSeconds(4.0);
-        public TimeSpan ReadinessMaxWait { get; set; } = TimeSpan.FromSeconds(10.0);
-        public int ReadinessConsecutiveChecks { get; set; } = 3;
-        public TimeSpan StabilizeMinWait { get; set; } = TimeSpan.FromSeconds(2.5);
-        public TimeSpan StabilizeMaxWait { get; set; } = TimeSpan.FromSeconds(16.0);
-        public int StabilizeConsecutiveChecks { get; set; } = 3;
         public TimeSpan TransitionGrace { get; set; } = TimeSpan.FromSeconds(1.6);
-        public TimeSpan SettleZoneMaxWait { get; set; } = TimeSpan.FromSeconds(8.0);
-        public int SettleZoneConsecutiveChecks { get; set; } = 3;
+        public TimeSpan HardIgnoreDuration { get; set; } = TimeSpan.FromSeconds(2.5);
+        public TimeSpan ProvisionalDuration { get; set; } = TimeSpan.FromSeconds(2.5);
+        public TimeSpan MainMeasureDuration { get; set; } = TimeSpan.FromSeconds(10.0);
         public TimeSpan MeasurementStartGuard { get; set; } = TimeSpan.FromSeconds(0.8);
-        public TimeSpan UnstableObserveDuration { get; set; } = TimeSpan.FromSeconds(2.0);
         public TimeSpan ObserveDuration { get; set; } = TimeSpan.FromSeconds(10.0);
 
         public static StartupProbeTimingConfig Default { get; } = new StartupProbeTimingConfig();
