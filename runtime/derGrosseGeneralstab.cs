@@ -66,17 +66,11 @@ namespace WTFnetApp
 
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
-            ReadinessMinWait = TimeSpan.FromSeconds(4.0),
-            ReadinessMaxWait = TimeSpan.FromSeconds(10.0),
-            ReadinessConsecutiveChecks = 3,
-            StabilizeMinWait = TimeSpan.FromSeconds(2.5),
-            StabilizeMaxWait = TimeSpan.FromSeconds(16.0),
-            StabilizeConsecutiveChecks = 3,
-            TransitionGrace = TimeSpan.FromSeconds(1.8),
-            SettleZoneMaxWait = TimeSpan.FromSeconds(9.0),
-            SettleZoneConsecutiveChecks = 3,
+            TransitionGrace = TimeSpan.FromSeconds(2.0),
+            HardIgnoreDuration = TimeSpan.FromSeconds(2.5),
+            ProvisionalDuration = TimeSpan.FromSeconds(2.5),
+            MainMeasureDuration = TimeSpan.FromSeconds(10.0),
             MeasurementStartGuard = TimeSpan.FromSeconds(0.9),
-            UnstableObserveDuration = TimeSpan.FromSeconds(2.0),
             ObserveDuration = TimeSpan.FromSeconds(10.0)
         };
 
@@ -406,6 +400,7 @@ namespace WTFnetApp
 
             if (applyDecision.Kind == StartupApplyDecisionKind.ApplyWinner)
             {
+                // Coordinator already restored final winner once at end of probe flow.
                 await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
             }
             else if (applyDecision.Kind == StartupApplyDecisionKind.KeepRaw)
@@ -614,13 +609,11 @@ namespace WTFnetApp
 
             if (winner.Candidate.Kind == ProbeCandidateKind.Raw)
             {
-                Logger.Log("startup", "winner is raw baseline -> keeping speedify disabled");
-                await DisableSpeedifyAsync();
+                Logger.Log("startup", "winner is raw baseline -> already finalized by coordinator");
                 return;
             }
 
-            Logger.Log("startup", "applying winner target | " + winner.Candidate);
-            await ActivateSpeedifyTargetAsync(winner.Candidate.ConnectTarget);
+            Logger.Log("startup", "winner target already active from coordinator restore | " + winner.Candidate);
         }
 
         private StartupApplyDecision BuildStartupApplyDecision(StartupProbeResult result)
