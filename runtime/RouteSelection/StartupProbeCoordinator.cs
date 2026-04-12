@@ -172,6 +172,23 @@ namespace WTFnetApp
                     continue;
                 }
 
+                await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
+
+                bool candidateSettled =
+                    await WaitForPlausibleSettleZoneAsync(
+                        candidate,
+                        cancellationToken);
+
+                if (!candidateSettled)
+                {
+                    Log("startup-probe | discard | " + candidate + " | discardReason=settle-zone-timeout");
+                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
+                    bool restoredBySettleTimeout = await RestoreLeaderRouteAsync(leader, cancellationToken);
+                    if (!restoredBySettleTimeout)
+                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
+                    continue;
+                }
+
                 ProbeReadinessResult candidateReadiness =
                     await WaitForReadinessAsync(
                         routeKey: candidate.RouteKey,
