@@ -416,7 +416,7 @@ namespace WTFnetApp
             {
                 lock (sync)
                 {
-                    Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ") | " + host);
+                    Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host);
                     RegisterMiss_NoLock(target);
                     RecordEvaluationSample_NoLock(
                         target.Name,
@@ -516,7 +516,7 @@ namespace WTFnetApp
                 {
                     lock (sync)
                     {
-                        Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ") | " + host + " [burst]");
+                        Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host + " [burst]");
                         RegisterMiss_NoLock(target);
                         RecordEvaluationSample_NoLock(
                             target.Name,
