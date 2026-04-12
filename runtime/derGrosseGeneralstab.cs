@@ -84,6 +84,8 @@ namespace WTFnetApp
             Logger.StartSession();
             Logger.StartDeviationSession();
             Logger.StartUnifiedMetricsSession();
+            Logger.StartSpeedifyDebugSession();
+
 
             Logger.Log("system", "application starting");
             Logger.Log("engine", "initializing core");
