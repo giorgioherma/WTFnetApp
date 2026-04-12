@@ -8,6 +8,53 @@ namespace WTFnetApp
 {
     public sealed class StartupProbeCoordinator
     {
+        private sealed class PersistenceRule
+        {
+            public Func<ProbeCandidateRuntimeData, double> Read { get; set; }
+            public Action<ProbeCandidateRuntimeData, double> Write { get; set; }
+            public Func<double, bool> IsBad { get; set; }
+        }
+
+        private static readonly PersistenceRule[] PersistenceRules =
+        {
+            new PersistenceRule
+            {
+                Read = x => x.SpikeDensityPerMinute,
+                Write = (x, v) => x.SpikeDensityPerMinute = v,
+                IsBad = x => x >= 8.0
+            },
+            new PersistenceRule
+            {
+                Read = x => x.StaleRate,
+                Write = (x, v) => x.StaleRate = v,
+                IsBad = x => x >= 0.15
+            },
+            new PersistenceRule
+            {
+                Read = x => x.AvgLossRate,
+                Write = (x, v) => x.AvgLossRate = v,
+                IsBad = x => x >= 0.18
+            },
+            new PersistenceRule
+            {
+                Read = x => x.AvgJitterMs,
+                Write = (x, v) => x.AvgJitterMs = v,
+                IsBad = x => x >= 18.0
+            },
+            new PersistenceRule
+            {
+                Read = x => x.P95PingMs,
+                Write = (x, v) => x.P95PingMs = v,
+                IsBad = x => x >= 120.0
+            },
+            new PersistenceRule
+            {
+                Read = x => x.AvgBadQualityRate,
+                Write = (x, v) => x.AvgBadQualityRate = v,
+                IsBad = x => x >= 0.25
+            }
+        };
+
         private readonly Func<Task<bool>> disableSpeedifyAsync;
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
@@ -80,7 +127,7 @@ namespace WTFnetApp
             ProbeReadinessResult readiness = new ProbeReadinessResult
             {
                 Kind = ProbeReadinessKind.TimeoutFallback,
-                Reason = "fixed-settle measurement"
+                Reason = "segmented fixed-window measurement"
             };
 
             output.RawReadiness = readiness;
@@ -127,7 +174,8 @@ namespace WTFnetApp
             output.Shortlist.Add(rawScore);
 
             ProbeScoreResult leader = rawScore;
-            Log("startup-probe | leader initialized -> " + FormatLeaderLabel(leader));
+            Log("startup-probe | leader initialized -> " + FormatLeaderLabel(leader) +
+                " | " + ProbeScoring.BuildScoreBreakdown(rawScore));
 
             foreach (ProbeCandidateDefinition candidate in ordered)
             {
@@ -161,7 +209,7 @@ namespace WTFnetApp
                 ProbeReadinessResult candidateReadiness = new ProbeReadinessResult
                 {
                     Kind = ProbeReadinessKind.TimeoutFallback,
-                    Reason = "fixed-settle measurement"
+                    Reason = "segmented fixed-window measurement"
                 };
 
                 learningStore.UpdateFromReadinessSnapshot(
@@ -203,7 +251,8 @@ namespace WTFnetApp
                     Log("startup-probe | compare | " + candidate +
                         " | composite=" + score.StartupSelectionScore.ToString("0.0") +
                         " | stability=" + score.OverallStabilityScore.ToString("0.0") +
-                        " | warning=" + ProbeScoring.GetWarningLabel(score));
+                        " | warning=" + ProbeScoring.GetWarningLabel(score) +
+                        " | " + ProbeScoring.BuildScoreBreakdown(score));
                 }
 
                 ProbeDiscardDecision discardDecision =
@@ -222,6 +271,7 @@ namespace WTFnetApp
                         " | " + ProbeScoring.BuildShortText(score) +
                         " | overall=" + score.OverallStabilityScore.ToString("0.0") +
                         " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                        " | " + ProbeScoring.BuildScoreBreakdown(score) +
                         " | explain=" + ProbeScoring.BuildRouteExplanation(score));
                     continue;
                 }
@@ -250,6 +300,7 @@ namespace WTFnetApp
                     " | " + ProbeScoring.BuildShortText(score) +
                     " | overall=" + score.OverallStabilityScore.ToString("0.0") +
                     " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                    " | " + ProbeScoring.BuildScoreBreakdown(score) +
                     " | explain=" + ProbeScoring.BuildRouteExplanation(score));
             }
 
@@ -415,6 +466,9 @@ namespace WTFnetApp
                 AggregateCongested = first.AggregateCongested || second.AggregateCongested,
                 ActiveConnectionCount = Math.Max(first.ActiveConnectionCount, second.ActiveConnectionCount),
                 BackupConnectionCount = Math.Max(first.BackupConnectionCount, second.BackupConnectionCount),
+                SpeedifyAggregateLatencyMs = Weighted(first.SpeedifyAggregateLatencyMs, second.SpeedifyAggregateLatencyMs, w1, w2),
+                SpeedifyAggregateJitterMs = Weighted(first.SpeedifyAggregateJitterMs, second.SpeedifyAggregateJitterMs, w1, w2),
+                SpeedifyReportedLatencyMs = Weighted(first.SpeedifyReportedLatencyMs, second.SpeedifyReportedLatencyMs, w1, w2),
                 IsValid = first.IsValid || second.IsValid,
                 Notes = AppendNote(first.Notes, second.Notes),
                 ReachedUsableState = first.ReachedUsableState || second.ReachedUsableState,
@@ -624,51 +678,32 @@ namespace WTFnetApp
         {
             ProbeCandidateRuntimeData merged = MergeMeasuredRuntime(provisional, main, provisionalDuration, mainDuration);
 
-            merged.SpikeDensityPerMinute = PersistenceAwareMetric(
-                provisional.SpikeDensityPerMinute,
-                main.SpikeDensityPerMinute,
-                x => x >= 8.0,
-                provisionalDuration,
-                mainDuration);
-            merged.StaleRate = PersistenceAwareMetric(
-                provisional.StaleRate,
-                main.StaleRate,
-                x => x >= 0.15,
-                provisionalDuration,
-                mainDuration);
-            merged.AvgLossRate = PersistenceAwareMetric(
-                provisional.AvgLossRate,
-                main.AvgLossRate,
-                x => x >= 0.18,
-                provisionalDuration,
-                mainDuration);
-            merged.AvgJitterMs = PersistenceAwareMetric(
-                provisional.AvgJitterMs,
-                main.AvgJitterMs,
-                x => x >= 18.0,
-                provisionalDuration,
-                mainDuration);
-            merged.P95PingMs = PersistenceAwareMetric(
-                provisional.P95PingMs,
-                main.P95PingMs,
-                x => x >= 120.0,
-                provisionalDuration,
-                mainDuration);
-            merged.AvgBadQualityRate = PersistenceAwareMetric(
-                provisional.AvgBadQualityRate,
-                main.AvgBadQualityRate,
-                x => x >= 0.25,
-                provisionalDuration,
-                mainDuration);
+            bool provisionalOnlyBad = false;
+            bool persistentOrMainBad = false;
+            foreach (PersistenceRule rule in PersistenceRules)
+            {
+                double provisionalValue = rule.Read(provisional);
+                double mainValue = rule.Read(main);
+                rule.Write(merged, PersistenceAwareMetric(
+                    provisionalValue,
+                    mainValue,
+                    rule.IsBad,
+                    provisionalDuration,
+                    mainDuration));
 
-            bool provisionalOnlyBad =
-                IsBad(provisional.SpikeDensityPerMinute, x => x >= 8.0) && !IsBad(main.SpikeDensityPerMinute, x => x >= 8.0) ||
-                IsBad(provisional.StaleRate, x => x >= 0.15) && !IsBad(main.StaleRate, x => x >= 0.15) ||
-                IsBad(provisional.AvgLossRate, x => x >= 0.18) && !IsBad(main.AvgLossRate, x => x >= 0.18) ||
-                IsBad(provisional.AvgJitterMs, x => x >= 18.0) && !IsBad(main.AvgJitterMs, x => x >= 18.0) ||
-                IsBad(provisional.P95PingMs, x => x >= 120.0) && !IsBad(main.P95PingMs, x => x >= 120.0);
+                if (IsBad(provisionalValue, rule.IsBad) && !IsBad(mainValue, rule.IsBad))
+                    provisionalOnlyBad = true;
 
-            merged.Notes = AppendNote(merged.Notes, provisionalOnlyBad ? "provisional-softened" : "provisional-persistent-or-clean");
+                if (IsBad(mainValue, rule.IsBad) ||
+                    (IsBad(provisionalValue, rule.IsBad) && IsBad(mainValue, rule.IsBad)))
+                    persistentOrMainBad = true;
+            }
+
+            string persistenceNote =
+                provisionalOnlyBad && !persistentOrMainBad
+                    ? "provisional-softened"
+                    : "provisional-persistent-or-clean";
+            merged.Notes = AppendNote(merged.Notes, persistenceNote);
 
             return merged;
         }

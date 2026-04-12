@@ -67,8 +67,8 @@ namespace WTFnetApp
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
             TransitionGrace = TimeSpan.FromSeconds(2.0),
-            HardIgnoreDuration = TimeSpan.FromSeconds(2.5),
-            ProvisionalDuration = TimeSpan.FromSeconds(2.5),
+            HardIgnoreDuration = TimeSpan.FromSeconds(2.0),
+            ProvisionalDuration = TimeSpan.FromSeconds(2.0),
             MainMeasureDuration = TimeSpan.FromSeconds(10.0),
             MeasurementStartGuard = TimeSpan.FromSeconds(0.9),
             ObserveDuration = TimeSpan.FromSeconds(10.0)
@@ -1082,6 +1082,9 @@ namespace WTFnetApp
                 AggregateCongested = snapshot != null && snapshot.AggregateCongested,
                 ActiveConnectionCount = snapshot != null ? snapshot.ActiveConnectionCount : 0,
                 BackupConnectionCount = snapshot != null ? snapshot.BackupConnectionCount : 0,
+                SpeedifyAggregateLatencyMs = snapshot != null ? snapshot.AggregateLatencyMs : -1,
+                SpeedifyAggregateJitterMs = snapshot != null ? snapshot.AggregateJitterMs : -1,
+                SpeedifyReportedLatencyMs = snapshot != null ? snapshot.LatencyMs : -1,
 
                 IsValid = window != null && window.IsValid,
                 Notes = unified != null ? unified.HealthReason : null
@@ -1093,6 +1096,9 @@ namespace WTFnetApp
                 runtime.AggregateCongested = false;
                 runtime.ActiveConnectionCount = 0;
                 runtime.BackupConnectionCount = 0;
+                runtime.SpeedifyAggregateLatencyMs = -1;
+                runtime.SpeedifyAggregateJitterMs = -1;
+                runtime.SpeedifyReportedLatencyMs = -1;
                 runtime.Notes = "Raw baseline capture";
             }
 
@@ -1293,12 +1299,21 @@ namespace WTFnetApp
                 AggregateCongested = source.AggregateCongested,
                 ActiveConnectionCount = source.ActiveConnectionCount,
                 BackupConnectionCount = source.BackupConnectionCount,
+                SpeedifyAggregateLatencyMs = source.SpeedifyAggregateLatencyMs,
+                SpeedifyAggregateJitterMs = source.SpeedifyAggregateJitterMs,
+                SpeedifyReportedLatencyMs = source.SpeedifyReportedLatencyMs,
                 IsValid = source.IsValid,
                 Notes = source.Notes,
                 StabilizationReached = source.StabilizationReached,
                 StabilizationTimedOut = source.StabilizationTimedOut,
                 ReadinessKind = source.ReadinessKind,
-                ReadinessReason = source.ReadinessReason
+                ReadinessReason = source.ReadinessReason,
+                ReachedUsableState = source.ReachedUsableState,
+                MeasurementStarted = source.MeasurementStarted,
+                MeasurementCompleted = source.MeasurementCompleted,
+                MeasurementStoppedEarly = source.MeasurementStoppedEarly,
+                MeasurementStopReason = source.MeasurementStopReason,
+                DiscardReason = source.DiscardReason
             };
         }
 
