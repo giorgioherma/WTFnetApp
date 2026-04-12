@@ -291,17 +291,6 @@ namespace WTFnetApp
             double badQualityPenalty = Safe(runtime.AvgBadQualityRate) * 100.0 * 0.12;
             double confidencePenalty = Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 14.0;
 
-            double readinessAdjustment =
-                runtime.ReadinessKind == ProbeReadinessKind.GoodStable ? -2.5 :
-                runtime.ReadinessKind == ProbeReadinessKind.BadStable ? 3.0 :
-                runtime.ReadinessKind == ProbeReadinessKind.TimeoutFallback ? 1.5 :
-                4.0;
-
-            double stabilizationAdjustment =
-                runtime.StabilizationReached && !runtime.StabilizationTimedOut ? -2.0 :
-                runtime.StabilizationTimedOut ? 3.0 :
-                1.0;
-
             double warningAdjustment =
                 candidate.WarningLevel == ProbeWarningLevel.Risky ? 18.0 :
                 candidate.WarningLevel == ProbeWarningLevel.Borderline ? 6.0 :
@@ -314,8 +303,6 @@ namespace WTFnetApp
                    lossPenalty +
                    badQualityPenalty +
                    confidencePenalty +
-                   readinessAdjustment +
-                   stabilizationAdjustment +
                    warningAdjustment +
                    learningAdjustment;
         }

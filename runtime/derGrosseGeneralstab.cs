@@ -631,26 +631,12 @@ namespace WTFnetApp
                 ? result.WinnerConfidence.Kind
                 : ProbeWinnerConfidenceKind.NoClearWinner;
 
-            bool winnerCleanStabilization =
-                result.Winner.Runtime != null &&
-                result.Winner.Runtime.StabilizationReached &&
-                !result.Winner.Runtime.StabilizationTimedOut;
-
-            bool winnerFallbackStabilization =
-                result.Winner.Runtime != null &&
-                result.Winner.Runtime.StabilizationTimedOut;
-
-            bool rawFallbackStabilization =
-                result.Baseline != null &&
-                result.Baseline.Runtime != null &&
-                result.Baseline.Runtime.StabilizationTimedOut;
-
-            if (confidenceKind == ProbeWinnerConfidenceKind.HighConfidence && winnerCleanStabilization)
+            if (confidenceKind == ProbeWinnerConfidenceKind.HighConfidence)
             {
                 return new StartupApplyDecision
                 {
                     Kind = StartupApplyDecisionKind.ApplyWinner,
-                    Reason = "high confidence + clean stabilization"
+                    Reason = "high confidence winner"
                 };
             }
 
@@ -674,24 +660,6 @@ namespace WTFnetApp
                 {
                     Kind = result.Baseline != null ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
                     Reason = "no clear winner"
-                };
-            }
-
-            if (!winnerCleanStabilization)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "winner stabilization not clean"
-                };
-            }
-
-            if (winnerFallbackStabilization || rawFallbackStabilization)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "fallback stabilization detected"
                 };
             }
 
@@ -754,8 +722,8 @@ namespace WTFnetApp
                 ? result.WinnerConfidence.ConfidenceScore.ToString("0.0")
                 : "--";
             string warning = winner != null ? winner.WarningLevel.ToString() : "None";
-            string stabilized = runtime != null && runtime.StabilizationReached ? "yes" : "no";
-            string fallback = runtime != null && runtime.StabilizationTimedOut ? "yes" : "no";
+            string measured = runtime != null && runtime.MeasurementStarted ? "yes" : "no";
+            string earlyStop = runtime != null && runtime.MeasurementStoppedEarly ? "yes" : "no";
 
             string baselineGap = "--";
             if (winner != null && result.Baseline != null)
@@ -772,8 +740,8 @@ namespace WTFnetApp
                    " | confidence=" + confidenceKind +
                    "@" + confidenceScore +
                    " | warning=" + warning +
-                   " | stabilized=" + stabilized +
-                   " | fallback=" + fallback +
+                   " | measured=" + measured +
+                   " | earlyStop=" + earlyStop +
                    " | baselineGap=" + baselineGap +
                    " | runnerUpGap=" + runnerUpGap;
         }
