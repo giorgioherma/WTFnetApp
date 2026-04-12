@@ -457,7 +457,7 @@ namespace WTFnetApp
                 return true;
             }
 
-            string invalidReason;
+            string invalidReason = null;
             if (!TryValidateMeasuredRuntimeForScoring(candidate.Runtime, out invalidReason))
             {
                 reason = invalidReason ?? "unusable probe";
@@ -1169,24 +1169,29 @@ namespace WTFnetApp
             return false;
         }
 
-        private static bool TryGetFailFastDiscardReason(ProbeScoreResult candidate, out string reason)
+        private static bool TryValidateMeasuredRuntimeForScoring(ProbeCandidateRuntimeData runtime, out string reason)
         {
             reason = null;
 
-            if (candidate == null)
+            if (runtime == null || runtime.Candidate == null)
             {
                 reason = "unusable probe";
-                return true;
+                return false;
             }
 
-            string invalidReason = null;
-            if (!TryValidateMeasuredRuntimeForScoring(candidate.Runtime, out invalidReason))
+            if (!runtime.ReachedUsableState || !runtime.MeasurementStarted)
             {
-                reason = invalidReason ?? "unusable probe";
-                return true;
+                reason = runtime.DiscardReason ?? "unusable-before-measurement";
+                return false;
             }
 
-            return TryGetMeasuredCatastrophicStopReason(candidate.Runtime, out reason);
+            if (HasFundamentallyBrokenSamples(runtime))
+            {
+                reason = "unusable-measurement-samples";
+                return false;
+            }
+
+            return true;
         }
 
         private static double ComputeEarlyStopPenalty(string reason)
