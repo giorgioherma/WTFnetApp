@@ -98,6 +98,9 @@ namespace WTFnetApp
         public bool AggregateCongested { get; set; }
         public int ActiveConnectionCount { get; set; }
         public int BackupConnectionCount { get; set; }
+        public double SpeedifyAggregateLatencyMs { get; set; } = -1;
+        public double SpeedifyAggregateJitterMs { get; set; } = -1;
+        public double SpeedifyReportedLatencyMs { get; set; } = -1;
 
         public bool IsValid { get; set; } = true;
         public string Notes { get; set; }
@@ -138,6 +141,18 @@ namespace WTFnetApp
         public string BadgeText { get; set; }
 
         public double JitterRangeMs { get; set; } = -1;
+
+        public double LatencyContribution { get; set; }
+        public double JitterContribution { get; set; }
+        public double SpikeContribution { get; set; }
+        public double LossStaleBadContribution { get; set; }
+        public double SpeedifyGlobalAdjustment { get; set; }
+        public double SpeedifyPositiveInfluenceCapApplied { get; set; }
+        public double SpeedifyLatencyModifier { get; set; } = 1.0;
+        public double SpeedifyJitterModifier { get; set; } = 1.0;
+        public double SpeedifySpikeModifier { get; set; } = 1.0;
+        public double SpeedifyLossStaleModifier { get; set; } = 1.0;
+        public string SpeedifyHealthLabel { get; set; } = "n/a";
     }
 
     public sealed class ProbeWinnerConfidenceResult
@@ -156,6 +171,16 @@ namespace WTFnetApp
 
     public static class ProbeScoring
     {
+        private enum SpeedifyHealthBucket
+        {
+            NotApplicable = 0,
+            NoTelemetry = 1,
+            Unhealthy = 2,
+            HealthySingleLink = 3,
+            HealthyBonded = 4
+        }
+
+        // Raw thresholds
         private const double BorderlineAvgJitterMs = 12.0;
         private const double RiskyAvgJitterMs = 18.0;
 
@@ -177,6 +202,26 @@ namespace WTFnetApp
 
         private const double BorderlineBadQualityRate = 0.12;
         private const double RiskyBadQualityRate = 0.25;
+
+        // Speedify warning thresholds
+        private const double SpeedifyBorderlineAvgJitterMs = 14.5;
+        private const double SpeedifyRiskyAvgJitterMs = 22.0;
+        private const double SpeedifyBorderlineJitterRangeMs = 13.0;
+        private const double SpeedifyRiskyJitterRangeMs = 22.0;
+        private const double SpeedifyBorderlineP95PingMs = 105.0;
+        private const double SpeedifyRiskyP95PingMs = 150.0;
+        private const double SpeedifyBorderlineSpikeDensity = 5.0;
+        private const double SpeedifyRiskySpikeDensity = 9.5;
+        private const double SpeedifyBorderlineLossRate = 0.11;
+        private const double SpeedifyRiskyLossRate = 0.23;
+        private const double SpeedifyBorderlineStaleRate = 0.07;
+        private const double SpeedifyRiskyStaleRate = 0.18;
+        private const double SpeedifyBorderlineBadRate = 0.16;
+        private const double SpeedifyRiskyBadRate = 0.30;
+
+        // Bounded Speedify influence
+        private const double MaxHealthySinglePositiveInfluence = 0.06;
+        private const double MaxHealthyBondedPositiveInfluence = 0.10;
 
         public static string GetCurrentTimeBucketKey(DateTime localTime)
         {
@@ -202,27 +247,11 @@ namespace WTFnetApp
                 Runtime = runtime
             };
 
-            if (runtime == null || runtime.Candidate == null)
+            if (!TryValidateMeasuredRuntimeForScoring(runtime, out string invalidReason))
             {
                 result.WarningLevel = ProbeWarningLevel.Risky;
                 result.WarningText = "unusable";
-                result.SummaryText = "unusable probe";
-                return result;
-            }
-
-            if (!runtime.ReachedUsableState || !runtime.MeasurementStarted)
-            {
-                result.WarningLevel = ProbeWarningLevel.Risky;
-                result.WarningText = "unusable";
-                result.SummaryText = runtime.DiscardReason ?? "unusable-before-measurement";
-                return result;
-            }
-
-            if (HasFundamentallyBrokenSamples(runtime))
-            {
-                result.WarningLevel = ProbeWarningLevel.Risky;
-                result.WarningText = "unusable";
-                result.SummaryText = "unusable-measurement-samples";
+                result.SummaryText = invalidReason;
                 return result;
             }
 
@@ -233,8 +262,22 @@ namespace WTFnetApp
             double lossRate = EffectiveLossRate(runtime.AvgLossRate);
             double staleRate = Safe(runtime.StaleRate);
             double badRate = Safe(runtime.AvgBadQualityRate);
+            double avgPing = Safe(runtime.AvgPingMs);
+            SpeedifyHealthBucket healthBucket = ClassifySpeedifyHealth(runtime);
+
+            double latencyModifier = GetLatencyPenaltyModifier(runtime, healthBucket);
+            double jitterModifier = GetJitterPenaltyModifier(runtime, healthBucket);
+            double spikeModifier = GetSpikePenaltyModifier(runtime, healthBucket);
+            double lossStaleModifier = GetLossStalePenaltyModifier(runtime, healthBucket);
+            double speedifyAdjustment = SpeedifyPenalty(runtime, healthBucket);
+            double confidencePenalty = ConfidencePenalty(runtime.AvgConfidence);
 
             result.JitterRangeMs = jitterRange;
+            result.SpeedifyLatencyModifier = latencyModifier;
+            result.SpeedifyJitterModifier = jitterModifier;
+            result.SpeedifySpikeModifier = spikeModifier;
+            result.SpeedifyLossStaleModifier = lossStaleModifier;
+            result.SpeedifyHealthLabel = GetSpeedifyHealthLabel(healthBucket);
 
             // Smoothness metric only. Lower is better.
             result.JitterStabilityScore =
@@ -243,18 +286,37 @@ namespace WTFnetApp
                 (spikeDensity * 0.45) +
                 (badRate * 12.0);
 
-            // Full comparison metric.
-            // Jitter and spike behavior dominate. Loss is only a secondary penalty now.
-            result.OverallStabilityScore =
-                (avgJitter * 1.90) +
-                (jitterRange * 1.15) +
-                (p95Ping * 0.16) +
-                (spikeDensity * 2.80) +
-                (badRate * 120.0) +
-                (lossRate * 45.0) +
-                (staleRate * 110.0) +
-                ConfidencePenalty(runtime.AvgConfidence) +
-                SpeedifyPenalty(runtime);
+            // Full comparison metric. FastPing base remains dominant, Speedify only corrects interpretation.
+            double latencyContribution = ((p95Ping * 0.10) + (avgPing * 0.05)) * latencyModifier;
+            double jitterContribution = ((avgJitter * 1.75) + (jitterRange * 1.05)) * jitterModifier;
+            double spikeContribution = (spikeDensity * 2.95) * spikeModifier;
+            double lossStaleBadContribution =
+                ((badRate * 112.0) + (lossRate * 42.0) + (staleRate * 102.0)) * lossStaleModifier;
+
+            double speedifyAdjustedScore =
+                latencyContribution +
+                jitterContribution +
+                spikeContribution +
+                lossStaleBadContribution +
+                confidencePenalty +
+                speedifyAdjustment;
+
+            double fastPingDominantScore =
+                ((p95Ping * 0.10) + (avgPing * 0.05)) +
+                ((avgJitter * 1.75) + (jitterRange * 1.05)) +
+                (spikeDensity * 2.95) +
+                ((badRate * 112.0) + (lossRate * 42.0) + (staleRate * 102.0)) +
+                confidencePenalty;
+
+            double cappedScore = ApplySpeedifyPositiveInfluenceCap(speedifyAdjustedScore, fastPingDominantScore, healthBucket, out double capApplied);
+
+            result.LatencyContribution = latencyContribution;
+            result.JitterContribution = jitterContribution;
+            result.SpikeContribution = spikeContribution;
+            result.LossStaleBadContribution = lossStaleBadContribution;
+            result.SpeedifyGlobalAdjustment = speedifyAdjustment;
+            result.SpeedifyPositiveInfluenceCapApplied = capApplied;
+            result.OverallStabilityScore = cappedScore;
 
             if (runtime.MeasurementStoppedEarly)
             {
@@ -389,21 +451,9 @@ namespace WTFnetApp
         {
             reason = null;
 
-            if (candidate == null || candidate.Runtime == null)
+            if (candidate == null || !TryValidateMeasuredRuntimeForScoring(candidate.Runtime, out string invalidReason))
             {
-                reason = "unusable probe";
-                return true;
-            }
-
-            if (!candidate.Runtime.ReachedUsableState || !candidate.Runtime.MeasurementStarted)
-            {
-                reason = "unusable-before-measurement";
-                return true;
-            }
-
-            if (HasFundamentallyBrokenSamples(candidate.Runtime))
-            {
-                reason = "unusable measurement samples";
+                reason = invalidReason ?? "unusable probe";
                 return true;
             }
 
@@ -659,6 +709,36 @@ namespace WTFnetApp
 
         private static ProbeWarningLevel ClassifyWarning(ProbeCandidateRuntimeData runtime)
         {
+            SpeedifyHealthBucket healthBucket = ClassifySpeedifyHealth(runtime);
+            bool isSpeedify = runtime?.Candidate != null && runtime.Candidate.Kind == ProbeCandidateKind.Speedify;
+
+            double avgJitterBorderline = isSpeedify ? SpeedifyBorderlineAvgJitterMs : BorderlineAvgJitterMs;
+            double avgJitterRisky = isSpeedify ? SpeedifyRiskyAvgJitterMs : RiskyAvgJitterMs;
+            double jitterRangeBorderline = isSpeedify ? SpeedifyBorderlineJitterRangeMs : BorderlineJitterRangeMs;
+            double jitterRangeRisky = isSpeedify ? SpeedifyRiskyJitterRangeMs : RiskyJitterRangeMs;
+            double p95Borderline = isSpeedify ? SpeedifyBorderlineP95PingMs : BorderlineP95PingMs;
+            double p95Risky = isSpeedify ? SpeedifyRiskyP95PingMs : RiskyP95PingMs;
+            double spikeBorderline = isSpeedify ? SpeedifyBorderlineSpikeDensity : BorderlineSpikeDensity;
+            double spikeRisky = isSpeedify ? SpeedifyRiskySpikeDensity : RiskySpikeDensity;
+            double lossBorderline = isSpeedify ? SpeedifyBorderlineLossRate : BorderlineLossRate;
+            double lossRisky = isSpeedify ? SpeedifyRiskyLossRate : RiskyLossRate;
+            double staleBorderline = isSpeedify ? SpeedifyBorderlineStaleRate : BorderlineStaleRate;
+            double staleRisky = isSpeedify ? SpeedifyRiskyStaleRate : RiskyStaleRate;
+            double badBorderline = isSpeedify ? SpeedifyBorderlineBadRate : BorderlineBadQualityRate;
+            double badRisky = isSpeedify ? SpeedifyRiskyBadRate : RiskyBadQualityRate;
+
+            if (healthBucket == SpeedifyHealthBucket.HealthyBonded)
+            {
+                spikeBorderline += 0.6;
+                spikeRisky += 0.8;
+                jitterRangeBorderline += 0.8;
+            }
+            else if (healthBucket == SpeedifyHealthBucket.Unhealthy)
+            {
+                spikeBorderline -= 0.3;
+                spikeRisky -= 0.4;
+            }
+
             double avgJitter = Safe(runtime.AvgJitterMs);
             double jitterRange = Safe(ComputeJitterRange(runtime));
             double p95Ping = Safe(runtime.P95PingMs);
@@ -668,25 +748,25 @@ namespace WTFnetApp
             double badRate = Safe(runtime.AvgBadQualityRate);
 
             bool risky =
-                avgJitter >= RiskyAvgJitterMs ||
-                jitterRange >= RiskyJitterRangeMs ||
-                p95Ping >= RiskyP95PingMs ||
-                spikeDensity >= RiskySpikeDensity ||
-                lossRate >= RiskyLossRate ||
-                staleRate >= RiskyStaleRate ||
-                badRate >= RiskyBadQualityRate;
+                avgJitter >= avgJitterRisky ||
+                jitterRange >= jitterRangeRisky ||
+                p95Ping >= p95Risky ||
+                spikeDensity >= spikeRisky ||
+                lossRate >= lossRisky ||
+                staleRate >= staleRisky ||
+                badRate >= badRisky;
 
             if (risky)
                 return ProbeWarningLevel.Risky;
 
             bool borderline =
-                avgJitter >= BorderlineAvgJitterMs ||
-                jitterRange >= BorderlineJitterRangeMs ||
-                p95Ping >= BorderlineP95PingMs ||
-                spikeDensity >= BorderlineSpikeDensity ||
-                lossRate >= BorderlineLossRate ||
-                staleRate >= BorderlineStaleRate ||
-                badRate >= BorderlineBadQualityRate;
+                avgJitter >= avgJitterBorderline ||
+                jitterRange >= jitterRangeBorderline ||
+                p95Ping >= p95Borderline ||
+                spikeDensity >= spikeBorderline ||
+                lossRate >= lossBorderline ||
+                staleRate >= staleBorderline ||
+                badRate >= badBorderline;
 
             if (borderline)
                 return ProbeWarningLevel.Borderline;
@@ -694,7 +774,7 @@ namespace WTFnetApp
             return ProbeWarningLevel.None;
         }
 
-        private static double SpeedifyPenalty(ProbeCandidateRuntimeData runtime)
+        private static double SpeedifyPenalty(ProbeCandidateRuntimeData runtime, SpeedifyHealthBucket healthBucket)
         {
             if (runtime == null || runtime.Candidate == null)
                 return 0.0;
@@ -702,18 +782,194 @@ namespace WTFnetApp
             if (runtime.Candidate.Kind == ProbeCandidateKind.Raw)
                 return 0.0;
 
-            double penalty = 0.0;
+            return healthBucket switch
+            {
+                SpeedifyHealthBucket.NoTelemetry => 3.5,
+                SpeedifyHealthBucket.Unhealthy => 12.0,
+                SpeedifyHealthBucket.HealthySingleLink => 0.0,
+                SpeedifyHealthBucket.HealthyBonded => -0.6,
+                _ => 0.0
+            };
+        }
 
-            if (!runtime.TunnelConnected)
-                penalty += 25.0;
+        private static SpeedifyHealthBucket ClassifySpeedifyHealth(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
+                return SpeedifyHealthBucket.NotApplicable;
 
-            if (runtime.AggregateCongested)
-                penalty += 10.0;
+            bool hasTelemetry = runtime.SpeedifyAggregateLatencyMs > 0 ||
+                                runtime.SpeedifyAggregateJitterMs > 0 ||
+                                runtime.SpeedifyReportedLatencyMs > 0 ||
+                                runtime.ActiveConnectionCount > 0;
+            if (!hasTelemetry)
+                return SpeedifyHealthBucket.NoTelemetry;
 
-            if (runtime.ActiveConnectionCount <= 0)
-                penalty += 8.0;
+            if (!runtime.TunnelConnected || runtime.ActiveConnectionCount <= 0 || runtime.AggregateCongested)
+                return SpeedifyHealthBucket.Unhealthy;
 
-            return penalty;
+            return runtime.ActiveConnectionCount >= 2
+                ? SpeedifyHealthBucket.HealthyBonded
+                : SpeedifyHealthBucket.HealthySingleLink;
+        }
+
+        private static double GetLatencyPenaltyModifier(ProbeCandidateRuntimeData runtime, SpeedifyHealthBucket healthBucket)
+        {
+            if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
+                return 1.0;
+
+            double fastLatency = Safe(runtime.P95PingMs) > 0 ? Safe(runtime.P95PingMs) : Safe(runtime.AvgPingMs);
+            double speedifyLatency = ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs);
+            double correlation = ComputeCorrelationModifier(
+                fastLatency,
+                speedifyLatency,
+                expectedOverheadRatio: 0.30,
+                healthyModifier: healthBucket == SpeedifyHealthBucket.HealthyBonded ? 0.86 : 0.90,
+                unhealthyModifier: 1.10);
+
+            double baseTolerance = healthBucket switch
+            {
+                SpeedifyHealthBucket.HealthyBonded => 0.92,
+                SpeedifyHealthBucket.HealthySingleLink => 0.96,
+                SpeedifyHealthBucket.Unhealthy => 1.08,
+                SpeedifyHealthBucket.NoTelemetry => 0.96,
+                _ => 1.0
+            };
+
+            return Clamp(baseTolerance * correlation, 0.68, 1.22);
+        }
+
+        private static double GetJitterPenaltyModifier(ProbeCandidateRuntimeData runtime, SpeedifyHealthBucket healthBucket)
+        {
+            if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
+                return 1.0;
+
+            double fastJitter = Safe(runtime.P95JitterMs) > 0 ? Safe(runtime.P95JitterMs) : Safe(runtime.AvgJitterMs);
+            double speedifyJitter = Safe(runtime.SpeedifyAggregateJitterMs);
+            double correlation = ComputeCorrelationModifier(
+                fastJitter,
+                speedifyJitter,
+                expectedOverheadRatio: 0.55,
+                healthyModifier: healthBucket == SpeedifyHealthBucket.HealthyBonded ? 0.84 : 0.90,
+                unhealthyModifier: 1.12);
+
+            double baseTolerance = healthBucket switch
+            {
+                SpeedifyHealthBucket.HealthyBonded => 0.93,
+                SpeedifyHealthBucket.HealthySingleLink => 0.97,
+                SpeedifyHealthBucket.Unhealthy => 1.08,
+                SpeedifyHealthBucket.NoTelemetry => 0.98,
+                _ => 1.0
+            };
+
+            return Clamp(baseTolerance * correlation, 0.70, 1.24);
+        }
+
+        private static double GetSpikePenaltyModifier(ProbeCandidateRuntimeData runtime, SpeedifyHealthBucket healthBucket)
+        {
+            if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
+                return 1.0;
+
+            bool lowSpike = Safe(runtime.SpikeDensityPerMinute) <= 4.0;
+            bool latencyHealthy = Safe(runtime.SpeedifyAggregateLatencyMs) > 0 && Safe(runtime.SpeedifyAggregateLatencyMs) <= 95.0;
+            bool jitterHealthy = Safe(runtime.SpeedifyAggregateJitterMs) > 0 && Safe(runtime.SpeedifyAggregateJitterMs) <= 20.0;
+
+            double modifier = healthBucket switch
+            {
+                SpeedifyHealthBucket.HealthyBonded => 0.76,
+                SpeedifyHealthBucket.HealthySingleLink => 0.86,
+                SpeedifyHealthBucket.Unhealthy => 1.18,
+                SpeedifyHealthBucket.NoTelemetry => 1.0,
+                _ => 1.0
+            };
+
+            if (healthBucket is SpeedifyHealthBucket.HealthyBonded or SpeedifyHealthBucket.HealthySingleLink)
+            {
+                if (latencyHealthy && jitterHealthy)
+                    modifier -= 0.05;
+                if (!lowSpike && runtime.AggregateCongested)
+                    modifier += 0.08;
+            }
+
+            return Clamp(modifier, 0.68, 1.28);
+        }
+
+        private static double GetLossStalePenaltyModifier(ProbeCandidateRuntimeData runtime, SpeedifyHealthBucket healthBucket)
+        {
+            if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
+                return 1.0;
+
+            double ugliness = Safe(runtime.StaleRate) + EffectiveLossRate(runtime.AvgLossRate) + Safe(runtime.AvgBadQualityRate);
+
+            double modifier = healthBucket switch
+            {
+                SpeedifyHealthBucket.HealthyBonded => ugliness < 0.45 ? 0.82 : 0.90,
+                SpeedifyHealthBucket.HealthySingleLink => ugliness < 0.45 ? 0.90 : 0.97,
+                SpeedifyHealthBucket.Unhealthy => ugliness > 0.35 ? 1.16 : 1.08,
+                SpeedifyHealthBucket.NoTelemetry => 0.98,
+                _ => 1.0
+            };
+
+            return Clamp(modifier, 0.76, 1.26);
+        }
+
+        private static double ComputeCorrelationModifier(
+            double fastMetric,
+            double speedifyMetric,
+            double expectedOverheadRatio,
+            double healthyModifier,
+            double unhealthyModifier)
+        {
+            if (fastMetric <= 0 || speedifyMetric <= 0)
+                return 1.0;
+
+            double expectedMax = speedifyMetric * (1.0 + Math.Max(0.0, expectedOverheadRatio));
+            if (fastMetric <= expectedMax)
+                return healthyModifier;
+
+            if (fastMetric >= expectedMax * 1.25)
+                return unhealthyModifier;
+
+            return 1.0;
+        }
+
+        private static double ChoosePositive(double first, double second)
+        {
+            if (first > 0)
+                return first;
+            if (second > 0)
+                return second;
+            return -1;
+        }
+
+        private static double Clamp(double value, double min, double max)
+        {
+            return Math.Max(min, Math.Min(max, value));
+        }
+
+        private static double ApplySpeedifyPositiveInfluenceCap(
+            double adjustedScore,
+            double fastPingDominantScore,
+            SpeedifyHealthBucket healthBucket,
+            out double capApplied)
+        {
+            capApplied = 0.0;
+
+            double maxPositiveInfluence = healthBucket switch
+            {
+                SpeedifyHealthBucket.HealthyBonded => MaxHealthyBondedPositiveInfluence,
+                SpeedifyHealthBucket.HealthySingleLink => MaxHealthySinglePositiveInfluence,
+                _ => 0.0
+            };
+
+            if (maxPositiveInfluence <= 0.0)
+                return adjustedScore;
+
+            double floor = fastPingDominantScore * (1.0 - maxPositiveInfluence);
+            if (adjustedScore >= floor)
+                return adjustedScore;
+
+            capApplied = floor - adjustedScore;
+            return floor;
         }
 
         private static double ComputeLearningAdjustment(
@@ -784,21 +1040,71 @@ namespace WTFnetApp
 
         private static string BuildSummary(ProbeCandidateRuntimeData runtime, ProbeScoreResult result)
         {
-            if (runtime.MeasurementStoppedEarly)
-                return "Measured early-stop | reason=" + (runtime.MeasurementStopReason ?? "catastrophic");
-
             string warning =
                 result.WarningLevel == ProbeWarningLevel.Risky ? "Risky" :
                 result.WarningLevel == ProbeWarningLevel.Borderline ? "Borderline" :
                 "Clean";
 
+            string measurementStatus = GetMeasurementStatusLabel(runtime);
+            string weakness = GetPrimaryInstabilityReason(result);
+            string speedifyState = runtime?.Candidate?.Kind == ProbeCandidateKind.Speedify
+                ? (result?.SpeedifyHealthLabel ?? "no telemetry")
+                : "raw baseline";
+
             return
+                measurementStatus + " | " +
                 warning +
+                " | weak=" + weakness +
+                " | spd=" + speedifyState +
                 " | j=" + F(runtime.AvgJitterMs) +
                 " jr=" + F(result.JitterRangeMs) +
                 " p95=" + F(runtime.P95PingMs) +
                 " spkD=" + F(runtime.SpikeDensityPerMinute) +
                 " loss=" + F(EffectiveLossRate(runtime.AvgLossRate) * 100.0);
+        }
+
+        public static string BuildScoreBreakdown(ProbeScoreResult result)
+        {
+            if (result == null)
+                return "breakdown=unavailable";
+
+            return "breakdown{lat=" + F(result.LatencyContribution) +
+                   ",jit=" + F(result.JitterContribution) +
+                   ",spk=" + F(result.SpikeContribution) +
+                   ",lsb=" + F(result.LossStaleBadContribution) +
+                   ",mLat=" + result.SpeedifyLatencyModifier.ToString("0.00") +
+                   ",mJit=" + result.SpeedifyJitterModifier.ToString("0.00") +
+                   ",mSpk=" + result.SpeedifySpikeModifier.ToString("0.00") +
+                   ",mLsb=" + result.SpeedifyLossStaleModifier.ToString("0.00") +
+                   ",adj=" + F(result.SpeedifyGlobalAdjustment) +
+                   ",cap=" + F(result.SpeedifyPositiveInfluenceCapApplied) +
+                   ",final=" + F(result.OverallStabilityScore) + "}";
+        }
+
+        private static string GetMeasurementStatusLabel(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null || !runtime.ReachedUsableState || !runtime.MeasurementStarted)
+                return "unusable";
+
+            if (runtime.MeasurementStoppedEarly)
+                return "measured-early-stop";
+
+            if (runtime.MeasurementCompleted)
+                return "measured-full";
+
+            return "measured-partial";
+        }
+
+        private static string GetSpeedifyHealthLabel(SpeedifyHealthBucket healthBucket)
+        {
+            return healthBucket switch
+            {
+                SpeedifyHealthBucket.NoTelemetry => "no telemetry",
+                SpeedifyHealthBucket.Unhealthy => "unhealthy",
+                SpeedifyHealthBucket.HealthySingleLink => "healthy single-link",
+                SpeedifyHealthBucket.HealthyBonded => "healthy bonded",
+                _ => "n/a"
+            };
         }
 
         private static string GetPrimaryInstabilityReason(ProbeScoreResult result)
@@ -854,6 +1160,31 @@ namespace WTFnetApp
                 return true;
 
             return false;
+        }
+
+        private static bool TryValidateMeasuredRuntimeForScoring(ProbeCandidateRuntimeData runtime, out string reason)
+        {
+            reason = null;
+
+            if (runtime == null || runtime.Candidate == null)
+            {
+                reason = "unusable probe";
+                return false;
+            }
+
+            if (!runtime.ReachedUsableState || !runtime.MeasurementStarted)
+            {
+                reason = runtime.DiscardReason ?? "unusable-before-measurement";
+                return false;
+            }
+
+            if (HasFundamentallyBrokenSamples(runtime))
+            {
+                reason = "unusable-measurement-samples";
+                return false;
+            }
+
+            return true;
         }
 
         private static double ComputeEarlyStopPenalty(string reason)
