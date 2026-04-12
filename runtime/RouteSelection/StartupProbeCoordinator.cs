@@ -16,6 +16,7 @@ namespace WTFnetApp
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
+        private DateTime transitionGraceUntilUtc = DateTime.MinValue;
 
         public StartupProbeCoordinator(
             Func<Task<bool>> disableSpeedifyAsync,
@@ -75,6 +76,16 @@ namespace WTFnetApp
                 return failed;
             }
 
+            await BeginTransitionGraceAsync("raw-disable", cancellationToken);
+
+            bool rawSettled =
+                await WaitForPlausibleSettleZoneAsync(
+                    rawCandidate,
+                    cancellationToken);
+
+            if (!rawSettled)
+                Log("startup-probe | raw settle zone timeout | proceeding cautiously");
+
             ProbeReadinessResult readiness =
                 await WaitForReadinessAsync(
                     routeKey: rawCandidate.RouteKey,
@@ -105,7 +116,7 @@ namespace WTFnetApp
             ProbeCandidateRuntimeData rawRuntime =
                 await captureProbeAsync(
                     rawCandidate,
-                    TimeSpan.Zero,
+                    timing.MeasurementStartGuard,
                     timing.ObserveDuration);
 
             rawRuntime.TimeBucketKey = timeBucket;
@@ -145,10 +156,19 @@ namespace WTFnetApp
                 if (!activated)
                 {
                     Log("startup-probe | discard | " + candidate + " | discardReason=activation failed");
-                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
-                    bool restored = await RestoreLeaderRouteAsync(leader, cancellationToken);
-                    if (!restored)
-                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
+                    continue;
+                }
+
+                await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
+
+                bool candidateSettled =
+                    await WaitForPlausibleSettleZoneAsync(
+                        candidate,
+                        cancellationToken);
+
+                if (!candidateSettled)
+                {
+                    Log("startup-probe | discard | " + candidate + " | discardReason=settle-zone-timeout");
                     continue;
                 }
 
@@ -177,13 +197,18 @@ namespace WTFnetApp
                 if (stabilized)
                     Log("candidate measure | " + candidate + " | started after stabilization");
                 else
-                    Log("candidate measure | " + candidate + " | started with fallback (stabilization timeout)");
+                {
+                    Log("candidate measure | " + candidate + " | skipped (stabilization timeout)");
+                }
 
-                ProbeCandidateRuntimeData runtime =
-                    await captureProbeAsync(
-                        candidate,
-                        TimeSpan.Zero,
-                        timing.ObserveDuration);
+                TimeSpan observeDuration = stabilized
+                    ? timing.ObserveDuration
+                    : timing.UnstableObserveDuration;
+
+                ProbeCandidateRuntimeData runtime = await captureProbeAsync(
+                    candidate,
+                    timing.MeasurementStartGuard,
+                    observeDuration);
 
                 runtime.TimeBucketKey = timeBucket;
                 runtime.StabilizationReached = stabilized;
@@ -194,14 +219,28 @@ namespace WTFnetApp
                     ? runtime.Notes
                     : AppendNote(runtime.Notes, "stabilization-timeout");
 
+                if (!stabilized)
+                {
+                    runtime.Notes = AppendNote(runtime.Notes, "unstable-for-run");
+                    runtime.IsValid = false;
+                }
+
                 ProbeScoreResult score = ProbeScoring.ScoreCandidate(runtime);
                 LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
                 score.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(score, candidateLearned);
 
-                Log("startup-probe | compare | " + candidate +
-                    " | composite=" + score.StartupSelectionScore.ToString("0.0") +
-                    " | stability=" + score.OverallStabilityScore.ToString("0.0") +
-                    " | warning=" + ProbeScoring.GetWarningLabel(score));
+                if (!runtime.IsValid)
+                {
+                    Log("startup-probe | compare | " + candidate +
+                        " | invalid/disregarded | warning=" + ProbeScoring.GetWarningLabel(score));
+                }
+                else
+                {
+                    Log("startup-probe | compare | " + candidate +
+                        " | composite=" + score.StartupSelectionScore.ToString("0.0") +
+                        " | stability=" + score.OverallStabilityScore.ToString("0.0") +
+                        " | warning=" + ProbeScoring.GetWarningLabel(score));
+                }
 
                 ProbeDiscardDecision discardDecision =
                     ProbeScoring.EvaluateDiscardDecision(score, rawScore, leader);
@@ -213,17 +252,21 @@ namespace WTFnetApp
                     score.IsDiscardedEarly = true;
                     output.AllResults.Add(score);
 
-                    Log("startup-probe | discard | " + candidate +
-                        " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
-                        " | " + ProbeScoring.BuildShortText(score) +
-                        " | overall=" + score.OverallStabilityScore.ToString("0.0") +
-                        " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
-                        " | explain=" + ProbeScoring.BuildRouteExplanation(score));
-
-                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
-                    bool restored = await RestoreLeaderRouteAsync(leader, cancellationToken);
-                    if (!restored)
-                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
+                    if (!runtime.IsValid)
+                    {
+                        Log("startup-probe | discard | " + candidate +
+                            " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
+                            " | invalid/disregarded");
+                    }
+                    else
+                    {
+                        Log("startup-probe | discard | " + candidate +
+                            " | discardReason=" + (discardDecision.ReasonCategory ?? "unknown") +
+                            " | " + ProbeScoring.BuildShortText(score) +
+                            " | overall=" + score.OverallStabilityScore.ToString("0.0") +
+                            " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                            " | explain=" + ProbeScoring.BuildRouteExplanation(score));
+                    }
                     continue;
                 }
 
@@ -243,10 +286,7 @@ namespace WTFnetApp
                 }
                 else
                 {
-                    Log("startup-probe | candidate lost -> restoring leader " + FormatLeaderLabel(leader));
-                    bool restored = await RestoreLeaderRouteAsync(leader, cancellationToken);
-                    if (!restored)
-                        return BuildUnreliableResult(output, leader, rawScore, "leader-restore-failed");
+                    Log("startup-probe | candidate lost | leader unchanged " + FormatLeaderLabel(leader));
                 }
 
                 Log("startup-probe | keep | " + candidate +
@@ -264,6 +304,10 @@ namespace WTFnetApp
             ProbeScoring.AssignSmoothestBadge(output.Shortlist);
 
             output.Winner = leader ?? rawScore;
+
+            bool finalRestore = await RestoreLeaderRouteAsync(output.Winner, cancellationToken);
+            if (!finalRestore)
+                return BuildUnreliableResult(output, output.Winner, rawScore, "winner-restore-failed");
 
             if (output.Winner != null)
                 output.Winner.IsWinner = true;
@@ -312,6 +356,12 @@ namespace WTFnetApp
                 cancellationToken.ThrowIfCancellationRequested();
 
                 DateTime nowUtc = DateTime.UtcNow;
+
+                if (IsWithinTransitionGrace(nowUtc))
+                {
+                    await Task.Delay(200, cancellationToken);
+                    continue;
+                }
 
                 if (nowUtc < earliestCheckUtc)
                 {
@@ -378,6 +428,12 @@ namespace WTFnetApp
 
                 DateTime nowUtc = DateTime.UtcNow;
 
+                if (IsWithinTransitionGrace(nowUtc))
+                {
+                    await Task.Delay(220, cancellationToken);
+                    continue;
+                }
+
                 if (nowUtc < earliestCheckUtc)
                 {
                     await Task.Delay(250, cancellationToken);
@@ -430,16 +486,25 @@ namespace WTFnetApp
             if (fastPingState.IsStale)
                 return false;
 
-            if (fastPingState.Confidence < 0.62)
+            if (fastPingState.Confidence < 0.52)
                 return false;
 
-            if (shortWindow.StaleRate > 0.10)
+            if (!fastPingState.PrimaryFresh && !fastPingState.SecondaryFresh)
                 return false;
 
-            if (shortWindow.SpikeDensityPerMinute > 6.0)
+            if (shortWindow.StaleRate > 0.22)
                 return false;
 
-            if (shortWindow.AvgJitterMs > 18.0)
+            if (shortWindow.SpikeDensityPerMinute > 14.0)
+                return false;
+
+            if (shortWindow.AvgJitterMs > 34.0)
+                return false;
+
+            if (shortWindow.AvgLossRate >= 0.45)
+                return false;
+
+            if (shortWindow.P95PingMs >= 900.0)
                 return false;
 
             return true;
@@ -454,6 +519,100 @@ namespace WTFnetApp
                 return suffix;
 
             return notes + " | " + suffix;
+        }
+
+        private async Task BeginTransitionGraceAsync(string reason, CancellationToken cancellationToken)
+        {
+            DateTime untilUtc = DateTime.UtcNow + timing.TransitionGrace;
+            transitionGraceUntilUtc = untilUtc;
+
+            Log("startup-probe | transition grace | " + reason +
+                " | " + timing.TransitionGrace.TotalMilliseconds.ToString("0") + "ms");
+
+            await Task.Delay(timing.TransitionGrace, cancellationToken);
+        }
+
+        private bool IsWithinTransitionGrace(DateTime nowUtc)
+        {
+            return nowUtc < transitionGraceUntilUtc;
+        }
+
+        private async Task<bool> WaitForPlausibleSettleZoneAsync(
+            ProbeCandidateDefinition candidate,
+            CancellationToken cancellationToken)
+        {
+            bool speedifyCandidate = candidate != null && candidate.Kind == ProbeCandidateKind.Speedify;
+
+            DateTime startedUtc = DateTime.UtcNow;
+            DateTime hardStopUtc = startedUtc + timing.SettleZoneMaxWait;
+            int stableChecks = 0;
+
+            string label = candidate != null ? candidate.ToString() : "unknown";
+            Log("startup-probe | settle zone | " + label + " | started");
+
+            while (DateTime.UtcNow < hardStopUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                FastPingState state = getFastPingState();
+                FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
+
+                bool settled = IsInPlausibleSettleZone(window, state, speedifyCandidate);
+                if (settled)
+                {
+                    stableChecks++;
+                    if (stableChecks >= timing.SettleZoneConsecutiveChecks)
+                    {
+                        double elapsed = (DateTime.UtcNow - startedUtc).TotalSeconds;
+                        Log("startup-probe | settle zone | " + label + " | reached after=" + elapsed.ToString("0.0") + "s");
+                        return true;
+                    }
+                }
+                else
+                {
+                    stableChecks = 0;
+                }
+
+                await Task.Delay(300, cancellationToken);
+            }
+
+            Log("startup-probe | settle zone | " + label + " | timeout");
+            return false;
+        }
+
+        private static bool IsInPlausibleSettleZone(
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window,
+            FastPingState state,
+            bool speedifyCandidate)
+        {
+            if (state == null || window == null || !window.IsValid)
+                return false;
+
+            if (state.IsStale)
+                return false;
+
+            if (!state.PrimaryFresh && !state.SecondaryFresh)
+                return false;
+
+            if (state.Confidence < 0.30)
+                return false;
+
+            if (speedifyCandidate)
+            {
+                if (window.StaleRate > 0.55)
+                    return false;
+
+                if (window.AvgLossRate > 0.70)
+                    return false;
+
+                if (window.SpikeDensityPerMinute > 20.0)
+                    return false;
+
+                if (window.AvgJitterMs > 60.0)
+                    return false;
+            }
+
+            return true;
         }
 
         private StartupProbeResult BuildUnreliableResult(
@@ -490,6 +649,8 @@ namespace WTFnetApp
             {
                 bool disabled = await disableSpeedifyAsync();
                 if (disabled)
+                    await BeginTransitionGraceAsync("restore-raw-leader", cancellationToken);
+                if (disabled)
                     Log("startup-probe | leader restored -> " + FormatLeaderLabel(leader));
                 else
                     Log("startup-probe | leader restore failed -> " + FormatLeaderLabel(leader));
@@ -497,6 +658,8 @@ namespace WTFnetApp
             }
 
             bool activated = await activateSpeedifyAsync(leader.Candidate.ConnectTarget);
+            if (activated)
+                await BeginTransitionGraceAsync("restore-speedify-leader:" + leader.Candidate.RouteKey, cancellationToken);
             if (activated)
                 Log("startup-probe | leader restored -> " + FormatLeaderLabel(leader));
             else
@@ -609,6 +772,11 @@ namespace WTFnetApp
         public TimeSpan StabilizeMinWait { get; set; } = TimeSpan.FromSeconds(2.5);
         public TimeSpan StabilizeMaxWait { get; set; } = TimeSpan.FromSeconds(16.0);
         public int StabilizeConsecutiveChecks { get; set; } = 3;
+        public TimeSpan TransitionGrace { get; set; } = TimeSpan.FromSeconds(1.6);
+        public TimeSpan SettleZoneMaxWait { get; set; } = TimeSpan.FromSeconds(8.0);
+        public int SettleZoneConsecutiveChecks { get; set; } = 3;
+        public TimeSpan MeasurementStartGuard { get; set; } = TimeSpan.FromSeconds(0.8);
+        public TimeSpan UnstableObserveDuration { get; set; } = TimeSpan.FromSeconds(2.0);
         public TimeSpan ObserveDuration { get; set; } = TimeSpan.FromSeconds(10.0);
 
         public static StartupProbeTimingConfig Default { get; } = new StartupProbeTimingConfig();
