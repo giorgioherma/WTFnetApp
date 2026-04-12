@@ -17,15 +17,29 @@ namespace WTFnetApp
             state.HasFastPing = hasFastPing;
             state.HasSpeedify = hasSpeedify;
 
-            bool speedifyFresh = IsSpeedifyFresh(snapshot);
+            bool speedifyFresh = hasSpeedify && IsSpeedifyFresh(snapshot);
             state.SpeedifyTelemetryFresh = speedifyFresh;
 
-            bool speedifyUsable =
+            bool speedifyValid =
                 hasSpeedify &&
                 speedifyFresh &&
                 snapshot.TunnelConnected &&
+                snapshot.ActiveConnectionCount > 0 &&
                 ChoosePositive(snapshot.AggregateLatencyMs, snapshot.LatencyMs, snapshot.Adapter1Latency) > 0;
 
+            if (hasSpeedify)
+            {
+                Logger.Log("speedify-check",
+                    "fresh=" + speedifyFresh +
+                    " | connected=" + snapshot.TunnelConnected +
+                    " | active=" + snapshot.ActiveConnectionCount +
+                    " | aggLat=" + snapshot.AggregateLatencyMs.ToString("0.0") +
+                    " | lat=" + snapshot.LatencyMs.ToString("0.0") +
+                    " | adapter1=" + snapshot.Adapter1Latency.ToString("0.0") +
+                    " | valid=" + speedifyValid);
+            }
+
+            bool speedifyUsable = speedifyValid;
             state.SpeedifyAvailable = speedifyUsable;
 
             if (hasSpeedify)

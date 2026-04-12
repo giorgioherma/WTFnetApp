@@ -96,6 +96,15 @@ namespace WTFnetApp
                     string guid = ReadString(row, "guid");
                     string protocol = ReadString(row, "protocol");
                     string key = BuildLinkKey(row);
+                    Logger.Log("speedify-conn-row",
+                        "guid=" + guid +
+                        " | protocol=" + protocol +
+                        " | builtKey=" + key +
+                        " | name=" + ReadString(row, "name") +
+                        " | isp=" + ReadString(row, "isp") +
+                        " | ltMs=" + ReadDoubleOrDefault(row, "ltMs", -1) +
+                        " | jtMs=" + ReadDoubleOrDefault(row, "jtMs", -1));
+
 
                     bool isAggregate = string.Equals(guid, "speedify", StringComparison.OrdinalIgnoreCase);
                     bool isProxy = string.Equals(protocol, "proxy", StringComparison.OrdinalIgnoreCase);
@@ -199,6 +208,15 @@ namespace WTFnetApp
             {
                 string guid = ReadString(row, "guid");
                 string key = BuildLinkKey(row);
+
+                Logger.Log("speedify-net-row",
+                    "guid=" + guid +
+                    " | builtKey=" + key +
+                    " | name=" + ReadString(row, "name") +
+                    " | isp=" + ReadString(row, "isp") +
+                    " | ip=" + ReadString(row, "ip") +
+                    " | type=" + ReadString(row, "type"));
+
                 SpeedifyLinkState link = GetOrCreateLink(key);
 
                 link.Guid = FirstNonEmpty(link.Guid, guid);

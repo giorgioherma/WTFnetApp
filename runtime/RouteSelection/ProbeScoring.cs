@@ -272,6 +272,30 @@ namespace WTFnetApp
             double speedifyAdjustment = SpeedifyPenalty(runtime, healthBucket);
             double confidencePenalty = ConfidencePenalty(runtime.AvgConfidence);
 
+            // ==========================================================
+            // SAFETY FIX:
+            // If Speedify telemetry is not truly valid, neutralize ALL
+            // Speedify influence so only FastPing drives scoring.
+            // ==========================================================
+            bool speedifyValid =
+                runtime.Candidate != null &&
+                runtime.Candidate.Kind == ProbeCandidateKind.Speedify &&
+                runtime.TunnelConnected &&
+                runtime.ActiveConnectionCount > 0 &&
+                !runtime.AggregateCongested &&
+                ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs) > 0;
+
+            if (!speedifyValid)
+            {
+                healthBucket = SpeedifyHealthBucket.NoTelemetry;
+
+                latencyModifier = 1.0;
+                jitterModifier = 1.0;
+                spikeModifier = 1.0;
+                lossStaleModifier = 1.0;
+                speedifyAdjustment = 0.0;
+            }
+
             result.JitterRangeMs = jitterRange;
             result.SpeedifyLatencyModifier = latencyModifier;
             result.SpeedifyJitterModifier = jitterModifier;
@@ -308,7 +332,11 @@ namespace WTFnetApp
                 ((badRate * 112.0) + (lossRate * 42.0) + (staleRate * 102.0)) +
                 confidencePenalty;
 
-            double cappedScore = ApplySpeedifyPositiveInfluenceCap(speedifyAdjustedScore, fastPingDominantScore, healthBucket, out double capApplied);
+            double cappedScore = ApplySpeedifyPositiveInfluenceCap(
+                speedifyAdjustedScore,
+                fastPingDominantScore,
+                healthBucket,
+                out double capApplied);
 
             result.LatencyContribution = latencyContribution;
             result.JitterContribution = jitterContribution;
@@ -419,7 +447,6 @@ namespace WTFnetApp
             string failFastReason;
             if (TryGetFailFastDiscardReason(candidate, out failFastReason))
             {
-                // Hard reject only for clearly unhealthy probes.
                 decision.ShouldDiscard = true;
                 decision.ReasonCategory = failFastReason;
                 return decision;
@@ -429,7 +456,6 @@ namespace WTFnetApp
                 baseline.WarningLevel != ProbeWarningLevel.Risky &&
                 candidate.StartupSelectionScore > baseline.StartupSelectionScore + 28.0)
             {
-                // Conservative guardrail against obviously worse-than-raw probes.
                 decision.ShouldDiscard = true;
                 decision.ReasonCategory = "worse than raw baseline";
                 return decision;
@@ -438,7 +464,6 @@ namespace WTFnetApp
             if (currentLeader != null &&
                 candidate.StartupSelectionScore > currentLeader.StartupSelectionScore + 30.0)
             {
-                // Conservative guardrail against obviously worse-than-held-leader probes.
                 decision.ShouldDiscard = true;
                 decision.ReasonCategory = "worse than current leader";
                 return decision;
@@ -1025,12 +1050,12 @@ namespace WTFnetApp
             double safeLoss = Safe(lossRate);
 
             if (safeLoss <= 0.00) return 0.0;
-            if (safeLoss <= 0.03) return 0.0;     // ignore tiny probe noise
-            if (safeLoss <= 0.06) return 0.02;    // very light penalty
-            if (safeLoss <= 0.10) return 0.05;    // moderate
-            if (safeLoss <= 0.15) return 0.10;    // more serious
+            if (safeLoss <= 0.03) return 0.0;
+            if (safeLoss <= 0.06) return 0.02;
+            if (safeLoss <= 0.10) return 0.05;
+            if (safeLoss <= 0.15) return 0.10;
 
-            return safeLoss;                      // real sustained loss
+            return safeLoss;
         }
 
         private static double ConfidencePenalty(double confidence)

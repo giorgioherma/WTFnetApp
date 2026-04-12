@@ -14,6 +14,10 @@ namespace WTFnetApp
         private const int SpeedifyWsPort = 9330;
         private const string SpeedifyWsPath = "/";
 
+        private const bool LogAllIncomingMessages = true;
+        private const bool LogAllParsedEvents = true;
+        private const bool LogParserOutput = true;
+
         private ClientWebSocket ws;
         private volatile bool running;
 
@@ -140,6 +144,45 @@ namespace WTFnetApp
             }
         }
 
+        private void LogParserState(string eventName, MetricsSnapshot snap)
+        {
+            var state = parser.CurrentStructuredState;
+            if (state == null)
+                return;
+
+            Logger.Log("speedify-state",
+                "after=" + eventName +
+                " | links=" + state.Links.Count +
+                " | hasConn=" + state.HasConnectionStats +
+                " | hasNet=" + state.HasNetworks +
+                " | hasSess=" + state.HasSessionStats +
+                " | tunnel=" + state.Tunnel.Connected +
+                " | aggLat=" + state.Tunnel.LatencyMs);
+
+            foreach (var link in state.Links)
+            {
+                Logger.Log("speedify-link",
+                    "key=" + link.Key +
+                    " | guid=" + link.Guid +
+                    " | name=" + link.Name +
+                    " | proto=" + link.Protocol +
+                    " | lat=" + link.LatencyMs +
+                    " | jit=" + link.JitterMs +
+                    " | rx=" + link.RxBps +
+                    " | tx=" + link.TxBps);
+            }
+
+            if (snap != null)
+            {
+                Logger.Log("speedify-snapshot",
+                    "event=" + eventName +
+                    " | aggLat=" + snap.AggregateLatencyMs +
+                    " | aggJit=" + snap.AggregateJitterMs +
+                    " | links=" + snap.Links.Count +
+                    " | warnings=" + snap.ParseWarningCount);
+            }
+        }
+
         private async Task SendRequests(ClientWebSocket socket, params string[] requestNames)
         {
             foreach (string requestName in requestNames)
@@ -178,6 +221,9 @@ namespace WTFnetApp
                 if (string.IsNullOrWhiteSpace(rawMessage))
                     continue;
 
+                if (LogAllIncomingMessages)
+                    Logger.Log("speedify-raw-in", rawMessage);
+
                 try
                 {
                     string eventName;
@@ -185,6 +231,12 @@ namespace WTFnetApp
 
                     if (!TryParseSpeedifyMessage(rawMessage, out eventName, out payloadJson))
                         continue;
+                    
+                    if (LogAllParsedEvents)
+                    {
+                        Logger.Log("speedify-event", eventName);
+                        Logger.Log("speedify-payload", payloadJson);
+                    }
 
                     if (!seenEventNames.Contains(eventName))
                     {
@@ -209,6 +261,10 @@ namespace WTFnetApp
                     }
 
                     MetricsSnapshot snap = parser.ParseEvent(eventName, payloadJson);
+
+                    if (LogParserOutput)
+                        LogParserState(eventName, snap);
+
                     if (snap != null && onSnapshot != null)
                         onSnapshot(snap);
                 }
