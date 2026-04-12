@@ -104,6 +104,9 @@ namespace WTFnetApp
 
         public bool StabilizationReached { get; set; }
         public bool StabilizationTimedOut { get; set; }
+
+        public ProbeReadinessKind ReadinessKind { get; set; } = ProbeReadinessKind.NotReady;
+        public string ReadinessReason { get; set; }
     }
 
     public sealed class ProbeScoreResult
@@ -269,14 +272,6 @@ namespace WTFnetApp
 
             best.Badge = ProbeBadgeKind.Smoothest;
             best.BadgeText = "Smoothest";
-        }
-
-        public static bool ShouldDiscardEarly(
-            ProbeScoreResult candidate,
-            ProbeScoreResult baseline,
-            ProbeScoreResult currentLeader)
-        {
-            return EvaluateDiscardDecision(candidate, baseline, currentLeader).ShouldDiscard;
         }
 
         public static ProbeDiscardDecision EvaluateDiscardDecision(
@@ -560,9 +555,10 @@ namespace WTFnetApp
                 return result;
             }
 
-            double gap = 30.0;
-            if (runnerUp != null)
-                gap = Math.Max(0.0, runnerUp.OverallStabilityScore - winner.OverallStabilityScore);
+            bool missingRunnerUp = runnerUp == null;
+            double gap = runnerUp != null
+                ? Math.Max(0.0, runnerUp.OverallStabilityScore - winner.OverallStabilityScore)
+                : 0.0;
 
             result.GapToRunnerUpScore = gap;
 
@@ -571,7 +567,9 @@ namespace WTFnetApp
                 gap >= 14.0 ? 34.0 :
                 gap >= 8.0 ? 22.0 :
                 gap >= 4.0 ? 12.0 :
-                4.0;
+                2.0;
+
+            double comparisonPenalty = missingRunnerUp ? 14.0 : 0.0;
 
             double confidence = Safe(winner.Runtime.AvgConfidence);
             double samplePoints =
@@ -610,19 +608,28 @@ namespace WTFnetApp
                 winner.WarningLevel == ProbeWarningLevel.Borderline ? 12.0 :
                 0.0;
 
-            double finalScore = gapPoints + samplePoints + learningPoints - stalePenalty - warningPenalty;
+            double finalScore = gapPoints + samplePoints + learningPoints - stalePenalty - warningPenalty - comparisonPenalty;
+
+            if (missingRunnerUp)
+                finalScore = Math.Min(finalScore, 60.0);
+
             finalScore = Math.Max(0.0, Math.Min(100.0, finalScore));
 
             result.ConfidenceScore = finalScore;
 
-            if (finalScore >= 72.0 && gap >= 8.0 && winner.WarningLevel == ProbeWarningLevel.None)
+            if (!missingRunnerUp &&
+                finalScore >= 72.0 &&
+                gap >= 8.0 &&
+                winner.WarningLevel == ProbeWarningLevel.None)
                 result.Kind = ProbeWinnerConfidenceKind.HighConfidence;
-            else if (finalScore >= 45.0 && gap >= 3.0)
+            else if (!missingRunnerUp && finalScore >= 45.0 && gap >= 3.0)
                 result.Kind = ProbeWinnerConfidenceKind.Tentative;
             else
                 result.Kind = ProbeWinnerConfidenceKind.NoClearWinner;
 
-            string gapText = gap >= 8.0 ? "clear lead" : gap >= 3.0 ? "narrow lead" : "near tie";
+            string gapText = missingRunnerUp
+                ? "runner-up unavailable"
+                : gap >= 8.0 ? "clear lead" : gap >= 3.0 ? "narrow lead" : "near tie";
             string sampleText = confidence >= 0.70 ? "good sample quality" : "limited sample quality";
             string staleText = stalePenalty > 0 ? "stale penalty applied" : "fresh samples";
 

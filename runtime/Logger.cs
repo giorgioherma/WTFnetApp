@@ -174,6 +174,9 @@ namespace WTFnetApp
             }
 
             WriteLine(line);
+
+            if (IsStartupDebugCategory(category))
+                WriteSpeedifyDebugLine(line);
         }
 
         public static void LogCritical(string message)
@@ -748,6 +751,14 @@ namespace WTFnetApp
                 default:
                     return false;
             }
+        }
+
+        private static bool IsStartupDebugCategory(string category)
+        {
+            return string.Equals(
+                category?.Trim(),
+                "startup",
+                StringComparison.OrdinalIgnoreCase);
         }
 
         private static int GetRateBucket(double value)

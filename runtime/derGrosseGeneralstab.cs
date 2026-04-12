@@ -64,8 +64,16 @@ namespace WTFnetApp
         // PROBE TIMING
         // =========================
 
-        private const int RawBaselineObserveMs = 12000;
-        private const int CandidateObserveMs = 10000;
+        private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
+        {
+            ReadinessMinWait = TimeSpan.FromSeconds(4.0),
+            ReadinessMaxWait = TimeSpan.FromSeconds(10.0),
+            ReadinessConsecutiveChecks = 3,
+            StabilizeMinWait = TimeSpan.FromSeconds(2.5),
+            StabilizeMaxWait = TimeSpan.FromSeconds(16.0),
+            StabilizeConsecutiveChecks = 3,
+            ObserveDuration = TimeSpan.FromSeconds(10.0)
+        };
 
         // =========================
         // CONSTRUCTOR
@@ -135,6 +143,7 @@ namespace WTFnetApp
                 getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
                 captureProbeAsync: CaptureProbeRuntimeAsync,
                 learningStore: probeLearningStore,
+                timing: StartupProbeTiming,
                 log: message => Logger.Log("startup", message));
         }
 
@@ -165,8 +174,11 @@ namespace WTFnetApp
                 if (snapshot == null)
                     return;
 
-                lastSnapshot = snapshot;
-                lastSpeedifySnapshotUtc = DateTime.UtcNow;
+                lock (publishSync)
+                {
+                    lastSnapshot = snapshot;
+                    lastSpeedifySnapshotUtc = DateTime.UtcNow;
+                }
 
                 // Keep comparison fair: always same external targets
                 UpdateFastPingTargetsIfChanged(FixedPrimaryProbeTarget, FixedSecondaryProbeTarget);
@@ -382,7 +394,8 @@ namespace WTFnetApp
             StartupApplyDecision applyDecision = BuildStartupApplyDecision(lastStartupProbeResult);
             Logger.Log("startup",
                 "applyDecision=" + applyDecision.Kind +
-                " | reason=" + applyDecision.Reason);
+                " | reason=" + applyDecision.Reason +
+                " | " + BuildApplyDecisionDebugContext(lastStartupProbeResult));
 
             if (applyDecision.Kind == StartupApplyDecisionKind.ApplyWinner)
             {
@@ -640,30 +653,128 @@ namespace WTFnetApp
                 };
             }
 
-            if (confidenceKind == ProbeWinnerConfidenceKind.NoClearWinner &&
-                (winnerFallbackStabilization || rawFallbackStabilization))
+            bool winnerRisky = result.Winner.WarningLevel == ProbeWarningLevel.Risky;
+            bool winnerBorderline = result.Winner.WarningLevel == ProbeWarningLevel.Borderline;
+            bool winnerIsRaw = result.Winner.Candidate != null &&
+                               result.Winner.Candidate.Kind == ProbeCandidateKind.Raw;
+
+            if (winnerRisky)
             {
                 return new StartupApplyDecision
                 {
-                    Kind = StartupApplyDecisionKind.KeepRaw,
-                    Reason = "no clear winner + weak stabilization"
+                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "winner marked risky"
                 };
             }
 
-            if (confidenceKind == ProbeWinnerConfidenceKind.Tentative && winnerFallbackStabilization)
+            if (confidenceKind == ProbeWinnerConfidenceKind.NoClearWinner)
             {
                 return new StartupApplyDecision
                 {
-                    Kind = StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "tentative winner + fallback stabilization"
+                    Kind = result.Baseline != null ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "no clear winner"
+                };
+            }
+
+            if (!winnerCleanStabilization)
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "winner stabilization not clean"
+                };
+            }
+
+            if (winnerFallbackStabilization || rawFallbackStabilization)
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "fallback stabilization detected"
+                };
+            }
+
+            if (confidenceKind == ProbeWinnerConfidenceKind.Tentative)
+            {
+                double baselineGap = result.Baseline != null
+                    ? result.Baseline.OverallStabilityScore - result.Winner.OverallStabilityScore
+                    : 0.0;
+
+                bool meaningfulAdvantage =
+                    result.WinnerConfidence != null &&
+                    result.WinnerConfidence.GapToRunnerUpScore >= 12.0 &&
+                    baselineGap >= 8.0;
+
+                if (meaningfulAdvantage &&
+                    result.Winner.WarningLevel == ProbeWarningLevel.None &&
+                    !result.Winner.IsDiscardedEarly)
+                {
+                    return new StartupApplyDecision
+                    {
+                        Kind = StartupApplyDecisionKind.ApplyWinner,
+                        Reason = "tentative but meaningful clean advantage"
+                    };
+                }
+
+                return new StartupApplyDecision
+                {
+                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "tentative winner without strong safe advantage"
+                };
+            }
+
+            if (winnerBorderline)
+            {
+                return new StartupApplyDecision
+                {
+                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "borderline winner held back"
                 };
             }
 
             return new StartupApplyDecision
             {
-                Kind = StartupApplyDecisionKind.ApplyWinner,
-                Reason = "default apply path"
+                Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                Reason = "conservative default hold"
             };
+        }
+
+        private static string BuildApplyDecisionDebugContext(StartupProbeResult result)
+        {
+            if (result == null)
+                return "decisionInputs=none";
+
+            ProbeScoreResult winner = result.Winner;
+            ProbeCandidateRuntimeData runtime = winner?.Runtime;
+
+            string winnerName = winner?.Candidate?.ToString() ?? "none";
+            string confidenceKind = result.WinnerConfidence?.Kind.ToString() ?? "NoClearWinner";
+            string confidenceScore = result.WinnerConfidence != null
+                ? result.WinnerConfidence.ConfidenceScore.ToString("0.0")
+                : "--";
+            string warning = winner != null ? winner.WarningLevel.ToString() : "None";
+            string stabilized = runtime != null && runtime.StabilizationReached ? "yes" : "no";
+            string fallback = runtime != null && runtime.StabilizationTimedOut ? "yes" : "no";
+
+            string baselineGap = "--";
+            if (winner != null && result.Baseline != null)
+            {
+                baselineGap = (result.Baseline.OverallStabilityScore - winner.OverallStabilityScore)
+                    .ToString("0.0");
+            }
+
+            string runnerUpGap = result.WinnerConfidence != null
+                ? result.WinnerConfidence.GapToRunnerUpScore.ToString("0.0")
+                : "--";
+
+            return "winner=" + winnerName +
+                   " | confidence=" + confidenceKind +
+                   "@" + confidenceScore +
+                   " | warning=" + warning +
+                   " | stabilized=" + stabilized +
+                   " | fallback=" + fallback +
+                   " | baselineGap=" + baselineGap +
+                   " | runnerUpGap=" + runnerUpGap;
         }
 
         private enum StartupApplyDecisionKind
@@ -766,16 +877,25 @@ namespace WTFnetApp
 
         private bool HasRecentSpeedifySnapshot()
         {
-            if (lastSnapshot == null)
+            MetricsSnapshot snapshot;
+            DateTime speedifySnapshotUtc;
+
+            lock (publishSync)
+            {
+                snapshot = lastSnapshot;
+                speedifySnapshotUtc = lastSpeedifySnapshotUtc;
+            }
+
+            if (snapshot == null)
                 return false;
 
-            if (lastSnapshot.TimeUtc == DateTime.MinValue)
+            if (snapshot.TimeUtc == DateTime.MinValue)
                 return false;
 
-            if (lastSpeedifySnapshotUtc == DateTime.MinValue)
+            if (speedifySnapshotUtc == DateTime.MinValue)
                 return false;
 
-            double ageMs = (DateTime.UtcNow - lastSpeedifySnapshotUtc).TotalMilliseconds;
+            double ageMs = (DateTime.UtcNow - speedifySnapshotUtc).TotalMilliseconds;
             return ageMs >= 0 && ageMs <= 3000;
         }
 
@@ -852,13 +972,19 @@ namespace WTFnetApp
 
         private bool IsSpeedifyCurrentlyConnected()
         {
-            if (lastSnapshot == null)
+            MetricsSnapshot snapshot;
+            lock (publishSync)
+            {
+                snapshot = lastSnapshot;
+            }
+
+            if (snapshot == null)
                 return false;
 
             if (!HasRecentSpeedifySnapshot())
                 return false;
 
-            return lastSnapshot.TunnelConnected;
+            return snapshot.TunnelConnected;
         }
 
         private async Task<ProbeCandidateRuntimeData> CaptureProbeRuntimeAsync(
@@ -882,7 +1008,11 @@ namespace WTFnetApp
 
             FastPingState fastPingState = fastPing.GetState();
             UnifiedNetworkState unified = GetLastUnifiedState();
-            MetricsSnapshot snapshot = lastSnapshot;
+            MetricsSnapshot snapshot;
+            lock (publishSync)
+            {
+                snapshot = lastSnapshot;
+            }
 
             ProbeCandidateRuntimeData runtime = new ProbeCandidateRuntimeData
             {
@@ -1009,7 +1139,138 @@ namespace WTFnetApp
 
         public StartupProbeResult GetLastStartupProbeResult()
         {
-            return lastStartupProbeResult;
+            return CloneStartupProbeResult(lastStartupProbeResult);
+        }
+
+        private static StartupProbeResult CloneStartupProbeResult(StartupProbeResult source)
+        {
+            if (source == null)
+                return null;
+
+            Dictionary<ProbeScoreResult, ProbeScoreResult> scoreMap =
+                new Dictionary<ProbeScoreResult, ProbeScoreResult>();
+
+            List<ProbeScoreResult> clonedAllResults = CloneProbeScoreList(source.AllResults, scoreMap);
+            List<ProbeScoreResult> clonedShortlist = CloneProbeScoreList(source.Shortlist, scoreMap);
+
+            return new StartupProbeResult
+            {
+                RawReadiness = source.RawReadiness == null
+                    ? null
+                    : new ProbeReadinessResult
+                    {
+                        Kind = source.RawReadiness.Kind,
+                        Reason = source.RawReadiness.Reason
+                    },
+                Baseline = GetOrCloneProbeScoreResult(source.Baseline, scoreMap),
+                Winner = GetOrCloneProbeScoreResult(source.Winner, scoreMap),
+                AllResults = clonedAllResults,
+                Shortlist = clonedShortlist,
+                WinnerConfidence = source.WinnerConfidence == null
+                    ? null
+                    : new ProbeWinnerConfidenceResult
+                    {
+                        Kind = source.WinnerConfidence.Kind,
+                        ConfidenceScore = source.WinnerConfidence.ConfidenceScore,
+                        Reason = source.WinnerConfidence.Reason,
+                        GapToRunnerUpScore = source.WinnerConfidence.GapToRunnerUpScore
+                    },
+                SummaryText = source.SummaryText
+            };
+        }
+
+        private static List<ProbeScoreResult> CloneProbeScoreList(
+            List<ProbeScoreResult> source,
+            Dictionary<ProbeScoreResult, ProbeScoreResult> scoreMap)
+        {
+            if (source == null)
+                return new List<ProbeScoreResult>();
+
+            List<ProbeScoreResult> cloned = new List<ProbeScoreResult>(source.Count);
+            foreach (ProbeScoreResult item in source)
+                cloned.Add(GetOrCloneProbeScoreResult(item, scoreMap));
+
+            return cloned;
+        }
+
+        private static ProbeScoreResult GetOrCloneProbeScoreResult(
+            ProbeScoreResult source,
+            Dictionary<ProbeScoreResult, ProbeScoreResult> scoreMap)
+        {
+            if (source == null)
+                return null;
+
+            ProbeScoreResult existing;
+            if (scoreMap.TryGetValue(source, out existing))
+                return existing;
+
+            ProbeScoreResult cloned = new ProbeScoreResult
+            {
+                Candidate = CloneCandidateDefinition(source.Candidate),
+                Runtime = CloneProbeRuntime(source.Runtime),
+                OverallStabilityScore = source.OverallStabilityScore,
+                JitterStabilityScore = source.JitterStabilityScore,
+                WarningLevel = source.WarningLevel,
+                Badge = source.Badge,
+                IsDiscardedEarly = source.IsDiscardedEarly,
+                IsShortlisted = source.IsShortlisted,
+                IsWinner = source.IsWinner,
+                SummaryText = source.SummaryText,
+                WarningText = source.WarningText,
+                BadgeText = source.BadgeText,
+                JitterRangeMs = source.JitterRangeMs
+            };
+
+            scoreMap[source] = cloned;
+            return cloned;
+        }
+
+        private static ProbeCandidateRuntimeData CloneProbeRuntime(ProbeCandidateRuntimeData source)
+        {
+            if (source == null)
+                return null;
+
+            return new ProbeCandidateRuntimeData
+            {
+                Candidate = CloneCandidateDefinition(source.Candidate),
+                TimeBucketKey = source.TimeBucketKey,
+                AvgPingMs = source.AvgPingMs,
+                MaxPingMs = source.MaxPingMs,
+                P95PingMs = source.P95PingMs,
+                AvgJitterMs = source.AvgJitterMs,
+                MinJitterMs = source.MinJitterMs,
+                MaxJitterMs = source.MaxJitterMs,
+                P95JitterMs = source.P95JitterMs,
+                AvgLossRate = source.AvgLossRate,
+                AvgBadQualityRate = source.AvgBadQualityRate,
+                AvgConfidence = source.AvgConfidence,
+                SpikeDensityPerMinute = source.SpikeDensityPerMinute,
+                StaleRate = source.StaleRate,
+                TunnelConnected = source.TunnelConnected,
+                AggregateCongested = source.AggregateCongested,
+                ActiveConnectionCount = source.ActiveConnectionCount,
+                BackupConnectionCount = source.BackupConnectionCount,
+                IsValid = source.IsValid,
+                Notes = source.Notes,
+                StabilizationReached = source.StabilizationReached,
+                StabilizationTimedOut = source.StabilizationTimedOut,
+                ReadinessKind = source.ReadinessKind,
+                ReadinessReason = source.ReadinessReason
+            };
+        }
+
+        private static ProbeCandidateDefinition CloneCandidateDefinition(ProbeCandidateDefinition source)
+        {
+            if (source == null)
+                return null;
+
+            return new ProbeCandidateDefinition
+            {
+                RouteKey = source.RouteKey,
+                DisplayName = source.DisplayName,
+                ConnectTarget = source.ConnectTarget,
+                Kind = source.Kind
+            };
         }
 
         // =========================

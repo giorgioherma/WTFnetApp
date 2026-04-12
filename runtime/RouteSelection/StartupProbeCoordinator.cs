@@ -8,16 +8,13 @@ namespace WTFnetApp
 {
     public sealed class StartupProbeCoordinator
     {
-        private static readonly TimeSpan CandidateStabilizeMinWait = TimeSpan.FromSeconds(2.5);
-        private static readonly TimeSpan CandidateStabilizeMaxWait = TimeSpan.FromSeconds(16.0);
-        private const int CandidateStabilizeConsecutiveChecks = 3;
-
         private readonly Func<Task<bool>> disableSpeedifyAsync;
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly ServerProbeLearningStore learningStore;
+        private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
 
         public StartupProbeCoordinator(
@@ -27,6 +24,7 @@ namespace WTFnetApp
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             ServerProbeLearningStore learningStore,
+            StartupProbeTimingConfig timing = null,
             Action<string> log = null)
         {
             this.disableSpeedifyAsync = disableSpeedifyAsync ?? throw new ArgumentNullException(nameof(disableSpeedifyAsync));
@@ -35,6 +33,7 @@ namespace WTFnetApp
             this.getShortWindowSnapshot = getShortWindowSnapshot ?? throw new ArgumentNullException(nameof(getShortWindowSnapshot));
             this.captureProbeAsync = captureProbeAsync ?? throw new ArgumentNullException(nameof(captureProbeAsync));
             this.learningStore = learningStore ?? throw new ArgumentNullException(nameof(learningStore));
+            this.timing = timing ?? StartupProbeTimingConfig.Default;
             this.log = log;
         }
 
@@ -80,11 +79,16 @@ namespace WTFnetApp
                 await WaitForReadinessAsync(
                     routeKey: rawCandidate.RouteKey,
                     timeBucketKey: timeBucket,
-                    minWait: TimeSpan.FromSeconds(4),
-                    maxWait: TimeSpan.FromSeconds(12),
+                    minWait: timing.ReadinessMinWait,
+                    maxWait: timing.ReadinessMaxWait,
                     cancellationToken: cancellationToken);
 
             output.RawReadiness = readiness;
+            learningStore.UpdateFromReadinessSnapshot(
+                rawCandidate.RouteKey,
+                timeBucket,
+                getShortWindowSnapshot(),
+                readiness.Kind);
 
             Log("startup-probe | raw readiness | " + readiness.Kind + " | " + readiness.Reason);
 
@@ -102,11 +106,13 @@ namespace WTFnetApp
                 await captureProbeAsync(
                     rawCandidate,
                     TimeSpan.Zero,
-                    TimeSpan.FromSeconds(12));
+                    timing.ObserveDuration);
 
             rawRuntime.TimeBucketKey = timeBucket;
             rawRuntime.StabilizationReached = rawStabilized;
             rawRuntime.StabilizationTimedOut = !rawStabilized;
+            rawRuntime.ReadinessKind = readiness.Kind;
+            rawRuntime.ReadinessReason = readiness.Reason;
             rawRuntime.Notes = rawStabilized
                 ? rawRuntime.Notes
                 : AppendNote(rawRuntime.Notes, "raw-stabilization-timeout");
@@ -118,6 +124,7 @@ namespace WTFnetApp
             output.AllResults.Add(rawScore);
             output.Shortlist.Add(rawScore);
 
+            List<ProbeScoreResult> keptRankedResults = new List<ProbeScoreResult> { rawScore };
             ProbeScoreResult leader = rawScore;
 
             foreach (ProbeCandidateDefinition candidate in ordered)
@@ -143,9 +150,15 @@ namespace WTFnetApp
                     await WaitForReadinessAsync(
                         routeKey: candidate.RouteKey,
                         timeBucketKey: timeBucket,
-                        minWait: TimeSpan.FromSeconds(4),
-                        maxWait: TimeSpan.FromSeconds(10),
+                        minWait: timing.ReadinessMinWait,
+                        maxWait: timing.ReadinessMaxWait,
                         cancellationToken: cancellationToken);
+
+                learningStore.UpdateFromReadinessSnapshot(
+                    candidate.RouteKey,
+                    timeBucket,
+                    getShortWindowSnapshot(),
+                    candidateReadiness.Kind);
 
                 Log("startup-probe | candidate readiness | " + candidate +
                     " | " + candidateReadiness.Kind + " | " + candidateReadiness.Reason);
@@ -164,11 +177,13 @@ namespace WTFnetApp
                     await captureProbeAsync(
                         candidate,
                         TimeSpan.Zero,
-                        TimeSpan.FromSeconds(10));
+                        timing.ObserveDuration);
 
                 runtime.TimeBucketKey = timeBucket;
                 runtime.StabilizationReached = stabilized;
                 runtime.StabilizationTimedOut = !stabilized;
+                runtime.ReadinessKind = candidateReadiness.Kind;
+                runtime.ReadinessReason = candidateReadiness.Reason;
                 runtime.Notes = stabilized
                     ? runtime.Notes
                     : AppendNote(runtime.Notes, "stabilization-timeout");
@@ -196,12 +211,14 @@ namespace WTFnetApp
                 }
 
                 output.AllResults.Add(score);
+                keptRankedResults.Add(score);
                 score.IsShortlisted = true;
                 output.Shortlist.Add(score);
 
-                TrimShortlist(output.Shortlist, 3);
+                // Display shortlist: top performers with raw baseline pinned for fallback comparison visibility.
+                TrimDisplayShortlistKeepingRaw(output.Shortlist, 3, rawScore);
 
-                leader = output.Shortlist
+                leader = keptRankedResults
                     .OrderBy(x => x.OverallStabilityScore)
                     .FirstOrDefault() ?? rawScore;
 
@@ -304,7 +321,7 @@ namespace WTFnetApp
                     consecutiveStableMatches = 0;
                 }
 
-                if (consecutiveStableMatches >= 3)
+                if (consecutiveStableMatches >= timing.ReadinessConsecutiveChecks)
                     return readiness;
 
                 await Task.Delay(350, cancellationToken);
@@ -316,8 +333,8 @@ namespace WTFnetApp
             CancellationToken cancellationToken)
         {
             DateTime startedUtc = DateTime.UtcNow;
-            DateTime earliestCheckUtc = startedUtc + CandidateStabilizeMinWait;
-            DateTime hardStopUtc = startedUtc + CandidateStabilizeMaxWait;
+            DateTime earliestCheckUtc = startedUtc + timing.StabilizeMinWait;
+            DateTime hardStopUtc = startedUtc + timing.StabilizeMaxWait;
 
             int stableChecks = 0;
 
@@ -358,9 +375,9 @@ namespace WTFnetApp
                 if (stableNow)
                 {
                     stableChecks++;
-                    Log(prefix + "stableCheck=" + stableChecks + "/" + CandidateStabilizeConsecutiveChecks);
+                    Log(prefix + "stableCheck=" + stableChecks + "/" + timing.StabilizeConsecutiveChecks);
 
-                    if (stableChecks >= CandidateStabilizeConsecutiveChecks)
+                    if (stableChecks >= timing.StabilizeConsecutiveChecks)
                     {
                         double elapsed = (nowUtc - startedUtc).TotalSeconds;
                         Log(prefix + "reached | after=" + elapsed.ToString("0.0") + "s");
@@ -412,7 +429,7 @@ namespace WTFnetApp
             return notes + " | " + suffix;
         }
 
-        private static void TrimShortlist(List<ProbeScoreResult> shortlist, int maxKeep)
+        private static void TrimDisplayShortlistKeepingRaw(List<ProbeScoreResult> shortlist, int maxKeep, ProbeScoreResult rawBaseline)
         {
             if (shortlist == null)
                 return;
@@ -420,7 +437,20 @@ namespace WTFnetApp
             shortlist.Sort((a, b) => a.OverallStabilityScore.CompareTo(b.OverallStabilityScore));
 
             while (shortlist.Count > maxKeep)
-                shortlist.RemoveAt(shortlist.Count - 1);
+            {
+                int removeIndex = shortlist.Count - 1;
+
+                if (rawBaseline != null && ReferenceEquals(shortlist[removeIndex], rawBaseline))
+                {
+                    int nonRawFromTail = shortlist.FindLastIndex(
+                        x => x != null && !ReferenceEquals(x, rawBaseline));
+
+                    if (nonRawFromTail >= 0)
+                        removeIndex = nonRawFromTail;
+                }
+
+                shortlist.RemoveAt(removeIndex);
+            }
         }
 
         private string BuildSummary(StartupProbeResult result)
@@ -486,5 +516,18 @@ namespace WTFnetApp
         public ProbeWinnerConfidenceResult WinnerConfidence { get; set; }
 
         public string SummaryText { get; set; }
+    }
+
+    public sealed class StartupProbeTimingConfig
+    {
+        public TimeSpan ReadinessMinWait { get; set; } = TimeSpan.FromSeconds(4.0);
+        public TimeSpan ReadinessMaxWait { get; set; } = TimeSpan.FromSeconds(10.0);
+        public int ReadinessConsecutiveChecks { get; set; } = 3;
+        public TimeSpan StabilizeMinWait { get; set; } = TimeSpan.FromSeconds(2.5);
+        public TimeSpan StabilizeMaxWait { get; set; } = TimeSpan.FromSeconds(16.0);
+        public int StabilizeConsecutiveChecks { get; set; } = 3;
+        public TimeSpan ObserveDuration { get; set; } = TimeSpan.FromSeconds(10.0);
+
+        public static StartupProbeTimingConfig Default { get; } = new StartupProbeTimingConfig();
     }
 }
