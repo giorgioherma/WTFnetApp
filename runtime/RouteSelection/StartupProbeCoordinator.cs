@@ -673,6 +673,7 @@ namespace WTFnetApp
                 return true;
             }
 
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
             if (window == null || !window.IsValid || window.AvgPingMs <= 0)
             {
                 reason = "fastping not stable yet";
