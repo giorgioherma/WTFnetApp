@@ -374,6 +374,7 @@ namespace WTFnetApp
             bool finalRestore = await RestoreLeaderRouteAsync(output.Winner, cancellationToken);
             if (!finalRestore)
                 return BuildUnreliableResult(output, output.Winner, rawScore, "winner-restore-failed");
+            
             output.FinalRestoreSucceeded = true;
 
             if (output.Winner != null)
@@ -549,8 +550,8 @@ namespace WTFnetApp
                     if (trustReason == "large mismatch before trust gate")
                     {
                         Log("startup-probe | mismatch ignored before trust | " + candidate);
-                        warmupTag = AppendNote(warmupTag, "large-mismatch-before-trust-gate");
                     }
+                    warmupTag = AppendNote(warmupTag, "large-mismatch-before-trust-gate");
                 }
 
                 if (hasIdentity && !loggedIdentity)
@@ -626,7 +627,8 @@ namespace WTFnetApp
                         warmupTag);
                 }
 
-                if (!SpeedifyWarmupSoftReasons.Contains(reason))
+                if (!string.Equals(reason, "usable", StringComparison.OrdinalIgnoreCase) &&
+                    !SpeedifyWarmupSoftReasons.Contains(reason))
                 {
                     warmupTag = AppendNote(
                         warmupTag,
@@ -686,9 +688,9 @@ namespace WTFnetApp
         }
 
         private bool EvaluateStartupTrustGate(
-    StartupWarmupTelemetrySnapshot telemetry,
-    out string reason,
-    out bool negativeOnlyTrust)
+            StartupWarmupTelemetrySnapshot telemetry,
+            out string reason,
+            out bool negativeOnlyTrust)
         {
             negativeOnlyTrust = false;
             reason = "missing speedify telemetry";
@@ -705,29 +707,7 @@ namespace WTFnetApp
                 return false;
             }
 
-            FastPingState state = getFastPingState();
             FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
-
-            bool fastPingCollapsedFromState =
-                state == null ||
-                state.IsStale ||
-                (!state.PrimaryFresh && !state.SecondaryFresh) ||
-                (state.Confidence >= 0 && state.Confidence < 0.15);
-
-            bool fastPingCollapsedFromWindow =
-                window == null ||
-                !window.IsValid ||
-                window.StaleRate >= 0.70 ||
-                window.AvgLossRate >= 0.70 ||
-                window.P95PingMs >= 2200.0 ||
-                window.AvgPingMs >= 1600.0;
-
-            if ((fastPingCollapsedFromState || fastPingCollapsedFromWindow) && speedifyLatency >= 900.0)
-            {
-                negativeOnlyTrust = true;
-                reason = "catastrophic-match";
-                return true;
-            }
 
             bool windowValid = window != null && window.IsValid;
             bool hasFastPingPing = windowValid && window.AvgPingMs > 0;
@@ -898,8 +878,6 @@ namespace WTFnetApp
                     candidate,
                     timing.MeasurementStartGuard,
                     provisional);
-                if (provisionalRuntime == null)
-                    return null;
 
                 provisionalRuntime.ReachedUsableState = true;
                 provisionalRuntime.MeasurementStarted = true;
@@ -920,8 +898,6 @@ namespace WTFnetApp
                 candidate,
                 TimeSpan.Zero,
                 main);
-            if (mainRuntime == null)
-                return null;
 
             mainRuntime.ReachedUsableState = true;
             mainRuntime.MeasurementStarted = true;
@@ -1103,6 +1079,7 @@ namespace WTFnetApp
             string reason)
         {
             output.FinalRestoreSucceeded = false;
+            
             output.Winner = leader ?? rawScore;
 
             if (output.Winner != null)
@@ -1255,11 +1232,9 @@ namespace WTFnetApp
         public ProbeScoreResult Baseline { get; set; }
         public ProbeScoreResult Winner { get; set; }
         public bool FinalRestoreSucceeded { get; set; }
-
         public List<ProbeScoreResult> AllResults { get; set; } = new List<ProbeScoreResult>();
         public List<ProbeScoreResult> Shortlist { get; set; } = new List<ProbeScoreResult>();
         public ProbeWinnerConfidenceResult WinnerConfidence { get; set; }
-
         public string SummaryText { get; set; }
     }
 
