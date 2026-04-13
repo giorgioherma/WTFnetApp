@@ -8,8 +8,8 @@ namespace WTFnetApp
         {
             double resolvedPing = ChoosePositive(
                 fastPing.StablePingMs,
-                fastPing.DisplayedPingMs,
-                fastPing.InstantPingMs);
+                fastPing.InstantPingMs,
+                fastPing.DisplayedPingMs);
 
             state.LatencyMs = resolvedPing;
             state.JitterMs = fastPing.JitterMs;

@@ -30,6 +30,15 @@ namespace WTFnetApp
         private MetricsSnapshot lastSnapshot;
         private UnifiedNetworkState lastUnifiedState;
 
+        private double pendingTunnelLatencyMs = -1;
+        private int pendingTunnelLatencyConfirmCount = 0;
+        private double lastAcceptedTunnelLatencyMs = -1;
+
+        private const double TunnelLatencyVsFastPingBaselineRejectMs = 220.0;
+        private const double TunnelLatencyHardMaxMs = 500.0;
+        private const double TunnelLatencyJumpRejectMs = 200.0;
+        private const int TunnelLatencyConfirmSamplesRequired = 2;
+
         private readonly object publishSync = new object();
 
         private volatile bool startupEvaluationRunning;
@@ -229,6 +238,114 @@ namespace WTFnetApp
             return (DateTime.UtcNow - appStartedUtc).TotalSeconds < StartupUiGraceSeconds;
         }
 
+        private double ResolveTrustedTunnelLatency(MetricsSnapshot snapshot)
+        {
+            if (snapshot == null || !snapshot.TunnelConnected)
+            {
+                pendingTunnelLatencyMs = -1;
+                pendingTunnelLatencyConfirmCount = 0;
+                lastAcceptedTunnelLatencyMs = -1;
+                return -1;
+            }
+
+            double candidate = -1;
+
+            if (snapshot.AggregateLatencyMs > 0)
+                candidate = snapshot.AggregateLatencyMs;
+            else if (snapshot.LatencyMs > 0)
+                candidate = snapshot.LatencyMs;
+
+            if (candidate <= 0)
+            {
+                pendingTunnelLatencyMs = -1;
+                pendingTunnelLatencyConfirmCount = 0;
+                return -1;
+            }
+
+            if (candidate > TunnelLatencyHardMaxMs)
+            {
+                Logger.Log("fastping-tunnel",
+                    "reject tunnel latency | reason=hard-max" +
+                    " | candidate=" + candidate.ToString("0.0") +
+                    " | max=" + TunnelLatencyHardMaxMs.ToString("0.0"));
+
+                pendingTunnelLatencyMs = -1;
+                pendingTunnelLatencyConfirmCount = 0;
+                return -1;
+            }
+
+            FastPingState fastPingState = fastPing.GetState();
+            double fastPingBaseline = fastPingState != null ? fastPingState.BaselinePingMs : -1;
+
+            if (fastPingBaseline > 0 &&
+                candidate > fastPingBaseline + TunnelLatencyVsFastPingBaselineRejectMs)
+            {
+                bool samePendingVsBaseline =
+                    pendingTunnelLatencyMs > 0 &&
+                    Math.Abs(pendingTunnelLatencyMs - candidate) <= 25.0;
+
+                if (samePendingVsBaseline)
+                    pendingTunnelLatencyConfirmCount++;
+                else
+                {
+                    pendingTunnelLatencyMs = candidate;
+                    pendingTunnelLatencyConfirmCount = 1;
+                }
+
+                Logger.Log("fastping-tunnel",
+                    "hold tunnel latency | reason=vs-fastping-baseline" +
+                    " | candidate=" + candidate.ToString("0.0") +
+                    " | fpBase=" + fastPingBaseline.ToString("0.0") +
+                    " | confirm=" + pendingTunnelLatencyConfirmCount +
+                    "/" + TunnelLatencyConfirmSamplesRequired);
+
+                if (pendingTunnelLatencyConfirmCount < TunnelLatencyConfirmSamplesRequired)
+                    return lastAcceptedTunnelLatencyMs > 0 ? lastAcceptedTunnelLatencyMs : -1;
+            }
+
+            if (lastAcceptedTunnelLatencyMs > 0)
+            {
+                double jump = candidate - lastAcceptedTunnelLatencyMs;
+
+                if (jump > TunnelLatencyJumpRejectMs)
+                {
+                    bool samePending =
+                        pendingTunnelLatencyMs > 0 &&
+                        Math.Abs(pendingTunnelLatencyMs - candidate) <= 25.0;
+
+                    if (samePending)
+                        pendingTunnelLatencyConfirmCount++;
+                    else
+                    {
+                        pendingTunnelLatencyMs = candidate;
+                        pendingTunnelLatencyConfirmCount = 1;
+                    }
+
+                    Logger.Log("fastping-tunnel",
+                        "hold tunnel latency | reason=large-jump" +
+                        " | candidate=" + candidate.ToString("0.0") +
+                        " | lastAccepted=" + lastAcceptedTunnelLatencyMs.ToString("0.0") +
+                        " | jump=" + jump.ToString("0.0") +
+                        " | confirm=" + pendingTunnelLatencyConfirmCount +
+                        "/" + TunnelLatencyConfirmSamplesRequired);
+
+                    if (pendingTunnelLatencyConfirmCount < TunnelLatencyConfirmSamplesRequired)
+                        return lastAcceptedTunnelLatencyMs;
+                }
+            }
+
+            Logger.Log("fastping-tunnel",
+                "accept tunnel latency" +
+                " | candidate=" + candidate.ToString("0.0") +
+                " | previous=" + lastAcceptedTunnelLatencyMs.ToString("0.0") +
+                " | fpBase=" + fastPingBaseline.ToString("0.0"));
+
+            lastAcceptedTunnelLatencyMs = candidate;
+            pendingTunnelLatencyMs = -1;
+            pendingTunnelLatencyConfirmCount = 0;
+            return candidate;
+        }
+
         // =========================
         // FASTPING TARGETS / TUNNEL CONTEXT
         // =========================
@@ -236,21 +353,22 @@ namespace WTFnetApp
         private void UpdateFastPingTunnelLatency(MetricsSnapshot snapshot)
         {
             if (snapshot == null)
-                return;
-
-            if (snapshot.TunnelConnected)
-            {
-                if (snapshot.AggregateLatencyMs > 0)
-                    fastPing.UpdateTunnelLatency(snapshot.AggregateLatencyMs);
-                else if (snapshot.LatencyMs > 0)
-                    fastPing.UpdateTunnelLatency(snapshot.LatencyMs);
-                else
-                    fastPing.UpdateTunnelLatency(-1);
-            }
-            else
             {
                 fastPing.UpdateTunnelLatency(-1);
+                return;
             }
+
+            double trustedLatency = ResolveTrustedTunnelLatency(snapshot);
+
+            Logger.Log("fastping-tunnel",
+                "apply tunnel latency" +
+                " | agg=" + snapshot.AggregateLatencyMs.ToString("0.0") +
+                " | snap=" + snapshot.LatencyMs.ToString("0.0") +
+                " | trusted=" + trustedLatency.ToString("0.0") +
+                " | connected=" + snapshot.TunnelConnected +
+                " | server=" + (snapshot.ConnectedServerName ?? "-"));
+
+            fastPing.UpdateTunnelLatency(trustedLatency);
         }
 
         private void UpdateFastPingTargetsIfChanged(string primaryTarget, string secondaryTarget)

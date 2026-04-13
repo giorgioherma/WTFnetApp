@@ -591,7 +591,9 @@ namespace WTFnetApp
                 samples[nextIndex] = new Sample
                 {
                     TimeUtc = timeUtc,
-                    PingMs = state.DisplayedPingMs > 0 ? state.DisplayedPingMs : state.InstantPingMs,
+                    PingMs = state.InstantPingMs > 0
+                        ? state.InstantPingMs
+                        : (state.StablePingMs > 0 ? state.StablePingMs : -1),
                     JitterMs = state.JitterMs,
                     LossRate = state.LossRate,
                     BadQualityRate = state.BadQualityRate,

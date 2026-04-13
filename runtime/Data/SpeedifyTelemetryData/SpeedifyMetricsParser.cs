@@ -36,22 +36,57 @@ namespace WTFnetApp
                     {
                         case "report_connection_stats":
                             ParseConnectionStatsIntoStructured(root);
+
+                            Logger.Log("speedify-parsed",
+                                "event=report_connection_stats" +
+                                " | tunnelConnected=" + structuredState.Tunnel.Connected +
+                                " | aggLatency=" + structuredState.Tunnel.LatencyMs +
+                                " | aggJitter=" + structuredState.Tunnel.JitterMs +
+                                " | active=" + structuredState.Tunnel.ActiveConnectionCount +
+                                " | backup=" + structuredState.Tunnel.BackupConnectionCount +
+                                " | links=" + structuredState.Links.Count +
+                                " | warnings=" + structuredState.ParseWarnings.Count +
+                                " | warnKeys=" + string.Join(",", structuredState.ParseWarnings));
+
                             return BuildMetricsSnapshotFromStructured();
 
                         case "report_networks":
                             ParseNetworksIntoStructured(root);
+
+                            Logger.Log("speedify-parsed",
+                                "event=report_networks" +
+                                " | links=" + structuredState.Links.Count);
+
                             return null;
 
                         case "report_session_stats":
                             ParseSessionStatsIntoStructured(root);
+
+                            Logger.Log("speedify-parsed",
+                                "event=report_session_stats" +
+                                " | windows=" + structuredState.SessionWindows.Count);
+
                             return null;
 
                         case "report_current_state":
                             ParseCurrentStateIntoStructured(root);
+
+                            Logger.Log("speedify-parsed",
+                                "event=report_current_state" +
+                                " | connected=" + structuredState.Tunnel.Connected +
+                                " | state=" + structuredState.Tunnel.CurrentState +
+                                " | mode=" + structuredState.Tunnel.CurrentMode);
+
                             return null;
 
                         case "report_connected_server":
                             ParseConnectedServerIntoStructured(root);
+
+                            Logger.Log("speedify-parsed",
+                                "event=report_connected_server" +
+                                " | server=" + SafeText(structuredState.Tunnel.ConnectedServerName) +
+                                " | publicIp=" + SafeText(structuredState.Tunnel.ConnectedServerPublicIp));
+
                             return null;
 
                         default:
@@ -164,10 +199,15 @@ namespace WTFnetApp
                     link.RcvEstMbps = ReadDoubleOrDefaultEither(row, "rcvEstMbps", "rcvEst", link.RcvEstMbps);
                     link.SndEstMbps = ReadDoubleOrDefaultEither(row, "sndEstMbps", "sndEst", link.SndEstMbps);
 
-                    link.Ip = FirstNonEmpty(link.Ip, ReadString(row, "ip"));
-                    link.LocalIp = FirstNonEmpty(link.LocalIp, ReadString(row, "localIp"));
-                    link.PrivateIp = FirstNonEmpty(link.PrivateIp, ReadString(row, "privateIp"));
-                    link.RemoteIp = FirstNonEmpty(link.RemoteIp, ReadString(row, "remoteIp"));
+                    string ip = ReadString(row, "ip");
+                    string localIp = ReadString(row, "localIp");
+                    string privateIp = ReadString(row, "privateIp");
+                    string remoteIp = ReadString(row, "remoteIp");
+
+                    link.Ip = !string.IsNullOrWhiteSpace(ip) ? ip : null;
+                    link.LocalIp = !string.IsNullOrWhiteSpace(localIp) ? localIp : null;
+                    link.PrivateIp = !string.IsNullOrWhiteSpace(privateIp) ? privateIp : null;
+                    link.RemoteIp = !string.IsNullOrWhiteSpace(remoteIp) ? remoteIp : null;
 
                     link.IpList = ReadStringArray(row, "ipList", link.IpList);
                 }
@@ -188,11 +228,11 @@ namespace WTFnetApp
             structuredState.Tunnel.DownloadCongested = ReadBoolWithFallback(row, "downloadCongested", structuredState.Tunnel.DownloadCongested);
             structuredState.Tunnel.UploadCongested = ReadBoolWithFallback(row, "uploadCongested", structuredState.Tunnel.UploadCongested);
 
-            structuredState.Tunnel.LatencyMs = ReadDoubleOrDefault(row, "ltMs", structuredState.Tunnel.LatencyMs);
-            structuredState.Tunnel.JitterMs = ReadDoubleOrDefault(row, "jtMs", structuredState.Tunnel.JitterMs);
-            structuredState.Tunnel.RxBps = ReadDoubleOrDefault(row, "rcvBps", structuredState.Tunnel.RxBps);
-            structuredState.Tunnel.TxBps = ReadDoubleOrDefault(row, "sndBps", structuredState.Tunnel.TxBps);
-            structuredState.Tunnel.TotalBps = ReadDoubleOrDefault(row, "totBps", structuredState.Tunnel.TotalBps);
+            structuredState.Tunnel.LatencyMs = ReadDoubleOrDefault(row, "ltMs", 0);
+            structuredState.Tunnel.JitterMs = ReadDoubleOrDefault(row, "jtMs", 0);
+            structuredState.Tunnel.RxBps = ReadDoubleOrDefault(row, "rcvBps", 0);
+            structuredState.Tunnel.TxBps = ReadDoubleOrDefault(row, "sndBps", 0);
+            structuredState.Tunnel.TotalBps = ReadDoubleOrDefault(row, "totBps", 0);
         }
 
         private void ParseNetworksIntoStructured(JsonElement root)
@@ -529,6 +569,18 @@ namespace WTFnetApp
                     UniqueSaves = src.UniqueSaves
                 });
             }
+
+            Logger.Log("speedify-snapshot",
+                "connected=" + snapshot.TunnelConnected +
+                " | aggLat=" + snapshot.AggregateLatencyMs +
+                " | aggJit=" + snapshot.AggregateJitterMs +
+                " | lat=" + snapshot.LatencyMs +
+                " | base=" + snapshot.BaseLatencyMs +
+                " | dynBase=" + snapshot.DynamicBase +
+                " | server=" + SafeText(snapshot.ConnectedServerName) +
+                " | pubIp=" + SafeText(snapshot.ConnectedServerPublicIp) +
+                " | links=" + snapshot.Links.Count +
+                " | warnings=" + snapshot.ParseWarningCount);
 
             return snapshot;
         }
@@ -1084,6 +1136,11 @@ namespace WTFnetApp
                 try { return (long)value.GetDouble(); }
                 catch { return fallback; }
             }
+        }
+
+        private static string SafeText(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "-" : value;
         }
 
         private static int ReadInt(JsonElement value)

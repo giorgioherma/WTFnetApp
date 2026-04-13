@@ -12,7 +12,7 @@ namespace WTFnetApp
     {
         private const string SpeedifyWsHost = "127.0.0.1";
         private const int SpeedifyWsPort = 9330;
-        private const string SpeedifyWsPath = "/";
+        private const string SpeedifyWsPath = "/systemdata";
 
         private const bool LogAllIncomingMessages = true;
         private const bool LogAllParsedEvents = true;
@@ -21,8 +21,8 @@ namespace WTFnetApp
         private ClientWebSocket ws;
         private volatile bool running;
 
-        private readonly HashSet<string> capturedSnapshotEvents = new HashSet<string>();
-        private readonly HashSet<string> seenEventNames = new HashSet<string>();
+        private readonly HashSet<string> capturedSnapshotEvents = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> seenEventNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private readonly Action<MetricsSnapshot> onSnapshot;
         private readonly SpeedifyMetricsParser parser = new SpeedifyMetricsParser();
@@ -144,45 +144,6 @@ namespace WTFnetApp
             }
         }
 
-        private void LogParserState(string eventName, MetricsSnapshot snap)
-        {
-            var state = parser.CurrentStructuredState;
-            if (state == null)
-                return;
-
-            Logger.Log("speedify-state",
-                "after=" + eventName +
-                " | links=" + state.Links.Count +
-                " | hasConn=" + state.HasConnectionStats +
-                " | hasNet=" + state.HasNetworks +
-                " | hasSess=" + state.HasSessionStats +
-                " | tunnel=" + state.Tunnel.Connected +
-                " | aggLat=" + state.Tunnel.LatencyMs);
-
-            foreach (var link in state.Links)
-            {
-                Logger.Log("speedify-link",
-                    "key=" + link.Key +
-                    " | guid=" + link.Guid +
-                    " | name=" + link.Name +
-                    " | proto=" + link.Protocol +
-                    " | lat=" + link.LatencyMs +
-                    " | jit=" + link.JitterMs +
-                    " | rx=" + link.RxBps +
-                    " | tx=" + link.TxBps);
-            }
-
-            if (snap != null)
-            {
-                Logger.Log("speedify-snapshot",
-                    "event=" + eventName +
-                    " | aggLat=" + snap.AggregateLatencyMs +
-                    " | aggJit=" + snap.AggregateJitterMs +
-                    " | links=" + snap.Links.Count +
-                    " | warnings=" + snap.ParseWarningCount);
-            }
-        }
-
         private async Task SendRequests(ClientWebSocket socket, params string[] requestNames)
         {
             foreach (string requestName in requestNames)
@@ -231,7 +192,7 @@ namespace WTFnetApp
 
                     if (!TryParseSpeedifyMessage(rawMessage, out eventName, out payloadJson))
                         continue;
-                    
+
                     if (LogAllParsedEvents)
                     {
                         Logger.Log("speedify-event", eventName);
@@ -273,6 +234,58 @@ namespace WTFnetApp
                     if (running)
                         Logger.Log("speedify", "parse error: " + ex.Message);
                 }
+            }
+        }
+
+        private void LogParserState(string eventName, MetricsSnapshot snap)
+        {
+            SpeedifyStructuredState state = parser.CurrentStructuredState;
+            if (state == null)
+                return;
+
+            Logger.Log("speedify-state",
+                "after=" + eventName +
+                " | links=" + state.Links.Count +
+                " | hasConn=" + state.HasConnectionStats +
+                " | hasNet=" + state.HasNetworks +
+                " | hasSess=" + state.HasSessionStats +
+                " | hasCurrent=" + state.HasCurrentState +
+                " | hasServer=" + state.HasConnectedServer +
+                " | tunnelConnected=" + state.Tunnel.Connected +
+                " | aggLat=" + state.Tunnel.LatencyMs +
+                " | aggJit=" + state.Tunnel.JitterMs +
+                " | server=" + SafeText(state.Tunnel.ConnectedServerName));
+
+            foreach (SpeedifyLinkState link in state.Links)
+            {
+                if (link == null)
+                    continue;
+
+                Logger.Log("speedify-link",
+                    "key=" + SafeText(link.Key) +
+                    " | guid=" + SafeText(link.Guid) +
+                    " | name=" + SafeText(link.Name) +
+                    " | proto=" + SafeText(link.Protocol) +
+                    " | connected=" + link.Connected +
+                    " | lat=" + link.LatencyMs +
+                    " | jit=" + link.JitterMs +
+                    " | rx=" + link.RxBps +
+                    " | tx=" + link.TxBps);
+            }
+
+            if (snap != null)
+            {
+                Logger.Log("speedify-reader-snapshot",
+                    "event=" + eventName +
+                    " | connected=" + snap.TunnelConnected +
+                    " | aggLat=" + snap.AggregateLatencyMs +
+                    " | aggJit=" + snap.AggregateJitterMs +
+                    " | lat=" + snap.LatencyMs +
+                    " | base=" + snap.BaseLatencyMs +
+                    " | dynBase=" + snap.DynamicBase +
+                    " | links=" + snap.Links.Count +
+                    " | warnings=" + snap.ParseWarningCount +
+                    " | server=" + SafeText(snap.ConnectedServerName));
             }
         }
 
@@ -347,6 +360,11 @@ namespace WTFnetApp
             {
                 return false;
             }
+        }
+
+        private static string SafeText(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "-" : value;
         }
     }
 }
