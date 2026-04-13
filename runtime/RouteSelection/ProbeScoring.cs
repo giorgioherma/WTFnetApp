@@ -390,11 +390,24 @@ namespace WTFnetApp
 
             ProbeCandidateRuntimeData runtime = candidate.Runtime;
 
-            double stabilityCore = candidate.OverallStabilityScore * 0.62;
-            double spikePenalty = Safe(runtime.SpikeDensityPerMinute) * 1.20;
-            double lossPenalty = EffectiveLossRate(runtime.AvgLossRate) * 100.0 * 0.22;
-            double badQualityPenalty = Safe(runtime.AvgBadQualityRate) * 100.0 * 0.12;
-            double confidencePenalty = Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 14.0;
+            double stabilityCore = candidate.OverallStabilityScore * 0.68;
+            double spikePenalty = Safe(runtime.SpikeDensityPerMinute) * 1.45;
+            double persistenceFactor = ComputeStartupPersistenceFactor(runtime);
+            double effectiveLoss = Math.Min(1.0, EffectiveLossRate(runtime.AvgLossRate) * persistenceFactor);
+            double effectiveBadQuality = Math.Min(1.0, Safe(runtime.AvgBadQualityRate) * persistenceFactor);
+
+            double lossPenalty = effectiveLoss * 100.0 * 0.22;
+            double badQualityPenalty = effectiveBadQuality * 100.0 * 0.12;
+            double confidencePenalty = Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 15.0;
+
+            double avgJitter = Safe(runtime.AvgJitterMs);
+            double jitterRange = Safe(ComputeJitterRange(runtime));
+            double jitterStabilityPenalty = (avgJitter * 0.95) + (jitterRange * 0.80);
+
+            double p95Ping = Safe(runtime.P95PingMs);
+            double avgPing = Safe(runtime.AvgPingMs);
+            double tailPenalty = (p95Ping * 0.06) + (Math.Max(0.0, p95Ping - avgPing) * 0.05);
+            double smallLatencyPenalty = avgPing * 0.015;
 
             double warningAdjustment =
                 candidate.WarningLevel == ProbeWarningLevel.Risky ? 18.0 :
@@ -404,12 +417,50 @@ namespace WTFnetApp
             double learningAdjustment = ComputeLearningAdjustment(runtime, learned);
 
             return stabilityCore +
+                   jitterStabilityPenalty +
+                   tailPenalty +
                    spikePenalty +
                    lossPenalty +
                    badQualityPenalty +
                    confidencePenalty +
+                   smallLatencyPenalty +
                    warningAdjustment +
                    learningAdjustment;
+        }
+
+        private static double ComputeStartupPersistenceFactor(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null)
+                return 1.0;
+
+            string notes = runtime.Notes ?? string.Empty;
+            bool provisionalSoftened = NotesContain(notes, "provisional-softened");
+            bool measuredMain = NotesContain(notes, "measured-main");
+            bool measuredExtension = NotesContain(notes, "measured-extension");
+            bool lateStabilizationGrace = NotesContain(notes, "startup-late-stabilization-grace");
+            bool promisingExtension = NotesContain(notes, "startup-promising-extension");
+
+            // Early startup badness should be mostly ignored if it does not repeat in the real measured section.
+            if (provisionalSoftened && measuredMain && !measuredExtension)
+                return 0.50;
+
+            // Late stabilization extension indicates persistence of instability and should count harder.
+            if (lateStabilizationGrace)
+                return 1.12;
+
+            // Promising extensions are not persistent-bad by default.
+            if (promisingExtension)
+                return 1.0;
+
+            return 1.0;
+        }
+
+        private static bool NotesContain(string notes, string token)
+        {
+            if (string.IsNullOrEmpty(notes) || string.IsNullOrEmpty(token))
+                return false;
+
+            return notes.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         public static void AssignSmoothestBadge(IList<ProbeScoreResult> results)
