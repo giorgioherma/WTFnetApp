@@ -580,12 +580,23 @@ namespace WTFnetApp
                         " | firstUsableMs=" + activationElapsedMs.ToString("0"));
                 }
 
-                if (isUsableNow)
+                bool speedifyReadyNow =
+                    hasIdentity &&
+                    tunnelConnected &&
+                    hasFreshTelemetry &&
+                    activeConnections > 0;
+
+                bool candidateReadyForMeasurement =
+                    isUsableNow &&
+                    speedifyReadyNow &&
+                    startupTrustEstablished;
+
+                if (candidateReadyForMeasurement)
                     consecutiveUsableCount++;
                 else
                     consecutiveUsableCount = 0;
 
-                if (isUsableNow && !loggedStableUsable && consecutiveUsableCount >= 2)
+                if (candidateReadyForMeasurement && !loggedStableUsable && consecutiveUsableCount >= 2)
                 {
                     loggedStableUsable = true;
                     Log("startup-probe | warmup-stable | " + candidate +
@@ -601,6 +612,7 @@ namespace WTFnetApp
                         " | waitedMs=" + waitedMs.ToString("0"));
                     Log("startup-probe | warmup-finished | " + candidate +
                         " | elapsedMs=" + activationElapsedMs.ToString("0"));
+
                     if (waitedMs >= 3500.0)
                         warmupTag = AppendNote(warmupTag, "activation-slow-but-eventually-usable");
 
@@ -643,6 +655,10 @@ namespace WTFnetApp
                         " | fresh=" + (hasFreshTelemetry ? "yes" : "no") +
                         " | active=" + activeConnections +
                         " | usable=" + (isUsableNow ? "yes" : "no") +
+                        " | speedifyReady=" + (speedifyReadyNow ? "yes" : "no") +
+                        " | trusted=" + (startupTrustEstablished ? "yes" : "no") +
+                        " | ready=" + (candidateReadyForMeasurement ? "yes" : "no") +
+                        " | trustReason=" + trustReason +
                         " | reason=" + reason);
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
