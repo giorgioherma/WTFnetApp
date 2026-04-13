@@ -916,6 +916,9 @@ namespace WTFnetApp
                     timing.MeasurementStartGuard,
                     provisional);
 
+                if (provisionalRuntime == null)
+                    return null;
+
                 provisionalRuntime.ReachedUsableState = true;
                 provisionalRuntime.MeasurementStarted = true;
                 provisionalRuntime.Notes = AppendNote(provisionalRuntime.Notes, "measured-provisional");
@@ -941,6 +944,9 @@ namespace WTFnetApp
                 candidate,
                 TimeSpan.Zero,
                 main);
+
+            if (mainRuntime == null)
+                return null;
 
             mainRuntime.ReachedUsableState = true;
             mainRuntime.MeasurementStarted = true;
@@ -978,6 +984,9 @@ namespace WTFnetApp
                         TimeSpan.Zero,
                         extension);
 
+                    if (extensionRuntime == null)
+                        return mainRuntime;
+
                     extensionRuntime.ReachedUsableState = true;
                     extensionRuntime.MeasurementStarted = true;
                     extensionRuntime.Notes = AppendNote(extensionRuntime.Notes, "measured-extension");
@@ -989,7 +998,13 @@ namespace WTFnetApp
                         extensionRuntime.MeasurementStopReason = extensionStopReason;
                         extensionRuntime.Notes = AppendNote(extensionRuntime.Notes, extensionStopReason);
                         Log("startup-probe | candidate measured-early-stop | " + candidate + " | reason=" + extensionStopReason);
-                        return MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
+
+                        ProbeCandidateRuntimeData stoppedMerged = MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
+                        stoppedMerged.MeasurementStoppedEarly = true;
+                        stoppedMerged.MeasurementCompleted = false;
+                        stoppedMerged.MeasurementStopReason = extensionStopReason;
+                        stoppedMerged.Notes = AppendNote(stoppedMerged.Notes, extensionStopReason);
+                        return stoppedMerged;
                     }
 
                     mainRuntime = MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
