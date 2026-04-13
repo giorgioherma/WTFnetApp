@@ -11,23 +11,23 @@ namespace WTFnetApp
         private const int NormalBaseProbeTimeoutMs = 700;
         private const int NormalMaxProbeTimeoutMs = 1800;
         private const int NormalStaleAfterMs = 3200;
-        private const int NormalMissesBeforeDegrade = 6;
+        private const int NormalMissesBeforeDegrade = 7;
 
         private const int EvaluationProbeIntervalMs = 850;
         private const int EvaluationPerTargetPeriodMs = 1700;
         private const int EvaluationBaseProbeTimeoutMs = 1100;
         private const int EvaluationMaxProbeTimeoutMs = 2600;
         private const int EvaluationStaleAfterMs = 6500;
-        private const int EvaluationMissesBeforeDegrade = 5;
+        private const int EvaluationMissesBeforeDegrade = 6;
 
-        private const double StableAlpha = 0.35;
+        private const double StableAlpha = 0.30;
         private const double HugeSpikeStableAlpha = 0.10;
         private const double BaselineAlpha = 0.08;
         private const double JitterAlpha = 0.22;
 
-        private const double SpikeDeltaMs = 15.0;
-        private const double FloorSpikeDeltaMs = 18.0;
-        private const double RelativeSpikeMultiplier = 1.35;
+        private const double SpikeDeltaMs = 18.0;
+        private const double FloorSpikeDeltaMs = 22.0;
+        private const double RelativeSpikeMultiplier = 1.42;
 
         private const double BaselineGoodJitterMs = 8.0;
         private const double BaselineGoodLossRate = 0.12;
@@ -811,12 +811,12 @@ namespace WTFnetApp
 
             int backoffMs = 0;
 
-            if (target.ConsecutiveMisses >= 5)
-                backoffMs = evaluationMode ? 2200 : 1400;
+            if (target.ConsecutiveMisses >= 6)
+                backoffMs = evaluationMode ? 2000 : 1300;
+            else if (target.ConsecutiveMisses == 5)
+                backoffMs = evaluationMode ? 1450 : 950;
             else if (target.ConsecutiveMisses == 4)
-                backoffMs = evaluationMode ? 1600 : 1000;
-            else if (target.ConsecutiveMisses == 3)
-                backoffMs = evaluationMode ? 1100 : 700;
+                backoffMs = evaluationMode ? 1000 : 650;
 
             if (backoffMs > 0)
                 target.MissBackoffUntilUtc = DateTime.UtcNow.AddMilliseconds(backoffMs);
@@ -907,10 +907,10 @@ namespace WTFnetApp
                     continue;
 
                 double weight;
-                if (age < 3) weight = 1.00;
+                if (age < 3) weight = 0.90;
                 else if (age < 6) weight = 0.65;
-                else if (age < 9) weight = 0.35;
-                else weight = 0.15;
+                else if (age < 9) weight = 0.40;
+                else weight = 0.20;
 
                 bool badSuccess =
                     value > reference + 30.0 ||
@@ -931,9 +931,9 @@ namespace WTFnetApp
                     continue;
 
                 double weight;
-                if (age < 4) weight = 0.90;
-                else if (age < 8) weight = 0.50;
-                else if (age < 12) weight = 0.25;
+                if (age < 4) weight = 0.55;
+                else if (age < 8) weight = 0.40;
+                else if (age < 12) weight = 0.22;
                 else weight = 0.10;
 
                 weightedTotal += weight;
@@ -1023,10 +1023,10 @@ namespace WTFnetApp
                 byte outcome = target.Outcomes[idx];
 
                 double weight;
-                if (age < 4) weight = 1.00;
-                else if (age < 8) weight = 0.65;
-                else if (age < 12) weight = 0.35;
-                else weight = 0.15;
+                if (age < 3) weight = 0.90;
+                else if (age < 7) weight = 0.65;
+                else if (age < 12) weight = 0.40;
+                else weight = 0.20;
 
                 weightedTotal += weight;
 
@@ -1053,8 +1053,8 @@ namespace WTFnetApp
             if (ageMs > 2200) confidence -= 0.08;
             if (ageMs > GetStaleAfterMs()) confidence -= 0.18;
 
-            confidence -= target.LossRate * 0.28;
-            confidence -= target.BadQualityRate * 0.16;
+            confidence -= target.LossRate * 0.22;
+            confidence -= target.BadQualityRate * 0.12;
 
             if (target.JitterMs > 10.0)
                 confidence -= 0.04;
@@ -1064,11 +1064,11 @@ namespace WTFnetApp
                 confidence -= 0.08;
 
             if (target.ConsecutiveMisses >= GetMissesBeforeDegrade())
-                confidence -= 0.22;
+                confidence -= 0.20;
             else if (target.ConsecutiveMisses == 4)
-                confidence -= 0.10;
+                confidence -= 0.08;
             else if (target.ConsecutiveMisses == 3)
-                confidence -= 0.06;
+                confidence -= 0.04;
 
             if (confidence < 0)
                 confidence = 0;
@@ -1207,16 +1207,17 @@ namespace WTFnetApp
             if (s.IsStale || s.Confidence < 0.18)
                 return FastPingHealthState.Stale;
 
-            if (hardDegrade && s.LossRate >= 0.22)
+            if (hardDegrade && s.LossRate >= 0.26)
                 return FastPingHealthState.Critical;
 
-            if (s.LossRate >= 0.38 || s.BadQualityRate >= 0.52)
+            if (s.LossRate >= 0.42 || s.BadQualityRate >= 0.56)
                 return FastPingHealthState.Critical;
 
             if ((s.SpikeDetected && s.JitterMs >= 14.0) ||
                 (s.InstantPingMs > 0 && s.BaselinePingMs > 0 && s.InstantPingMs > s.BaselinePingMs + 40.0) ||
                 s.JitterMs >= 20.0 ||
-                s.LossRate >= 0.24)
+                s.LossRate >= 0.28 ||
+                s.BadQualityRate >= 0.44)
                 return FastPingHealthState.Warning;
 
             if (s.OffBaseline)
@@ -1364,50 +1365,109 @@ namespace WTFnetApp
 
         private double ComputeCombinedLoss_NoLock(bool primaryFresh, bool secondaryFresh)
         {
+            double explainedMultiplier = GetExplainedMissPenaltyMultiplier_NoLock(primaryFresh, secondaryFresh);
+
             if (primaryFresh && secondaryFresh)
-                return (primary.LossRate * 0.55) + (secondary.LossRate * 0.45);
+                return Math.Min(1.0, ((primary.LossRate * 0.55) + (secondary.LossRate * 0.45)) * explainedMultiplier);
 
             if (primaryFresh)
-                return primary.LossRate;
+                return Math.Min(1.0, primary.LossRate * explainedMultiplier);
 
             if (secondaryFresh)
-                return secondary.LossRate;
+                return Math.Min(1.0, secondary.LossRate * explainedMultiplier);
 
-            return Math.Min(1.0, (primary.LossRate + secondary.LossRate) * 0.5);
+            return Math.Min(1.0, ((primary.LossRate + secondary.LossRate) * 0.5) * explainedMultiplier);
         }
 
         private double ComputeCombinedBadQuality_NoLock(bool primaryFresh, bool secondaryFresh)
         {
+            double explainedMultiplier = GetExplainedMissPenaltyMultiplier_NoLock(primaryFresh, secondaryFresh);
+
             if (primaryFresh && secondaryFresh)
-                return Math.Max(primary.BadQualityRate, secondary.BadQualityRate * 0.90);
+                return Math.Min(1.0, Math.Max(primary.BadQualityRate, secondary.BadQualityRate * 0.90) * explainedMultiplier);
 
             if (primaryFresh)
-                return primary.BadQualityRate;
+                return Math.Min(1.0, primary.BadQualityRate * explainedMultiplier);
 
             if (secondaryFresh)
-                return secondary.BadQualityRate;
+                return Math.Min(1.0, secondary.BadQualityRate * explainedMultiplier);
 
-            return Math.Max(primary.BadQualityRate, secondary.BadQualityRate);
+            return Math.Min(1.0, Math.Max(primary.BadQualityRate, secondary.BadQualityRate) * explainedMultiplier);
         }
 
         private double ComputeCombinedConfidence_NoLock(bool primaryFresh, bool secondaryFresh)
         {
+            double explainedMultiplier = GetExplainedMissPenaltyMultiplier_NoLock(primaryFresh, secondaryFresh);
+
             if (primaryFresh && secondaryFresh)
             {
                 double best = Math.Max(primary.Confidence, secondary.Confidence);
                 double other = Math.Min(primary.Confidence, secondary.Confidence);
 
                 // still prefer the better path, but don't let one perfect path fully hide a weak other one
-                return Math.Max(0.0, Math.Min(1.0, (best * 0.75) + (other * 0.25)));
+                double baseConfidence = (best * 0.75) + (other * 0.25);
+                double explainedBoost = (1.0 - explainedMultiplier) * 0.12;
+                return Math.Max(0.0, Math.Min(1.0, baseConfidence + explainedBoost));
             }
 
             if (primaryFresh)
-                return primary.Confidence;
+                return Math.Max(0.0, Math.Min(1.0, primary.Confidence + ((1.0 - explainedMultiplier) * 0.08)));
 
             if (secondaryFresh)
-                return secondary.Confidence;
+                return Math.Max(0.0, Math.Min(1.0, secondary.Confidence + ((1.0 - explainedMultiplier) * 0.08)));
 
             return Math.Max(primary.Confidence, secondary.Confidence);
+        }
+
+        private double GetExplainedMissPenaltyMultiplier_NoLock(bool primaryFresh, bool secondaryFresh)
+        {
+            if (IsEvaluationWarmupActive_NoLock())
+                return 0.78;
+
+            bool primaryHealthy = primaryFresh && IsTargetHealthyForMissInterpretation_NoLock(primary);
+            bool secondaryHealthy = secondaryFresh && IsTargetHealthyForMissInterpretation_NoLock(secondary);
+
+            bool primaryUnstable = primaryFresh && IsTargetUnstableForMissInterpretation_NoLock(primary);
+            bool secondaryUnstable = secondaryFresh && IsTargetUnstableForMissInterpretation_NoLock(secondary);
+
+            if (primaryUnstable && secondaryUnstable)
+                return 1.0;
+
+            if (primaryUnstable && secondaryHealthy)
+                return 0.56;
+
+            if (secondaryUnstable && primaryHealthy)
+                return 0.56;
+
+            if ((primaryFresh && !secondaryFresh && primaryHealthy) ||
+                (secondaryFresh && !primaryFresh && secondaryHealthy))
+                return 0.74;
+
+            return 1.0;
+        }
+
+        private static bool IsTargetHealthyForMissInterpretation_NoLock(ProbeTargetState target)
+        {
+            if (target == null)
+                return false;
+
+            return
+                target.Confidence >= 0.70 &&
+                target.LossRate <= 0.18 &&
+                target.BadQualityRate <= 0.30 &&
+                target.ConsecutiveMisses <= 2;
+        }
+
+        private static bool IsTargetUnstableForMissInterpretation_NoLock(ProbeTargetState target)
+        {
+            if (target == null)
+                return false;
+
+            return
+                target.ConsecutiveMisses >= 4 ||
+                target.LossRate >= 0.30 ||
+                target.BadQualityRate >= 0.42 ||
+                target.Confidence < 0.45;
         }
 
         private double ComputeDisplayedPing_NoLock(FastPingState s)
@@ -1434,13 +1494,13 @@ namespace WTFnetApp
                 if (stable > 0 && instant > 0)
                 {
                     bool hardSpike =
-                        (baseline > 0 && instant >= baseline + 28.0) ||
-                        (stable > 0 && instant >= stable + 22.0);
+                        (baseline > 0 && instant >= baseline + 34.0) ||
+                        (stable > 0 && instant >= stable + 26.0);
 
                     if (hardSpike)
-                        return (0.78 * instant) + (0.22 * stable);
+                        return (0.65 * instant) + (0.35 * stable);
 
-                    return (0.30 * instant) + (0.70 * stable);
+                    return (0.20 * instant) + (0.80 * stable);
                 }
 
                 if (stable > 0)
@@ -1463,9 +1523,9 @@ namespace WTFnetApp
             bool instantSpike =
                 instant > 0 &&
                 (
-                    (baseline > 0 && instant >= baseline + 28.0) ||
-                    instant >= stable + 22.0 ||
-                    instant >= tunnel + 18.0
+                    (baseline > 0 && instant >= baseline + 34.0) ||
+                    instant >= stable + 26.0 ||
+                    instant >= tunnel + 22.0
                 );
 
             if (instantSpike)
