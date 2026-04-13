@@ -6,6 +6,10 @@ namespace WTFnetApp
     {
         private const int SpeedifyFreshnessMs = 1500;
 
+        private int consecutiveStableSpeedifySnapshots = 0;
+        private DateTime lastStableSpeedifySnapshotUtc = DateTime.MinValue;
+        private static readonly TimeSpan StableSnapshotGapReset = TimeSpan.FromSeconds(2);
+
         public UnifiedNetworkState Resolve(MetricsSnapshot snapshot, FastPingState fastPing, NatState natState)
         {
             UnifiedNetworkState state = new UnifiedNetworkState();
@@ -20,12 +24,11 @@ namespace WTFnetApp
             bool speedifyFresh = hasSpeedify && IsSpeedifyFresh(snapshot);
             state.SpeedifyTelemetryFresh = speedifyFresh;
 
+            string speedifyReason = "no snapshot";
             bool speedifyValid =
                 hasSpeedify &&
                 speedifyFresh &&
-                snapshot.TunnelConnected &&
-                snapshot.ActiveConnectionCount > 0 &&
-                ChoosePositive(snapshot.AggregateLatencyMs, snapshot.LatencyMs, snapshot.Adapter1Latency) > 0;
+                IsTrustedSpeedifySnapshot(snapshot, out speedifyReason);
 
             if (hasSpeedify)
             {
@@ -36,7 +39,14 @@ namespace WTFnetApp
                     " | aggLat=" + snapshot.AggregateLatencyMs.ToString("0.0") +
                     " | lat=" + snapshot.LatencyMs.ToString("0.0") +
                     " | adapter1=" + snapshot.Adapter1Latency.ToString("0.0") +
-                    " | valid=" + speedifyValid);
+                    " | structuredCore=" + snapshot.StructuredCoreComplete +
+                    " | hasConn=" + snapshot.HasConnectionStats +
+                    " | hasNet=" + snapshot.HasNetworks +
+                    " | hasCurrent=" + snapshot.HasCurrentState +
+                    " | hasServer=" + snapshot.HasConnectedServer +
+                    " | warnings=" + snapshot.ParseWarningCount +
+                    " | valid=" + speedifyValid +
+                    " | reason=" + speedifyReason);
             }
 
             bool speedifyUsable = speedifyValid;
@@ -88,6 +98,178 @@ namespace WTFnetApp
             return state;
         }
 
+        private static bool IsStableSpeedifySnapshot(MetricsSnapshot snapshot, out string reason)
+        {
+            reason = "unknown";
+
+            if (snapshot == null)
+            {
+                reason = "snapshot missing";
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // Core dataset presence
+            // ---------------------------------------------------------
+
+            if (!snapshot.HasConnectionStats)
+            {
+                reason = "missing connection stats";
+                return false;
+            }
+
+            if (!snapshot.HasNetworks)
+            {
+                reason = "missing networks";
+                return false;
+            }
+
+            if (!snapshot.HasCurrentState)
+            {
+                reason = "missing current state";
+                return false;
+            }
+
+            if (!snapshot.HasConnectedServer)
+            {
+                reason = "missing connected server";
+                return false;
+            }
+
+            if (!snapshot.StructuredCoreComplete)
+            {
+                reason = "structured core incomplete";
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // Tunnel must really be up
+            // ---------------------------------------------------------
+
+            if (!snapshot.TunnelConnected)
+            {
+                reason = "tunnel not connected";
+                return false;
+            }
+
+            if (snapshot.ActiveConnectionCount <= 0)
+            {
+                reason = "no active speedify connections";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(snapshot.ConnectedServerName))
+            {
+                reason = "connected server name missing";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(snapshot.ConnectedServerPublicIp))
+            {
+                reason = "connected server public ip missing";
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // Need usable latency
+            // ---------------------------------------------------------
+
+            double usableLatency = ChoosePositive(
+                snapshot.AggregateLatencyMs,
+                snapshot.LatencyMs,
+                snapshot.Adapter1Latency);
+
+            if (usableLatency <= 0)
+            {
+                reason = "no usable speedify latency";
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // Need at least one real non-proxy participating link
+            // ---------------------------------------------------------
+
+            bool hasRealParticipatingLink = false;
+
+            if (snapshot.Links != null)
+            {
+                foreach (LinkSnapshot link in snapshot.Links)
+                {
+                    if (link == null)
+                        continue;
+
+                    if (link.IsAggregate)
+                        continue;
+
+                    bool isProxy =
+                        link.IsProxy ||
+                        string.Equals(link.Protocol, "proxy", StringComparison.OrdinalIgnoreCase) ||
+                        (!string.IsNullOrWhiteSpace(link.Key) &&
+                         link.Key.IndexOf("%proxy", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (isProxy)
+                        continue;
+
+                    bool participating =
+                        link.Connected && (link.LatencyMs > 0 || link.TotalBps > 0);
+
+                    if (!participating)
+                        continue;
+
+                    hasRealParticipatingLink = true;
+                    break;
+                }
+            }
+
+            if (!hasRealParticipatingLink)
+            {
+                reason = "no active non-proxy link";
+                return false;
+            }
+
+            // ---------------------------------------------------------
+            // Parse warnings pressure
+            // ---------------------------------------------------------
+
+            if (snapshot.ParseWarningCount >= 6)
+            {
+                reason = "too many parse warnings";
+                return false;
+            }
+
+            reason = "stable";
+            return true;
+        }
+
+        private bool IsTrustedSpeedifySnapshot(MetricsSnapshot snapshot, out string reason)
+        {
+            if (!IsStableSpeedifySnapshot(snapshot, out reason))
+            {
+                consecutiveStableSpeedifySnapshots = 0;
+                return false;
+            }
+
+            DateTime now = DateTime.UtcNow;
+
+            if (lastStableSpeedifySnapshotUtc != DateTime.MinValue &&
+                (now - lastStableSpeedifySnapshotUtc) > StableSnapshotGapReset)
+            {
+                consecutiveStableSpeedifySnapshots = 0;
+            }
+
+            consecutiveStableSpeedifySnapshots++;
+            lastStableSpeedifySnapshotUtc = now;
+
+            if (consecutiveStableSpeedifySnapshots < 2)
+            {
+                reason = "waiting for consecutive stable snapshots";
+                return false;
+            }
+
+            reason = "stable";
+            return true;
+        }
+
         private static void ApplySpeedifyContextOnly(UnifiedNetworkState state, MetricsSnapshot snapshot, FastPingState fastPing)
         {
             if (state == null || snapshot == null || fastPing == null)
@@ -124,7 +306,7 @@ namespace WTFnetApp
                 }
             }
         }
-
+        
         private static bool IsSpeedifyFresh(MetricsSnapshot snapshot)
         {
             if (snapshot == null)

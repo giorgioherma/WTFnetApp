@@ -788,8 +788,6 @@ namespace WTFnetApp
                 StabilizationTimedOut = first.StabilizationTimedOut || second.StabilizationTimedOut,
                 ReadinessKind = second.ReadinessKind != ProbeReadinessKind.NotReady ? second.ReadinessKind : first.ReadinessKind,
                 ReadinessReason = second.ReadinessReason ?? first.ReadinessReason,
-
-                StartupSpeedifyTrusted = first.StartupSpeedifyTrusted || second.StartupSpeedifyTrusted
             };
         }
 
