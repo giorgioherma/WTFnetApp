@@ -192,7 +192,10 @@ namespace WTFnetApp
 
             ProbeCandidateRuntimeData rawRuntime = await RunSegmentedMeasurementAsync(
                 rawCandidate,
-                cancellationToken);
+                warmupElapsed: TimeSpan.Zero,
+                rawScore: null,
+                leaderScore: null,
+                cancellationToken: cancellationToken);
 
             if (rawRuntime == null)
                 return BuildUnreliableResult(output, null, null, "raw-measurement-failed");
@@ -274,6 +277,9 @@ namespace WTFnetApp
 
                 ProbeCandidateRuntimeData runtime = await RunSegmentedMeasurementAsync(
                     candidate,
+                    TimeSpan.FromMilliseconds(Math.Max(0.0, warmupResult.WaitedMs)),
+                    rawScore,
+                    leader,
                     cancellationToken);
 
                 if (runtime == null)
@@ -849,26 +855,57 @@ namespace WTFnetApp
 
         private async Task<ProbeCandidateRuntimeData> RunSegmentedMeasurementAsync(
             ProbeCandidateDefinition candidate,
+            TimeSpan warmupElapsed,
+            ProbeScoreResult rawScore,
+            ProbeScoreResult leaderScore,
             CancellationToken cancellationToken)
         {
-            TimeSpan hardIgnore = timing.HardIgnoreDuration;
-            TimeSpan provisional = timing.ProvisionalDuration;
+            bool isSpeedifyCandidate =
+                candidate != null &&
+                candidate.Kind == ProbeCandidateKind.Speedify;
+
+            TimeSpan hardIgnore = isSpeedifyCandidate
+                ? timing.SpeedifyProtectedStartupBufferDuration
+                : timing.HardIgnoreDuration;
+            TimeSpan provisional = isSpeedifyCandidate
+                ? TimeSpan.Zero
+                : timing.ProvisionalDuration;
             TimeSpan configuredMain =
                 candidate != null && candidate.Kind == ProbeCandidateKind.Raw && timing.RawMainMeasureDuration > TimeSpan.Zero
                     ? timing.RawMainMeasureDuration
-                    : timing.MainMeasureDuration;
+                    : (isSpeedifyCandidate && timing.SpeedifyBaseMeasuredDuration > TimeSpan.Zero
+                        ? timing.SpeedifyBaseMeasuredDuration
+                        : timing.MainMeasureDuration);
             TimeSpan main = configuredMain > TimeSpan.Zero
                 ? configuredMain
                 : timing.ObserveDuration;
 
             if (hardIgnore > TimeSpan.Zero)
             {
-                Log("startup-probe | hard-ignore start | " + candidate +
+                Log((isSpeedifyCandidate ? "startup-probe | protected-startup-buffer start | " : "startup-probe | hard-ignore start | ") + candidate +
                     " | durationMs=" + hardIgnore.TotalMilliseconds.ToString("0"));
                 (bool hardCatastrophic, string hardStopReason) =
                     await WaitWithCatastrophicChecksAsync(candidate, hardIgnore, cancellationToken);
                 if (hardCatastrophic)
                     return await BuildEarlyStopRuntimeAsync(candidate, hardStopReason ?? "early-stop catastrophic during hard-ignore");
+
+                if (isSpeedifyCandidate)
+                    Log("startup-probe | protected-startup-buffer end | " + candidate);
+            }
+
+            if (isSpeedifyCandidate && timing.SpeedifyIgnoreNegativeEventsDuration > TimeSpan.Zero)
+            {
+                TimeSpan remainingIgnore = timing.SpeedifyIgnoreNegativeEventsDuration - warmupElapsed - hardIgnore;
+                if (remainingIgnore > TimeSpan.Zero)
+                {
+                    Log("startup-probe | startup-noise-ignore active | " + candidate +
+                        " | durationMs=" + remainingIgnore.TotalMilliseconds.ToString("0") +
+                        " | ignoring spikes/ordinary negatives");
+                    (bool catastrophic, string stopReason) =
+                        await WaitWithCatastrophicChecksAsync(candidate, remainingIgnore, cancellationToken);
+                    if (catastrophic)
+                        return await BuildEarlyStopRuntimeAsync(candidate, stopReason ?? "early-stop catastrophic during startup-noise-ignore");
+                }
             }
 
             ProbeCandidateRuntimeData provisionalRuntime = null;
@@ -894,6 +931,12 @@ namespace WTFnetApp
                 }
             }
 
+            if (isSpeedifyCandidate)
+            {
+                Log("startup-probe | measured-evaluation start | " + candidate +
+                    " | durationMs=" + main.TotalMilliseconds.ToString("0"));
+            }
+
             ProbeCandidateRuntimeData mainRuntime = await captureProbeAsync(
                 candidate,
                 TimeSpan.Zero,
@@ -911,6 +954,48 @@ namespace WTFnetApp
                 mainRuntime.Notes = AppendNote(mainRuntime.Notes, mainStopReason);
                 Log("startup-probe | candidate measured-early-stop | " + candidate + " | reason=" + mainStopReason);
                 return mainRuntime;
+            }
+
+            if (isSpeedifyCandidate)
+            {
+                bool lateStabilization =
+                    warmupElapsed >= timing.SpeedifyIgnoreNegativeEventsDuration &&
+                    timing.SpeedifyLateStabilizationGraceDuration > TimeSpan.Zero;
+
+                bool promising = IsPromisingForExtension(mainRuntime, rawScore, leaderScore);
+                if ((promising || lateStabilization) && timing.SpeedifyPromisingCandidateExtensionDuration > TimeSpan.Zero)
+                {
+                    TimeSpan extension = timing.SpeedifyPromisingCandidateExtensionDuration;
+                    if (lateStabilization)
+                        extension += timing.SpeedifyLateStabilizationGraceDuration;
+
+                    Log("startup-probe | measured-evaluation extend | " + candidate +
+                        " | extensionMs=" + extension.TotalMilliseconds.ToString("0") +
+                        " | reason=" + (lateStabilization ? "late-stabilization" : "promising-candidate"));
+
+                    ProbeCandidateRuntimeData extensionRuntime = await captureProbeAsync(
+                        candidate,
+                        TimeSpan.Zero,
+                        extension);
+
+                    extensionRuntime.ReachedUsableState = true;
+                    extensionRuntime.MeasurementStarted = true;
+                    extensionRuntime.Notes = AppendNote(extensionRuntime.Notes, "measured-extension");
+
+                    if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(extensionRuntime, out string extensionStopReason))
+                    {
+                        extensionRuntime.MeasurementStoppedEarly = true;
+                        extensionRuntime.MeasurementCompleted = false;
+                        extensionRuntime.MeasurementStopReason = extensionStopReason;
+                        extensionRuntime.Notes = AppendNote(extensionRuntime.Notes, extensionStopReason);
+                        Log("startup-probe | candidate measured-early-stop | " + candidate + " | reason=" + extensionStopReason);
+                        return MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
+                    }
+
+                    mainRuntime = MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
+                    mainRuntime.Notes = AppendNote(mainRuntime.Notes, lateStabilization ? "startup-late-stabilization-grace" : "startup-promising-extension");
+                    main = main + extension;
+                }
             }
 
             ProbeCandidateRuntimeData merged = provisionalRuntime != null
@@ -1070,6 +1155,25 @@ namespace WTFnetApp
         private static bool IsBad(double value, Func<double, bool> isBad)
         {
             return value >= 0 && isBad != null && isBad(value);
+        }
+
+        private bool IsPromisingForExtension(
+            ProbeCandidateRuntimeData runtime,
+            ProbeScoreResult rawScore,
+            ProbeScoreResult leaderScore)
+        {
+            if (runtime == null || runtime.MeasurementStoppedEarly)
+                return false;
+
+            ProbeScoreResult snapshot = ProbeScoring.ScoreCandidate(runtime);
+            double baseline = leaderScore?.StartupSelectionScore ?? rawScore?.StartupSelectionScore ?? double.MaxValue;
+            if (baseline >= double.MaxValue)
+                return true;
+
+            double gap = snapshot.StartupSelectionScore - baseline;
+            return gap <= 22.0 ||
+                   snapshot.OverallStabilityScore <= baseline + 18.0 ||
+                   snapshot.WarningLevel == ProbeWarningLevel.None;
         }
 
         private StartupProbeResult BuildUnreliableResult(
@@ -1243,6 +1347,11 @@ namespace WTFnetApp
         public TimeSpan TransitionGrace { get; set; } = TimeSpan.FromSeconds(1.6);
         public TimeSpan SpeedifyWarmupTolerance { get; set; } = TimeSpan.FromSeconds(6.0);
         public TimeSpan SpeedifyWarmupPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
+        public TimeSpan SpeedifyProtectedStartupBufferDuration { get; set; } = TimeSpan.FromSeconds(3.0);
+        public TimeSpan SpeedifyIgnoreNegativeEventsDuration { get; set; } = TimeSpan.FromSeconds(6.0);
+        public TimeSpan SpeedifyBaseMeasuredDuration { get; set; } = TimeSpan.FromSeconds(12.0);
+        public TimeSpan SpeedifyPromisingCandidateExtensionDuration { get; set; } = TimeSpan.FromSeconds(6.0);
+        public TimeSpan SpeedifyLateStabilizationGraceDuration { get; set; } = TimeSpan.FromSeconds(4.0);
         public TimeSpan HardIgnoreDuration { get; set; } = TimeSpan.FromSeconds(2.5);
         public TimeSpan ProvisionalDuration { get; set; } = TimeSpan.FromSeconds(2.5);
         public TimeSpan MainMeasureDuration { get; set; } = TimeSpan.FromSeconds(10.0);
