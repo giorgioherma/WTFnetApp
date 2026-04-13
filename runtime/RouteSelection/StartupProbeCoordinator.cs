@@ -685,9 +685,9 @@ namespace WTFnetApp
         }
 
         private bool EvaluateStartupTrustGate(
-            StartupWarmupTelemetrySnapshot telemetry,
-            out string reason,
-            out bool negativeOnlyTrust)
+    StartupWarmupTelemetrySnapshot telemetry,
+    out string reason,
+    out bool negativeOnlyTrust)
         {
             negativeOnlyTrust = false;
             reason = "missing speedify telemetry";
@@ -728,9 +728,6 @@ namespace WTFnetApp
                 return true;
             }
 
-            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
-            FastPingState state = getFastPingState();
-
             bool windowValid = window != null && window.IsValid;
             bool hasFastPingPing = windowValid && window.AvgPingMs > 0;
             bool hasFastPingJitter = windowValid && window.AvgJitterMs > 0;
@@ -743,13 +740,12 @@ namespace WTFnetApp
                     window.P95PingMs >= 2200.0 ||
                     window.AvgPingMs >= 1600.0));
 
-            if (fastPingCollapsed && speedifyLatency >= 900.0)
             {
                 negativeOnlyTrust = true;
                 reason = "catastrophic-match";
                 return true;
             }
-
+            
             if (!hasFastPingPing)
             {
                 reason = "fastping not stable yet";
