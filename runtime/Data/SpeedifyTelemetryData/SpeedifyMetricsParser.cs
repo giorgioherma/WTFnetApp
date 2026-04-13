@@ -115,6 +115,41 @@ namespace WTFnetApp
 
             int generation = BeginLinkRefresh();
 
+            foreach (SpeedifyLinkState link in structuredState.Links)
+            {
+                if (link == null)
+                    continue;
+
+                // Not seen in THIS refresh = missing from current connection_stats
+                if (!link.SeenInCurrentRefresh)
+                {
+                    // Ignore aggregate rows (they are virtual)
+                    if (link.IsAggregate)
+                        continue;
+
+                    // Ignore proxy-only rows (they are not real signal carriers)
+                    bool isProxy = string.Equals(link.Protocol, "proxy", StringComparison.OrdinalIgnoreCase)
+                                   || (link.Key != null && link.Key.Contains("%proxy"));
+
+                    if (isProxy)
+                        continue;
+
+                    // 🔥 THIS IS THE FIX: kill live state immediately
+                    if (link.Connected || link.LatencyMs >= 0 || link.JitterMs >= 0)
+                    {
+                        link.Connected = false;
+                        link.LatencyMs = -1;
+                        link.JitterMs = -1;
+                        link.RxBps = 0;
+                        link.TxBps = 0;
+                        link.TotalBps = 0;
+
+                        Logger.Log("speedify-link",
+                            "downgraded (missing in conn_stats) | key=" + link.Key);
+                    }
+                }
+            }
+
             structuredState.Tunnel.ActiveConnectionCount = ReadIntProperty(root, "numActive");
             structuredState.Tunnel.BackupConnectionCount = ReadIntProperty(root, "numBackup");
 
