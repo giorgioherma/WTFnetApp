@@ -260,13 +260,26 @@ namespace WTFnetApp
             consecutiveStableSpeedifySnapshots++;
             lastStableSpeedifySnapshotUtc = now;
 
-            if (consecutiveStableSpeedifySnapshots < 2)
+            bool startupGrace =
+                consecutiveStableSpeedifySnapshots == 1 &&
+                snapshot.HasConnectionStats &&
+                snapshot.HasNetworks &&
+                snapshot.HasCurrentState &&
+                snapshot.HasConnectedServer &&
+                snapshot.StructuredCoreComplete &&
+                snapshot.TunnelConnected &&
+                snapshot.ActiveConnectionCount > 0;
+
+            if (consecutiveStableSpeedifySnapshots < 2 && !startupGrace)
             {
                 reason = "waiting for consecutive stable snapshots";
                 return false;
             }
 
-            reason = "stable";
+            reason = startupGrace
+                ? "startup grace accepted first stable snapshot"
+                : "stable";
+
             return true;
         }
 

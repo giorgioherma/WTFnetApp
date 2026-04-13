@@ -149,7 +149,6 @@ namespace WTFnetApp
 
             ProbeCandidateRuntimeData rawRuntime = await RunSegmentedMeasurementAsync(
                 rawCandidate,
-                warmupElapsed: TimeSpan.Zero,
                 rawScore: null,
                 leaderScore: null,
                 cancellationToken: cancellationToken);
@@ -237,7 +236,6 @@ namespace WTFnetApp
 
                 ProbeCandidateRuntimeData runtime = await RunSegmentedMeasurementAsync(
                     candidate,
-                    TimeSpan.FromMilliseconds(Math.Max(0.0, warmupResult.WaitedMs)),
                     rawScore,
                     leader,
                     cancellationToken);
@@ -282,7 +280,14 @@ namespace WTFnetApp
                 }
 
                 ProbeDiscardDecision discardDecision = ProbeScoring.EvaluateDiscardDecision(score, rawScore, leader);
-                bool discard = discardDecision.ShouldDiscard;
+
+                // 🚫 HARD GUARD: do NOT allow discard if minimum measurement not reached
+                bool minimumMet =
+                    runtime.MeasurementStarted &&
+                    !runtime.MeasurementStoppedEarly &&
+                    runtime.MeasurementCompleted;
+
+                bool discard = minimumMet && discardDecision.ShouldDiscard;
 
                 if (discard)
                 {
@@ -651,8 +656,8 @@ namespace WTFnetApp
         }
 
         private bool EvaluateStartupTrustGate(
-    StartupWarmupTelemetrySnapshot telemetry,
-    out string reason)
+            StartupWarmupTelemetrySnapshot telemetry,
+            out string reason)
         {
             reason = "missing speedify telemetry";
 
@@ -824,7 +829,6 @@ namespace WTFnetApp
 
         private async Task<ProbeCandidateRuntimeData> RunSegmentedMeasurementAsync(
             ProbeCandidateDefinition candidate,
-            TimeSpan warmupElapsed,
             ProbeScoreResult rawScore,
             ProbeScoreResult leaderScore,
             CancellationToken cancellationToken)
@@ -835,9 +839,10 @@ namespace WTFnetApp
 
             TimeSpan protectedStartupBuffer = timing.CommonProtectedStartupBufferDuration;
             TimeSpan ignoreNegativeWindow = timing.CommonIgnoreNegativeEventsDuration;
-            TimeSpan main = timing.BaseMeasuredDuration > TimeSpan.Zero
-                ? timing.BaseMeasuredDuration
-                : timing.ObserveDuration;
+            TimeSpan main = GetEffectiveMeasuredDuration(
+                candidate,
+                protectedStartupBuffer,
+                ignoreNegativeWindow);
 
             if (protectedStartupBuffer > TimeSpan.Zero)
             {
@@ -858,10 +863,6 @@ namespace WTFnetApp
             }
 
             TimeSpan remainingIgnore = ignoreNegativeWindow;
-            if (isSpeedifyCandidate)
-                remainingIgnore = ignoreNegativeWindow - warmupElapsed - protectedStartupBuffer;
-            else
-                remainingIgnore = ignoreNegativeWindow - protectedStartupBuffer;
 
             if (remainingIgnore > TimeSpan.Zero)
             {
@@ -956,6 +957,31 @@ namespace WTFnetApp
             Log("startup-probe | candidate measured-full | " + candidate);
 
             return mainRuntime;
+        }
+
+        private TimeSpan GetEffectiveMeasuredDuration(
+            ProbeCandidateDefinition candidate,
+            TimeSpan protectedStartupDuration,
+            TimeSpan ignoreNegativeDuration)
+        {
+            // RAW (no Speedify) → always fixed 15s
+            bool isRawCandidate =
+                candidate == null ||
+                candidate.Kind == ProbeCandidateKind.Raw;
+
+            if (isRawCandidate)
+                return timing.RawMeasuredDuration;
+
+            // Shield time = startup protection + ignore negatives
+            TimeSpan shieldDuration = protectedStartupDuration + ignoreNegativeDuration;
+
+            // Ensure at least 7s REAL measurement AFTER shielding
+            TimeSpan minimumRequired = shieldDuration + timing.MinimumPostBufferMeasuredDuration;
+
+            // Use base duration (12s) unless it violates the rule
+            return timing.BaseMeasuredDuration >= minimumRequired
+                ? timing.BaseMeasuredDuration
+                : minimumRequired;
         }
 
         private async Task<(bool IsCatastrophic, string Reason)> WaitWithCatastrophicChecksAsync(
@@ -1238,21 +1264,26 @@ namespace WTFnetApp
     {
         public TimeSpan TransitionGrace { get; set; } = TimeSpan.FromSeconds(1.6);
 
-        // Common startup protection for ALL candidates.
-        public TimeSpan CommonProtectedStartupBufferDuration { get; set; } = TimeSpan.FromSeconds(3.0);
-        public TimeSpan CommonIgnoreNegativeEventsDuration { get; set; } = TimeSpan.FromSeconds(6.0);
+        // SHORTENED buffers (you requested this)
+        public TimeSpan CommonProtectedStartupBufferDuration { get; set; } = TimeSpan.FromSeconds(1.5);
+        public TimeSpan CommonIgnoreNegativeEventsDuration { get; set; } = TimeSpan.FromSeconds(1.5);
 
-        // Same mandatory measured duration for ALL candidates.
+        // Main measured window (Speedify baseline)
         public TimeSpan BaseMeasuredDuration { get; set; } = TimeSpan.FromSeconds(12.0);
 
-        // Optional extra certainty window.
+        // RAW must always be longer
+        public TimeSpan RawMeasuredDuration { get; set; } = TimeSpan.FromSeconds(15.0);
+
+        // GUARANTEE: at least this much REAL measurement after buffers
+        public TimeSpan MinimumPostBufferMeasuredDuration { get; set; } = TimeSpan.FromSeconds(7.0);
+
+        // Optional extension
         public TimeSpan PromisingCandidateExtensionDuration { get; set; } = TimeSpan.FromSeconds(4.0);
 
-        // Speedify-only warmup / trust gate before measurement may begin.
+        // Warmup
         public TimeSpan SpeedifyWarmupTolerance { get; set; } = TimeSpan.FromSeconds(6.0);
         public TimeSpan SpeedifyWarmupPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
 
-        // Fallback only. Can be zero if you want BaseMeasuredDuration to be the only real measured window.
         public TimeSpan ObserveDuration { get; set; } = TimeSpan.Zero;
 
         public static StartupProbeTimingConfig Default { get; } = new StartupProbeTimingConfig();
