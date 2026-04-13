@@ -704,6 +704,30 @@ namespace WTFnetApp
                 return false;
             }
 
+            FastPingState state = getFastPingState();
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
+
+            bool fastPingCollapsedFromState =
+                state == null ||
+                state.IsStale ||
+                (!state.PrimaryFresh && !state.SecondaryFresh) ||
+                (state.Confidence >= 0 && state.Confidence < 0.15);
+
+            bool fastPingCollapsedFromWindow =
+                window == null ||
+                !window.IsValid ||
+                window.StaleRate >= 0.70 ||
+                window.AvgLossRate >= 0.70 ||
+                window.P95PingMs >= 2200.0 ||
+                window.AvgPingMs >= 1600.0;
+
+            if ((fastPingCollapsedFromState || fastPingCollapsedFromWindow) && speedifyLatency >= 900.0)
+            {
+                negativeOnlyTrust = true;
+                reason = "catastrophic-match";
+                return true;
+            }
+
             FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
             FastPingState state = getFastPingState();
 
