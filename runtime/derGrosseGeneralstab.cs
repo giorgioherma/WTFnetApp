@@ -76,9 +76,12 @@ namespace WTFnetApp
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
             TransitionGrace = TimeSpan.FromSeconds(2.0),
+            SpeedifyWarmupTolerance = TimeSpan.FromSeconds(6.0),
+            SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
             HardIgnoreDuration = TimeSpan.FromSeconds(2.0),
             ProvisionalDuration = TimeSpan.FromSeconds(2.0),
             MainMeasureDuration = TimeSpan.FromSeconds(10.0),
+            RawMainMeasureDuration = TimeSpan.FromSeconds(8.0),
             MeasurementStartGuard = TimeSpan.FromSeconds(0.9),
             ObserveDuration = TimeSpan.FromSeconds(10.0)
         };
@@ -515,11 +518,12 @@ namespace WTFnetApp
             Logger.Log("startup",
                 "applyDecision=" + applyDecision.Kind +
                 " | reason=" + applyDecision.Reason +
+                " | coordinatorRestore=" + (lastStartupProbeResult.FinalRestoreSucceeded ? "succeeded" : "failed-or-not-confirmed") +
                 " | " + BuildApplyDecisionDebugContext(lastStartupProbeResult));
 
             if (applyDecision.Kind == StartupApplyDecisionKind.ApplyWinner)
             {
-                // Coordinator already restored final winner once at end of probe flow.
+                // Coordinator restore status is reported above; policy step remains explicit no-op/apply confirmation.
                 await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
             }
             else if (applyDecision.Kind == StartupApplyDecisionKind.KeepRaw)
@@ -528,7 +532,7 @@ namespace WTFnetApp
             }
             else
             {
-                // KeepCurrent intentionally keeps the route already finalized by startup probe winner restore.
+                // KeepCurrent preserves current route state; coordinator restore status is logged above.
                 Logger.Log("startup", "keeping current route state (no winner apply)");
             }
 
@@ -1391,6 +1395,7 @@ namespace WTFnetApp
                     },
                 Baseline = GetOrCloneProbeScoreResult(source.Baseline, scoreMap),
                 Winner = GetOrCloneProbeScoreResult(source.Winner, scoreMap),
+                FinalRestoreSucceeded = source.FinalRestoreSucceeded,
                 AllResults = clonedAllResults,
                 Shortlist = clonedShortlist,
                 WinnerConfidence = source.WinnerConfidence == null
@@ -1437,6 +1442,7 @@ namespace WTFnetApp
                 Runtime = CloneProbeRuntime(source.Runtime),
                 OverallStabilityScore = source.OverallStabilityScore,
                 JitterStabilityScore = source.JitterStabilityScore,
+                StartupSelectionScore = source.StartupSelectionScore,
                 WarningLevel = source.WarningLevel,
                 Badge = source.Badge,
                 IsDiscardedEarly = source.IsDiscardedEarly,
@@ -1445,7 +1451,18 @@ namespace WTFnetApp
                 SummaryText = source.SummaryText,
                 WarningText = source.WarningText,
                 BadgeText = source.BadgeText,
-                JitterRangeMs = source.JitterRangeMs
+                JitterRangeMs = source.JitterRangeMs,
+                LatencyContribution = source.LatencyContribution,
+                JitterContribution = source.JitterContribution,
+                SpikeContribution = source.SpikeContribution,
+                LossStaleBadContribution = source.LossStaleBadContribution,
+                SpeedifyGlobalAdjustment = source.SpeedifyGlobalAdjustment,
+                SpeedifyPositiveInfluenceCapApplied = source.SpeedifyPositiveInfluenceCapApplied,
+                SpeedifyLatencyModifier = source.SpeedifyLatencyModifier,
+                SpeedifyJitterModifier = source.SpeedifyJitterModifier,
+                SpeedifySpikeModifier = source.SpeedifySpikeModifier,
+                SpeedifyLossStaleModifier = source.SpeedifyLossStaleModifier,
+                SpeedifyHealthLabel = source.SpeedifyHealthLabel
             };
 
             scoreMap[source] = cloned;
@@ -1491,7 +1508,9 @@ namespace WTFnetApp
                 MeasurementCompleted = source.MeasurementCompleted,
                 MeasurementStoppedEarly = source.MeasurementStoppedEarly,
                 MeasurementStopReason = source.MeasurementStopReason,
-                DiscardReason = source.DiscardReason
+                DiscardReason = source.DiscardReason,
+                StartupSpeedifyTrusted = source.StartupSpeedifyTrusted,
+                StartupSpeedifyNegativeOnly = source.StartupSpeedifyNegativeOnly
             };
         }
 
@@ -1526,14 +1545,16 @@ namespace WTFnetApp
 
         public Task RunManualRouteRecheck()
         {
-            Logger.Log("startup", "manual recheck requested");
+            Logger.Log("startup", "manual route recheck requested (runs startup route evaluation flow)");
             Startup();
             return Task.CompletedTask;
         }
 
         public Task RunManualServerPingScan()
         {
-            return RunManualRouteRecheck();
+            Logger.Log("startup", "manual server ping scan requested (alias to startup route evaluation flow)");
+            Startup();
+            return Task.CompletedTask;
         }
 
         // =========================
