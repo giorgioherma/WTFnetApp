@@ -6,6 +6,9 @@ namespace WTFnetApp
 {
     public class SpeedifyMetricsParser
     {
+        private const int LinkPruneGenerationGrace = 2;
+        private static readonly TimeSpan NetworksIdentityWarmupGrace = TimeSpan.FromSeconds(8);
+
         private double smoothJitter = 0;
         private double previousLatency = 0;
         private double dynamicBase = 0;
@@ -780,10 +783,18 @@ namespace WTFnetApp
                                     link.TotalBps > 0 ||
                                     link.Connected;
 
-                if (hasLiveStats && !hasIdentity)
+                bool networksRecentlySeen =
+                    structuredState.HasNetworks &&
+                    structuredState.LastNetworksUtc != DateTime.MinValue &&
+                    (DateTime.UtcNow - structuredState.LastNetworksUtc) <= NetworksIdentityWarmupGrace;
+
+                if (hasLiveStats && !hasIdentity && networksRecentlySeen)
                     AddWarningOnce("link_live_stats_without_identity:" + link.Key);
 
-                if (hasIdentity && !hasLiveStats)
+                bool activeParticipation = link.Connected || link.NumConns > 0 || link.ConnectionState > 0;
+                bool inactiveOrOffline = link.Offline || link.Sleeping || !activeParticipation;
+
+                if (hasIdentity && !hasLiveStats && !inactiveOrOffline)
                     AddWarningOnce("link_identity_without_live_stats:" + link.Key);
             }
         }
@@ -880,7 +891,7 @@ namespace WTFnetApp
                 if (keepAggregateRows && link.IsAggregate)
                     continue;
 
-                if (link.LastSeenGeneration < generation - 1)
+                if (link.LastSeenGeneration < generation - LinkPruneGenerationGrace)
                     structuredState.Links.RemoveAt(i);
             }
         }
