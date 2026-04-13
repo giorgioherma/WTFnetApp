@@ -75,12 +75,10 @@ namespace WTFnetApp
 
         public string TimeBucketKey { get; set; }
 
-        // Ping
         public double AvgPingMs { get; set; } = -1;
         public double MaxPingMs { get; set; } = -1;
         public double P95PingMs { get; set; } = -1;
 
-        // Jitter
         public double AvgJitterMs { get; set; } = -1;
         public double MinJitterMs { get; set; } = -1;
         public double MaxJitterMs { get; set; } = -1;
@@ -93,7 +91,6 @@ namespace WTFnetApp
         public double SpikeDensityPerMinute { get; set; } = -1;
         public double StaleRate { get; set; } = -1;
 
-        // Speedify side if candidate uses tunnel
         public bool TunnelConnected { get; set; }
         public bool AggregateCongested { get; set; }
         public int ActiveConnectionCount { get; set; }
@@ -118,7 +115,6 @@ namespace WTFnetApp
         public string MeasurementStopReason { get; set; }
         public string DiscardReason { get; set; }
         public bool StartupSpeedifyTrusted { get; set; } = false;
-        public bool StartupSpeedifyNegativeOnly { get; set; }
     }
 
     public sealed class ProbeScoreResult
@@ -126,7 +122,6 @@ namespace WTFnetApp
         public ProbeCandidateDefinition Candidate { get; set; }
         public ProbeCandidateRuntimeData Runtime { get; set; }
 
-        // lower is better
         public double OverallStabilityScore { get; set; } = double.MaxValue;
         public double JitterStabilityScore { get; set; } = double.MaxValue;
         public double StartupSelectionScore { get; set; } = double.MaxValue;
@@ -182,7 +177,6 @@ namespace WTFnetApp
             HealthyBonded = 4
         }
 
-        // Raw thresholds
         private const double BorderlineAvgJitterMs = 12.0;
         private const double RiskyAvgJitterMs = 18.0;
 
@@ -195,7 +189,6 @@ namespace WTFnetApp
         private const double BorderlineSpikeDensity = 4.0;
         private const double RiskySpikeDensity = 8.0;
 
-        // Keep tiny loss tolerant, but make gaming-impactful loss clearly matter.
         private const double BorderlineLossRate = 0.05;
         private const double RiskyLossRate = 0.075;
 
@@ -205,7 +198,6 @@ namespace WTFnetApp
         private const double BorderlineBadQualityRate = 0.12;
         private const double RiskyBadQualityRate = 0.25;
 
-        // Speedify warning thresholds
         private const double SpeedifyBorderlineAvgJitterMs = 14.5;
         private const double SpeedifyRiskyAvgJitterMs = 22.0;
         private const double SpeedifyBorderlineJitterRangeMs = 13.0;
@@ -221,7 +213,6 @@ namespace WTFnetApp
         private const double SpeedifyBorderlineBadRate = 0.16;
         private const double SpeedifyRiskyBadRate = 0.30;
 
-        // Bounded Speedify influence
         private const double MaxHealthySinglePositiveInfluence = 0.06;
         private const double MaxHealthyBondedPositiveInfluence = 0.10;
 
@@ -274,11 +265,6 @@ namespace WTFnetApp
             double speedifyAdjustment = SpeedifyPenalty(runtime, healthBucket);
             double confidencePenalty = ConfidencePenalty(runtime.AvgConfidence);
 
-            // ==========================================================
-            // SAFETY FIX:
-            // If Speedify telemetry is not truly valid, neutralize ALL
-            // Speedify influence so only FastPing drives scoring.
-            // ==========================================================
             bool speedifyValid =
                 runtime.Candidate != null &&
                 runtime.Candidate.Kind == ProbeCandidateKind.Speedify &&
@@ -290,20 +276,11 @@ namespace WTFnetApp
             if (!speedifyValid)
             {
                 healthBucket = SpeedifyHealthBucket.NoTelemetry;
-
                 latencyModifier = 1.0;
                 jitterModifier = 1.0;
                 spikeModifier = 1.0;
                 lossStaleModifier = 1.0;
                 speedifyAdjustment = 0.0;
-            }
-            else if (runtime.StartupSpeedifyNegativeOnly)
-            {
-                latencyModifier = Math.Max(1.0, latencyModifier);
-                jitterModifier = Math.Max(1.0, jitterModifier);
-                spikeModifier = Math.Max(1.0, spikeModifier);
-                lossStaleModifier = Math.Max(1.0, lossStaleModifier);
-                speedifyAdjustment = Math.Max(0.0, speedifyAdjustment);
             }
 
             result.JitterRangeMs = jitterRange;
@@ -313,14 +290,12 @@ namespace WTFnetApp
             result.SpeedifyLossStaleModifier = lossStaleModifier;
             result.SpeedifyHealthLabel = GetSpeedifyHealthLabel(healthBucket);
 
-            // Smoothness metric only. Lower is better.
             result.JitterStabilityScore =
                 avgJitter +
                 (jitterRange * 0.65) +
                 (spikeDensity * 0.45) +
                 (badRate * 12.0);
 
-            // Full comparison metric. FastPing base remains dominant, Speedify only corrects interpretation.
             double latencyContribution = ((p95Ping * 0.10) + (avgPing * 0.05)) * latencyModifier;
             double jitterContribution = ((avgJitter * 1.75) + (jitterRange * 1.05)) * jitterModifier;
             double spikeContribution = (spikeDensity * 2.95) * spikeModifier;
@@ -362,12 +337,9 @@ namespace WTFnetApp
             result.OverallStabilityScore = cappedScore;
 
             if (runtime.MeasurementStoppedEarly)
-            {
                 result.OverallStabilityScore += ComputeEarlyStopPenalty(runtime.MeasurementStopReason);
-            }
 
             result.StartupSelectionScore = result.OverallStabilityScore;
-
             result.WarningLevel = ClassifyWarning(runtime);
 
             if (result.WarningLevel == ProbeWarningLevel.Borderline)
@@ -390,28 +362,32 @@ namespace WTFnetApp
 
             ProbeCandidateRuntimeData runtime = candidate.Runtime;
 
-            double stabilityCore = candidate.OverallStabilityScore * 0.68;
-            double spikePenalty = Safe(runtime.SpikeDensityPerMinute) * 1.45;
+            double stabilityCore = candidate.OverallStabilityScore * 0.78;
+            double spikePenalty = Safe(runtime.SpikeDensityPerMinute) * 1.20;
+
             double persistenceFactor = ComputeStartupPersistenceFactor(runtime);
             double effectiveLoss = Math.Min(1.0, EffectiveLossRate(runtime.AvgLossRate) * persistenceFactor);
             double effectiveBadQuality = Math.Min(1.0, Safe(runtime.AvgBadQualityRate) * persistenceFactor);
 
-            double lossPenalty = effectiveLoss * 100.0 * 0.22;
-            double badQualityPenalty = effectiveBadQuality * 100.0 * 0.12;
-            double confidencePenalty = Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 15.0;
+            double lossPenalty = effectiveLoss * 100.0 * 0.18;
+            double badQualityPenalty = effectiveBadQuality * 100.0 * 0.10;
+
+            double confidencePenalty =
+                runtime.AvgConfidence < 0 ? 4.0 :
+                Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 6.0;
 
             double avgJitter = Safe(runtime.AvgJitterMs);
             double jitterRange = Safe(ComputeJitterRange(runtime));
-            double jitterStabilityPenalty = (avgJitter * 0.95) + (jitterRange * 0.80);
+            double jitterStabilityPenalty = (avgJitter * 0.85) + (jitterRange * 0.70);
 
             double p95Ping = Safe(runtime.P95PingMs);
             double avgPing = Safe(runtime.AvgPingMs);
-            double tailPenalty = (p95Ping * 0.06) + (Math.Max(0.0, p95Ping - avgPing) * 0.05);
-            double smallLatencyPenalty = avgPing * 0.015;
+            double tailPenalty = (p95Ping * 0.05) + (Math.Max(0.0, p95Ping - avgPing) * 0.04);
+            double smallLatencyPenalty = avgPing * 0.012;
 
             double warningAdjustment =
-                candidate.WarningLevel == ProbeWarningLevel.Risky ? 18.0 :
-                candidate.WarningLevel == ProbeWarningLevel.Borderline ? 6.0 :
+                candidate.WarningLevel == ProbeWarningLevel.Risky ? 14.0 :
+                candidate.WarningLevel == ProbeWarningLevel.Borderline ? 5.0 :
                 0.0;
 
             double learningAdjustment = ComputeLearningAdjustment(runtime, learned);
@@ -434,25 +410,16 @@ namespace WTFnetApp
                 return 1.0;
 
             string notes = runtime.Notes ?? string.Empty;
-            bool provisionalSoftened = NotesContain(notes, "provisional-softened");
-            bool measuredMain = NotesContain(notes, "measured-main");
+
             bool measuredExtension = NotesContain(notes, "measured-extension");
-            bool lateStabilizationGrace = NotesContain(notes, "startup-late-stabilization-grace");
-            bool promisingExtension = NotesContain(notes, "startup-promising-extension");
+            bool confidenceExtension = NotesContain(notes, "startup-confidence-extension");
 
-            // Early startup badness should be mostly ignored if it does not repeat in the real measured section.
-            if (provisionalSoftened && measuredMain && !measuredExtension)
-                return 0.50;
+            double factor = 1.0;
 
-            // Late stabilization extension indicates persistence of instability and should count harder.
-            if (lateStabilizationGrace)
-                return 1.12;
+            if (measuredExtension || confidenceExtension)
+                factor = 1.03;
 
-            // Promising extensions are not persistent-bad by default.
-            if (promisingExtension)
-                return 1.0;
-
-            return 1.0;
+            return factor;
         }
 
         private static bool NotesContain(string notes, string token)
@@ -510,8 +477,7 @@ namespace WTFnetApp
                 return decision;
             }
 
-            string failFastReason;
-            if (TryGetFailFastDiscardReason(candidate, out failFastReason))
+            if (TryGetFailFastDiscardReason(candidate, out string failFastReason))
             {
                 decision.ShouldDiscard = true;
                 decision.ReasonCategory = failFastReason;
@@ -548,8 +514,7 @@ namespace WTFnetApp
                 return true;
             }
 
-            string invalidReason = null;
-            if (!TryValidateMeasuredRuntimeForScoring(candidate.Runtime, out invalidReason))
+            if (!TryValidateMeasuredRuntimeForScoring(candidate.Runtime, out string invalidReason))
             {
                 reason = invalidReason ?? "unusable probe";
                 return true;
@@ -696,7 +661,10 @@ namespace WTFnetApp
                 double gap = hasConfidenceGap
                     ? confidence.GapToRunnerUpScore
                     : Math.Max(0.0, selector(runnerUp) - selector(winner));
-                gapText = gap >= 8.0 ? "clear score gap" : gap >= 3.0 ? "moderate score gap" : "narrow score gap";
+
+                gapText = gap >= 8.0 ? "clear score gap" :
+                          gap >= 3.0 ? "moderate score gap" :
+                          "narrow score gap";
             }
 
             string confidenceText = confidence != null
@@ -720,7 +688,8 @@ namespace WTFnetApp
                 return result;
             }
 
-            Func<ProbeScoreResult, double> selector = scoreSelector ?? (x => x != null ? x.OverallStabilityScore : double.MaxValue);
+            Func<ProbeScoreResult, double> selector =
+                scoreSelector ?? (x => x != null ? x.OverallStabilityScore : double.MaxValue);
 
             bool missingRunnerUp = runnerUp == null;
             double gap = runnerUp != null
@@ -756,9 +725,11 @@ namespace WTFnetApp
 
             double learningPoints = 0.0;
             string learningText = "seed/default-backed";
+
             if (learned != null && learned.IsTrustedLearning)
             {
                 int totalSamples = learned.SampleCountGood + learned.SampleCountBad;
+
                 if (totalSamples >= 10) learningPoints = 14.0;
                 else if (totalSamples >= 5) learningPoints = 10.0;
                 else learningPoints = 6.0;
@@ -781,22 +752,30 @@ namespace WTFnetApp
                 finalScore = Math.Min(finalScore, 60.0);
 
             finalScore = Math.Max(0.0, Math.Min(100.0, finalScore));
-
             result.ConfidenceScore = finalScore;
 
             if (!missingRunnerUp &&
                 finalScore >= 72.0 &&
                 gap >= 8.0 &&
                 winner.WarningLevel == ProbeWarningLevel.None)
+            {
                 result.Kind = ProbeWinnerConfidenceKind.HighConfidence;
+            }
             else if (!missingRunnerUp && finalScore >= 45.0 && gap >= 3.0)
+            {
                 result.Kind = ProbeWinnerConfidenceKind.Tentative;
+            }
             else
+            {
                 result.Kind = ProbeWinnerConfidenceKind.NoClearWinner;
+            }
 
             string gapText = missingRunnerUp
                 ? "runner-up unavailable"
-                : gap >= 8.0 ? "clear lead" : gap >= 3.0 ? "narrow lead" : "near tie";
+                : gap >= 8.0 ? "clear lead" :
+                  gap >= 3.0 ? "narrow lead" :
+                  "near tie";
+
             string sampleText = confidence >= 0.70 ? "good sample quality" : "limited sample quality";
             string staleText = stalePenalty > 0 ? "stale penalty applied" : "fresh samples";
 
@@ -895,10 +874,12 @@ namespace WTFnetApp
             if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
                 return SpeedifyHealthBucket.NotApplicable;
 
-            bool hasTelemetry = runtime.SpeedifyAggregateLatencyMs > 0 ||
-                                runtime.SpeedifyAggregateJitterMs > 0 ||
-                                runtime.SpeedifyReportedLatencyMs > 0 ||
-                                runtime.ActiveConnectionCount > 0;
+            bool hasTelemetry =
+                runtime.SpeedifyAggregateLatencyMs > 0 ||
+                runtime.SpeedifyAggregateJitterMs > 0 ||
+                runtime.SpeedifyReportedLatencyMs > 0 ||
+                runtime.ActiveConnectionCount > 0;
+
             if (!hasTelemetry)
                 return SpeedifyHealthBucket.NoTelemetry;
 
@@ -917,6 +898,7 @@ namespace WTFnetApp
 
             double fastLatency = Safe(runtime.P95PingMs) > 0 ? Safe(runtime.P95PingMs) : Safe(runtime.AvgPingMs);
             double speedifyLatency = ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs);
+
             double correlation = ComputeCorrelationModifier(
                 fastLatency,
                 speedifyLatency,
@@ -943,6 +925,7 @@ namespace WTFnetApp
 
             double fastJitter = Safe(runtime.P95JitterMs) > 0 ? Safe(runtime.P95JitterMs) : Safe(runtime.AvgJitterMs);
             double speedifyJitter = Safe(runtime.SpeedifyAggregateJitterMs);
+
             double correlation = ComputeCorrelationModifier(
                 fastJitter,
                 speedifyJitter,
@@ -980,10 +963,12 @@ namespace WTFnetApp
                 _ => 1.0
             };
 
-            if (healthBucket is SpeedifyHealthBucket.HealthyBonded or SpeedifyHealthBucket.HealthySingleLink)
+            if (healthBucket == SpeedifyHealthBucket.HealthyBonded ||
+                healthBucket == SpeedifyHealthBucket.HealthySingleLink)
             {
                 if (latencyHealthy && jitterHealthy)
                     modifier -= 0.05;
+
                 if (!lowSpike && runtime.AggregateCongested)
                     modifier += 0.08;
             }
@@ -996,7 +981,10 @@ namespace WTFnetApp
             if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
                 return 1.0;
 
-            double ugliness = Safe(runtime.StaleRate) + EffectiveLossRate(runtime.AvgLossRate) + Safe(runtime.AvgBadQualityRate);
+            double ugliness =
+                Safe(runtime.StaleRate) +
+                EffectiveLossRate(runtime.AvgLossRate) +
+                Safe(runtime.AvgBadQualityRate);
 
             double modifier = healthBucket switch
             {
@@ -1021,6 +1009,7 @@ namespace WTFnetApp
                 return 1.0;
 
             double expectedMax = speedifyMetric * (1.0 + Math.Max(0.0, expectedOverheadRatio));
+
             if (fastMetric <= expectedMax)
                 return healthyModifier;
 
@@ -1063,6 +1052,7 @@ namespace WTFnetApp
                 return adjustedScore;
 
             double floor = fastPingDominantScore * (1.0 - maxPositiveInfluence);
+
             if (adjustedScore >= floor)
                 return adjustedScore;
 

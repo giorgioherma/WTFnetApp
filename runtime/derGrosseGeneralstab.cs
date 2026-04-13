@@ -76,19 +76,17 @@ namespace WTFnetApp
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
             TransitionGrace = TimeSpan.FromSeconds(2.0),
+
             SpeedifyWarmupTolerance = TimeSpan.FromSeconds(6.0),
             SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
-            SpeedifyProtectedStartupBufferDuration = TimeSpan.FromSeconds(3.0),
-            SpeedifyIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(6.0),
-            SpeedifyBaseMeasuredDuration = TimeSpan.FromSeconds(12.0),
-            SpeedifyPromisingCandidateExtensionDuration = TimeSpan.FromSeconds(6.0),
-            SpeedifyLateStabilizationGraceDuration = TimeSpan.FromSeconds(4.0),
-            HardIgnoreDuration = TimeSpan.FromSeconds(2.0),
-            ProvisionalDuration = TimeSpan.FromSeconds(2.0),
-            MainMeasureDuration = TimeSpan.FromSeconds(10.0),
-            RawMainMeasureDuration = TimeSpan.FromSeconds(8.0),
-            MeasurementStartGuard = TimeSpan.FromSeconds(0.9),
-            ObserveDuration = TimeSpan.FromSeconds(10.0)
+
+            CommonProtectedStartupBufferDuration = TimeSpan.FromSeconds(3.0),
+            CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(6.0),
+
+            BaseMeasuredDuration = TimeSpan.FromSeconds(10.0),
+            PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
+
+            ObserveDuration = TimeSpan.Zero // ✅ correct
         };
 
         // =========================
@@ -538,7 +536,7 @@ namespace WTFnetApp
             else
             {
                 // KeepCurrent preserves current route state; coordinator restore status is logged above.
-                Logger.Log("startup", "keeping current route state (no winner apply)");
+                Logger.Log("startup", "keeping existing best route (no winner apply)");
             }
 
             Logger.Log("startup", lastStartupProbeResult.SummaryText ?? "startup probe finished");
@@ -1515,7 +1513,6 @@ namespace WTFnetApp
                 MeasurementStopReason = source.MeasurementStopReason,
                 DiscardReason = source.DiscardReason,
                 StartupSpeedifyTrusted = source.StartupSpeedifyTrusted,
-                StartupSpeedifyNegativeOnly = source.StartupSpeedifyNegativeOnly
             };
         }
 
