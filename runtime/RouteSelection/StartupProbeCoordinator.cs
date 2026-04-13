@@ -8,6 +8,37 @@ namespace WTFnetApp
 {
     public sealed class StartupProbeCoordinator
     {
+        public sealed class StartupWarmupTelemetrySnapshot
+        {
+            public bool HasIdentity { get; set; }
+            public bool TunnelConnected { get; set; }
+            public bool HasFreshTelemetry { get; set; }
+            public int ActiveConnectionCount { get; set; }
+            public double AggregateLatencyMs { get; set; } = -1;
+            public double AggregateJitterMs { get; set; } = -1;
+            public double ReportedLatencyMs { get; set; } = -1;
+        }
+
+        private readonly struct CandidateWarmupResult
+        {
+            public CandidateWarmupResult(bool isUsable, string reason, double waitedMs, bool startupTrustEstablished, bool startupTrustNegativeOnly, string warmupTag)
+            {
+                IsUsable = isUsable;
+                Reason = reason;
+                WaitedMs = waitedMs;
+                StartupTrustEstablished = startupTrustEstablished;
+                StartupTrustNegativeOnly = startupTrustNegativeOnly;
+                WarmupTag = warmupTag;
+            }
+
+            public bool IsUsable { get; }
+            public string Reason { get; }
+            public double WaitedMs { get; }
+            public bool StartupTrustEstablished { get; }
+            public bool StartupTrustNegativeOnly { get; }
+            public string WarmupTag { get; }
+        }
+
         private sealed class PersistenceRule
         {
             public Func<ProbeCandidateRuntimeData, double> Read { get; set; }
@@ -59,16 +90,25 @@ namespace WTFnetApp
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
+        private readonly Func<StartupWarmupTelemetrySnapshot> getWarmupTelemetry;
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
+        private static readonly HashSet<string> SpeedifyWarmupSoftReasons = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "stale route state",
+            "missing probe telemetry",
+            "no fresh probes",
+            "confidence too low"
+        };
 
         public StartupProbeCoordinator(
             Func<Task<bool>> disableSpeedifyAsync,
             Func<string, Task<bool>> activateSpeedifyAsync,
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
+            Func<StartupWarmupTelemetrySnapshot> getWarmupTelemetry,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             ServerProbeLearningStore learningStore,
             StartupProbeTimingConfig timing = null,
@@ -78,6 +118,7 @@ namespace WTFnetApp
             this.activateSpeedifyAsync = activateSpeedifyAsync ?? throw new ArgumentNullException(nameof(activateSpeedifyAsync));
             this.getFastPingState = getFastPingState ?? throw new ArgumentNullException(nameof(getFastPingState));
             this.getShortWindowSnapshot = getShortWindowSnapshot ?? throw new ArgumentNullException(nameof(getShortWindowSnapshot));
+            this.getWarmupTelemetry = getWarmupTelemetry;
             this.captureProbeAsync = captureProbeAsync ?? throw new ArgumentNullException(nameof(captureProbeAsync));
             this.learningStore = learningStore ?? throw new ArgumentNullException(nameof(learningStore));
             this.timing = timing ?? StartupProbeTimingConfig.Default;
@@ -165,6 +206,7 @@ namespace WTFnetApp
             rawRuntime.ReadinessReason = readiness.Reason;
 
             ProbeScoreResult rawScore = ProbeScoring.ScoreCandidate(rawRuntime);
+            LogLossRiskIfNeeded(rawCandidate, rawRuntime, rawScore);
             LearnedProbeStateProfile rawLearned = learningStore.GetProfile(rawCandidate.RouteKey, timeBucket);
             rawScore.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(rawScore, rawLearned);
             rawScore.IsShortlisted = true;
@@ -189,6 +231,8 @@ namespace WTFnetApp
 
                 Log("startup-probe | candidate start | " + candidate);
 
+                DateTime activationRequestedUtc = DateTime.UtcNow;
+                Log("startup-probe | warmup-milestone | " + candidate + " | activationRequestedMs=0");
                 bool activated = await activateSpeedifyAsync(candidate.ConnectTarget);
                 if (!activated)
                 {
@@ -197,14 +241,18 @@ namespace WTFnetApp
                 }
 
                 await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
-                bool candidateUsable = IsCandidateUsableForMeasurement(candidate, out string candidateUsableReason);
-                if (!candidateUsable)
+                CandidateWarmupResult warmupResult = await WaitForCandidateUsableAfterActivationAsync(
+                    candidate,
+                    activationRequestedUtc,
+                    cancellationToken);
+                if (!warmupResult.IsUsable)
                 {
-                    Log("startup-probe | discard | " + candidate + " | discardReason=unusable-before-measurement | reason=" + candidateUsableReason);
+                    Log("startup-probe | discard | " + candidate + " | discardReason=unusable-before-measurement | reason=" + warmupResult.Reason);
                     continue;
                 }
 
-                Log("startup-probe | candidate usable -> measurement start | " + candidate);
+                Log("startup-probe | candidate usable -> measurement start | " + candidate +
+                    " | warmupElapsedMs=" + warmupResult.WaitedMs.ToString("0"));
 
                 ProbeReadinessResult candidateReadiness = new ProbeReadinessResult
                 {
@@ -236,8 +284,16 @@ namespace WTFnetApp
                 runtime.StabilizationTimedOut = false;
                 runtime.ReadinessKind = candidateReadiness.Kind;
                 runtime.ReadinessReason = candidateReadiness.Reason;
+                runtime.StartupSpeedifyTrusted = warmupResult.StartupTrustEstablished;
+                runtime.StartupSpeedifyNegativeOnly = warmupResult.StartupTrustNegativeOnly;
+                runtime.Notes = AppendNote(runtime.Notes, warmupResult.WarmupTag);
+                runtime.Notes = AppendNote(runtime.Notes,
+                    warmupResult.StartupTrustEstablished
+                        ? "startup-speedify-trusted"
+                        : "startup-speedify-untrusted-fastping-only");
 
                 ProbeScoreResult score = ProbeScoring.ScoreCandidate(runtime);
+                LogLossRiskIfNeeded(candidate, runtime, score);
                 LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
                 score.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(score, candidateLearned);
 
@@ -426,6 +482,230 @@ namespace WTFnetApp
             return true;
         }
 
+        private async Task<CandidateWarmupResult> WaitForCandidateUsableAfterActivationAsync(
+            ProbeCandidateDefinition candidate,
+            DateTime activationRequestedUtc,
+            CancellationToken cancellationToken)
+        {
+            bool isSpeedifyCandidate =
+                candidate != null &&
+                candidate.Kind == ProbeCandidateKind.Speedify;
+
+            if (!isSpeedifyCandidate || timing.SpeedifyWarmupTolerance <= TimeSpan.Zero)
+            {
+                bool immediateUsable = IsCandidateUsableForMeasurement(candidate, out string immediateReason);
+                return new CandidateWarmupResult(immediateUsable, immediateReason, 0.0, false, false, "warmup-skipped");
+            }
+
+            DateTime warmupStartUtc = DateTime.UtcNow;
+            DateTime warmupDeadlineUtc = DateTime.UtcNow + timing.SpeedifyWarmupTolerance;
+            DateTime nextWarmupLogUtc = DateTime.UtcNow;
+            bool loggedIdentity;
+            bool loggedTunnel;
+            bool loggedFreshTelemetry;
+            bool loggedUsable;
+            bool loggedStableUsable;
+            bool loggedNotTrustworthy;
+            bool startupTrustEstablished;
+            bool startupTrustNegativeOnly;
+            int consecutiveUsableCount = 0;
+            string warmupTag = "activation-slow";
+            while (DateTime.UtcNow <= warmupDeadlineUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                bool isUsableNow = IsCandidateUsableForMeasurement(candidate, out string reason);
+                StartupWarmupTelemetrySnapshot telemetry = getWarmupTelemetry != null
+                    ? getWarmupTelemetry()
+                    : null;
+                bool hasIdentity = telemetry?.HasIdentity ?? false;
+                bool tunnelConnected = telemetry?.TunnelConnected ?? false;
+                bool hasFreshTelemetry = telemetry?.HasFreshTelemetry ?? false;
+                int activeConnections = telemetry?.ActiveConnectionCount ?? 0;
+                double activationElapsedMs = Math.Max(0.0, (DateTime.UtcNow - activationRequestedUtc).TotalMilliseconds);
+                bool trustNow = EvaluateStartupTrustGate(telemetry, out string trustReason, out bool negativeOnlyTrust);
+                if (trustNow && !startupTrustEstablished)
+                {
+                    startupTrustEstablished = true;
+                    startupTrustNegativeOnly = negativeOnlyTrust;
+                    Log("startup-probe | speedify became trustworthy | " + candidate + " | via=" + trustReason);
+                    warmupTag = AppendNote(warmupTag, "speedify-trust-after-warmup");
+                    if (negativeOnlyTrust)
+                        warmupTag = AppendNote(warmupTag, "speedify-catastrophic-match-negative-only");
+                }
+                else if (!startupTrustEstablished && !loggedNotTrustworthy && hasFreshTelemetry && tunnelConnected)
+                {
+                    loggedNotTrustworthy = true;
+                    Log("startup-probe | speedify not yet trustworthy | " + candidate + " | reason=" + trustReason);
+                    if (trustReason == "large mismatch before trust gate")
+                    {
+                        Log("startup-probe | mismatch ignored before trust | " + candidate);
+                    }
+                    warmupTag = AppendNote(warmupTag, "large-mismatch-before-trust-gate");
+                }
+
+                if (hasIdentity && !loggedIdentity)
+                {
+                    loggedIdentity = true;
+                    Log("startup-probe | warmup-milestone | " + candidate +
+                        " | firstIdentityMs=" + activationElapsedMs.ToString("0"));
+                }
+
+                if (tunnelConnected && !loggedTunnel)
+                {
+                    loggedTunnel = true;
+                    Log("startup-probe | warmup-milestone | " + candidate +
+                        " | firstTunnelMs=" + activationElapsedMs.ToString("0"));
+                }
+
+                if (hasFreshTelemetry && !loggedFreshTelemetry)
+                {
+                    loggedFreshTelemetry = true;
+                    Log("startup-probe | warmup-milestone | " + candidate +
+                        " | firstFreshTelemetryMs=" + activationElapsedMs.ToString("0"));
+                }
+
+                if (isUsableNow && !loggedUsable)
+                {
+                    loggedUsable = true;
+                    Log("startup-probe | warmup-milestone | " + candidate +
+                        " | firstUsableMs=" + activationElapsedMs.ToString("0"));
+                }
+
+                if (isUsableNow)
+                    consecutiveUsableCount++;
+                else
+                    consecutiveUsableCount = 0;
+
+                if (isUsableNow && !loggedStableUsable && consecutiveUsableCount >= 2)
+                {
+                    loggedStableUsable = true;
+                    Log("startup-probe | warmup-stable | " + candidate +
+                        " | stableUsableMs=" + activationElapsedMs.ToString("0") +
+                        " | consecutiveUsable=2");
+                    warmupTag = AppendNote(warmupTag, "stable-usable-route");
+                }
+
+                if (consecutiveUsableCount >= 2)
+                {
+                    double waitedMs = Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds);
+                    Log("startup-probe | activate warm-up elapsed before measurement start | " + candidate +
+                        " | waitedMs=" + waitedMs.ToString("0"));
+                    Log("startup-probe | warmup-finished | " + candidate +
+                        " | elapsedMs=" + activationElapsedMs.ToString("0"));
+                    if (waitedMs >= 3500.0)
+                        warmupTag = AppendNote(warmupTag, "activation-slow-but-eventually-usable");
+                    return new CandidateWarmupResult(true, reason, waitedMs, startupTrustEstablished, startupTrustNegativeOnly, warmupTag);
+                }
+
+                if (!SpeedifyWarmupSoftReasons.Contains(reason))
+                {
+                    warmupTag = AppendNote(warmupTag, reason == "stale route state"
+                        ? "stale-route-state-after-warmup-timeout"
+                        : "warmup-hard-failure-" + reason.Replace(' ', '-'));
+                    return new CandidateWarmupResult(false, reason, Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds), startupTrustEstablished, startupTrustNegativeOnly, warmupTag);
+                }
+
+                if (DateTime.UtcNow >= nextWarmupLogUtc)
+                {
+                    double remainingMs = Math.Max(0.0, (warmupDeadlineUtc - DateTime.UtcNow).TotalMilliseconds);
+                    Log("startup-probe | candidate warm-up waiting | " + candidate +
+                        " | reason=" + reason +
+                        " | remainingMs=" + remainingMs.ToString("0"));
+                    Log("startup-probe | warmup-observe | " + candidate +
+                        " | elapsedMs=" + activationElapsedMs.ToString("0") +
+                        " | identity=" + (hasIdentity ? "yes" : "no") +
+                        " | tunnel=" + (tunnelConnected ? "yes" : "no") +
+                        " | fresh=" + (hasFreshTelemetry ? "yes" : "no") +
+                        " | active=" + activeConnections +
+                        " | usable=" + (isUsableNow ? "yes" : "no") +
+                        " | reason=" + reason);
+                    nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+                }
+                if (reason == "stale route state")
+                    warmupTag = AppendNote(warmupTag, "stale-route-state-during-warmup");
+                if (reason == "missing probe telemetry" || reason == "no fresh probes")
+                    warmupTag = AppendNote(warmupTag, "no-fresh-telemetry");
+                await Task.Delay(timing.SpeedifyWarmupPollInterval, cancellationToken);
+            }
+
+            IsCandidateUsableForMeasurement(candidate, out string finalReason);
+            warmupTag = AppendNote(warmupTag, BuildWarmupTimeoutTag(finalReason));
+            return new CandidateWarmupResult(false, finalReason, Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds), startupTrustEstablished, startupTrustNegativeOnly, warmupTag);
+        }
+
+        private bool EvaluateStartupTrustGate(StartupWarmupTelemetrySnapshot telemetry, out string reason, out bool negativeOnlyTrust)
+        {
+            negativeOnlyTrust = false;
+            reason = "missing speedify telemetry";
+            if (telemetry == null || !telemetry.HasFreshTelemetry || !telemetry.TunnelConnected || telemetry.ActiveConnectionCount <= 0)
+                return false;
+
+            double speedifyLatency = telemetry.AggregateLatencyMs > 0 ? telemetry.AggregateLatencyMs : telemetry.ReportedLatencyMs;
+            double speedifyJitter = telemetry.AggregateJitterMs;
+            if (speedifyLatency <= 0)
+            {
+                reason = "latency unavailable";
+                return false;
+            }
+
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot();
+            if (window == null || !window.IsValid || window.AvgPingMs <= 0)
+            {
+                reason = "fastping not stable yet";
+                return false;
+            }
+
+            bool latencyMatch = Math.Abs(speedifyLatency - window.AvgPingMs) <= (window.AvgPingMs * 0.30);
+            bool jitterMatch =
+                speedifyJitter > 0 &&
+                window.AvgJitterMs > 0 &&
+                Math.Abs(speedifyJitter - window.AvgJitterMs) <= Math.Max(1.5, window.AvgJitterMs * 0.30);
+            if (latencyMatch)
+            {
+                reason = "latency-match";
+                return true;
+            }
+
+            if (jitterMatch)
+            {
+                reason = "jitter-match";
+                return true;
+            }
+
+            FastPingState state = getFastPingState();
+            bool fastPingCollapsed =
+                (state != null && (state.IsStale || (!state.PrimaryFresh && !state.SecondaryFresh) || state.Confidence >= 0 && state.Confidence < 0.15)) ||
+                window.StaleRate >= 0.70 ||
+                window.AvgLossRate >= 0.70 ||
+                window.P95PingMs >= 2200.0 ||
+                window.AvgPingMs >= 1600.0;
+            if (fastPingCollapsed && speedifyLatency >= 900.0)
+            {
+                negativeOnlyTrust = true;
+                reason = "catastrophic-match";
+                return true;
+            }
+
+            reason = "large mismatch before trust gate";
+            return false;
+        }
+
+        private static string BuildWarmupTimeoutTag(string reason)
+        {
+            if (string.Equals(reason, "stale route state", StringComparison.OrdinalIgnoreCase))
+                return "stale-route-state-after-warmup-timeout";
+
+            if (string.Equals(reason, "missing probe telemetry", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(reason, "no fresh probes", StringComparison.OrdinalIgnoreCase))
+                return "no-fresh-telemetry-after-warmup-timeout";
+
+            string safeReason = string.IsNullOrWhiteSpace(reason)
+                ? "unknown"
+                : reason.Replace(' ', '-');
+            return "warmup-timeout-" + safeReason;
+        }
+
         private static ProbeCandidateRuntimeData MergeMeasuredRuntime(
             ProbeCandidateRuntimeData first,
             ProbeCandidateRuntimeData second,
@@ -521,8 +801,12 @@ namespace WTFnetApp
         {
             TimeSpan hardIgnore = timing.HardIgnoreDuration;
             TimeSpan provisional = timing.ProvisionalDuration;
-            TimeSpan main = timing.MainMeasureDuration > TimeSpan.Zero
-                ? timing.MainMeasureDuration
+            TimeSpan configuredMain =
+                candidate != null && candidate.Kind == ProbeCandidateKind.Raw && timing.RawMainMeasureDuration > TimeSpan.Zero
+                    ? timing.RawMainMeasureDuration
+                    : timing.MainMeasureDuration;
+            TimeSpan main = configuredMain > TimeSpan.Zero
+                ? configuredMain
                 : timing.ObserveDuration;
 
             if (hardIgnore > TimeSpan.Zero)
@@ -870,6 +1154,22 @@ namespace WTFnetApp
         {
             log?.Invoke(message);
         }
+
+        private void LogLossRiskIfNeeded(
+            ProbeCandidateDefinition candidate,
+            ProbeCandidateRuntimeData runtime,
+            ProbeScoreResult score)
+        {
+            if (runtime == null)
+                return;
+
+            if (runtime.AvgLossRate < 0.05)
+                return;
+
+            Log("startup-probe | risky loss trigger | " + (candidate?.ToString() ?? "unknown") +
+                " | lossPct=" + (runtime.AvgLossRate * 100.0).ToString("0.0") +
+                " | warning=" + ProbeScoring.GetWarningLabel(score));
+        }
     }
 
     public sealed class StartupProbeResult
@@ -888,9 +1188,12 @@ namespace WTFnetApp
     public sealed class StartupProbeTimingConfig
     {
         public TimeSpan TransitionGrace { get; set; } = TimeSpan.FromSeconds(1.6);
+        public TimeSpan SpeedifyWarmupTolerance { get; set; } = TimeSpan.FromSeconds(6.0);
+        public TimeSpan SpeedifyWarmupPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
         public TimeSpan HardIgnoreDuration { get; set; } = TimeSpan.FromSeconds(2.5);
         public TimeSpan ProvisionalDuration { get; set; } = TimeSpan.FromSeconds(2.5);
         public TimeSpan MainMeasureDuration { get; set; } = TimeSpan.FromSeconds(10.0);
+        public TimeSpan RawMainMeasureDuration { get; set; } = TimeSpan.FromSeconds(8.0);
         public TimeSpan MeasurementStartGuard { get; set; } = TimeSpan.FromSeconds(0.8);
         public TimeSpan ObserveDuration { get; set; } = TimeSpan.FromSeconds(10.0);
 

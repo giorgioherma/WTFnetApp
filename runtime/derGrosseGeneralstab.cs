@@ -151,6 +151,7 @@ namespace WTFnetApp
                 activateSpeedifyAsync: ActivateSpeedifyTargetAsync,
                 getFastPingState: () => fastPing.GetState(),
                 getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
+                getWarmupTelemetry: GetStartupWarmupTelemetrySnapshot,
                 captureProbeAsync: CaptureProbeRuntimeAsync,
                 learningStore: probeLearningStore,
                 timing: StartupProbeTiming,
@@ -986,6 +987,44 @@ namespace WTFnetApp
             return ageMs >= 0 && ageMs <= 3000;
         }
 
+        private StartupProbeCoordinator.StartupWarmupTelemetrySnapshot GetStartupWarmupTelemetrySnapshot()
+        {
+            MetricsSnapshot snapshot;
+            DateTime speedifySnapshotUtc;
+            lock (publishSync)
+            {
+                snapshot = lastSnapshot;
+                speedifySnapshotUtc = lastSpeedifySnapshotUtc;
+            }
+
+            if (snapshot == null)
+                return new StartupProbeCoordinator.StartupWarmupTelemetrySnapshot();
+
+            double ageMs = (DateTime.UtcNow - speedifySnapshotUtc).TotalMilliseconds;
+            bool hasRecentTelemetry = speedifySnapshotUtc != DateTime.MinValue && ageMs >= 0 && ageMs <= 3000;
+
+            bool hasIdentity =
+                !string.IsNullOrWhiteSpace(snapshot.ConnectedServerPublicIp) ||
+                !string.IsNullOrWhiteSpace(snapshot.ConnectedServerName);
+
+            bool hasLiveTelemetrySignal =
+                snapshot.ActiveConnectionCount > 0 ||
+                snapshot.LatencyMs > 0 ||
+                snapshot.AggregateLatencyMs > 0 ||
+                snapshot.AggregateJitterMs > 0;
+
+            return new StartupProbeCoordinator.StartupWarmupTelemetrySnapshot
+            {
+                HasIdentity = hasIdentity,
+                TunnelConnected = snapshot.TunnelConnected,
+                HasFreshTelemetry = hasRecentTelemetry && hasLiveTelemetrySignal,
+                ActiveConnectionCount = snapshot.ActiveConnectionCount,
+                AggregateLatencyMs = snapshot.AggregateLatencyMs,
+                AggregateJitterMs = snapshot.AggregateJitterMs,
+                ReportedLatencyMs = snapshot.LatencyMs
+            };
+        }
+
         // =========================
         // ROUTE SELECTION GLUE
         // =========================
@@ -1002,6 +1041,7 @@ namespace WTFnetApp
 
             await RunSpeedifyCliAsync("disconnect");
 
+            DateTime disconnectWaitStartUtc = DateTime.UtcNow;
             bool disconnected = await WaitForSpeedifyConnectivityStateAsync(
                 shouldBeConnected: false,
                 connectTarget: "raw",
@@ -1011,12 +1051,28 @@ namespace WTFnetApp
 
             if (disconnected)
             {
+                Logger.Log("startup", "Speedify disconnect confirmed | elapsedMs=" +
+                    (DateTime.UtcNow - disconnectWaitStartUtc).TotalMilliseconds.ToString("0"));
                 Logger.Log("startup", "Speedify disabled for raw baseline");
                 return true;
             }
 
-            Logger.Log("startup", "Speedify did not fully disconnect in time");
-            return !IsSpeedifyCurrentlyConnected();
+            bool disconnectedLate = await WaitForSpeedifyConnectivityStateAsync(
+                shouldBeConnected: false,
+                connectTarget: "raw",
+                maxWaitMs: 3000,
+                pollMs: 250,
+                requiredStableChecks: 2);
+
+            if (disconnectedLate)
+            {
+                Logger.Log("startup", "Speedify disconnect confirmed after timeout grace");
+                return true;
+            }
+
+            bool stillConnected = IsSpeedifyCurrentlyConnected();
+            Logger.Log("startup", "Speedify disconnect timeout | stillConnected=" + (stillConnected ? "yes" : "no"));
+            return !stillConnected;
         }
 
         private async Task<bool> ActivateSpeedifyTargetAsync(string connectTarget)
@@ -1034,6 +1090,7 @@ namespace WTFnetApp
 
             await RunSpeedifyCliAsync("connect " + connectTarget);
 
+            DateTime connectWaitStartUtc = DateTime.UtcNow;
             bool connected = await WaitForSpeedifyConnectivityStateAsync(
                 shouldBeConnected: true,
                 connectTarget: connectTarget,
@@ -1043,6 +1100,9 @@ namespace WTFnetApp
 
             if (connected)
             {
+                Logger.Log("startup", "Speedify connect transport confirmed | " + connectTarget +
+                    " | elapsedMs=" + (DateTime.UtcNow - connectWaitStartUtc).TotalMilliseconds.ToString("0"));
+                Logger.Log("startup", "Speedify activation succeeded; startup readiness will wait for stable live stats");
                 Logger.Log("startup", "Speedify target active | " + connectTarget);
                 return true;
             }

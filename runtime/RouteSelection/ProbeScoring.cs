@@ -117,6 +117,8 @@ namespace WTFnetApp
         public bool MeasurementStoppedEarly { get; set; }
         public string MeasurementStopReason { get; set; }
         public string DiscardReason { get; set; }
+        public bool StartupSpeedifyTrusted { get; set; } = false;
+        public bool StartupSpeedifyNegativeOnly { get; set; }
     }
 
     public sealed class ProbeScoreResult
@@ -193,9 +195,9 @@ namespace WTFnetApp
         private const double BorderlineSpikeDensity = 4.0;
         private const double RiskySpikeDensity = 8.0;
 
-        // loss thresholds relaxed because LTE + probe timing creates fake mini-loss
-        private const double BorderlineLossRate = 0.08;
-        private const double RiskyLossRate = 0.18;
+        // Keep tiny loss tolerant, but make gaming-impactful loss clearly matter.
+        private const double BorderlineLossRate = 0.05;
+        private const double RiskyLossRate = 0.075;
 
         private const double BorderlineStaleRate = 0.05;
         private const double RiskyStaleRate = 0.15;
@@ -212,8 +214,8 @@ namespace WTFnetApp
         private const double SpeedifyRiskyP95PingMs = 150.0;
         private const double SpeedifyBorderlineSpikeDensity = 5.0;
         private const double SpeedifyRiskySpikeDensity = 9.5;
-        private const double SpeedifyBorderlineLossRate = 0.11;
-        private const double SpeedifyRiskyLossRate = 0.23;
+        private const double SpeedifyBorderlineLossRate = 0.06;
+        private const double SpeedifyRiskyLossRate = 0.09;
         private const double SpeedifyBorderlineStaleRate = 0.07;
         private const double SpeedifyRiskyStaleRate = 0.18;
         private const double SpeedifyBorderlineBadRate = 0.16;
@@ -280,9 +282,9 @@ namespace WTFnetApp
             bool speedifyValid =
                 runtime.Candidate != null &&
                 runtime.Candidate.Kind == ProbeCandidateKind.Speedify &&
+                runtime.StartupSpeedifyTrusted &&
                 runtime.TunnelConnected &&
                 runtime.ActiveConnectionCount > 0 &&
-                !runtime.AggregateCongested &&
                 ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs) > 0;
 
             if (!speedifyValid)
@@ -294,6 +296,14 @@ namespace WTFnetApp
                 spikeModifier = 1.0;
                 lossStaleModifier = 1.0;
                 speedifyAdjustment = 0.0;
+            }
+            else if (runtime.StartupSpeedifyNegativeOnly)
+            {
+                latencyModifier = Math.Max(1.0, latencyModifier);
+                jitterModifier = Math.Max(1.0, jitterModifier);
+                spikeModifier = Math.Max(1.0, spikeModifier);
+                lossStaleModifier = Math.Max(1.0, lossStaleModifier);
+                speedifyAdjustment = Math.Max(0.0, speedifyAdjustment);
             }
 
             result.JitterRangeMs = jitterRange;
@@ -315,7 +325,12 @@ namespace WTFnetApp
             double jitterContribution = ((avgJitter * 1.75) + (jitterRange * 1.05)) * jitterModifier;
             double spikeContribution = (spikeDensity * 2.95) * spikeModifier;
             double lossStaleBadContribution =
-                ((badRate * 112.0) + (lossRate * 42.0) + (staleRate * 102.0)) * lossStaleModifier;
+                ((badRate * 112.0) + (lossRate * 52.0) + (staleRate * 108.0)) * lossStaleModifier;
+
+            if (lossRate >= 0.05)
+            {
+                lossStaleBadContribution += 4.0 + ((lossRate - 0.05) * 60.0);
+            }
 
             double speedifyAdjustedScore =
                 latencyContribution +
@@ -329,7 +344,7 @@ namespace WTFnetApp
                 ((p95Ping * 0.10) + (avgPing * 0.05)) +
                 ((avgJitter * 1.75) + (jitterRange * 1.05)) +
                 (spikeDensity * 2.95) +
-                ((badRate * 112.0) + (lossRate * 42.0) + (staleRate * 102.0)) +
+                ((badRate * 112.0) + (lossRate * 52.0) + (staleRate * 108.0)) +
                 confidencePenalty;
 
             double cappedScore = ApplySpeedifyPositiveInfluenceCap(
@@ -377,7 +392,7 @@ namespace WTFnetApp
 
             double stabilityCore = candidate.OverallStabilityScore * 0.62;
             double spikePenalty = Safe(runtime.SpikeDensityPerMinute) * 1.20;
-            double lossPenalty = EffectiveLossRate(runtime.AvgLossRate) * 100.0 * 0.16;
+            double lossPenalty = EffectiveLossRate(runtime.AvgLossRate) * 100.0 * 0.22;
             double badQualityPenalty = Safe(runtime.AvgBadQualityRate) * 100.0 * 0.12;
             double confidencePenalty = Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 14.0;
 
