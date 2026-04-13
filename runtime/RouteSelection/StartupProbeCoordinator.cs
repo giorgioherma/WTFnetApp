@@ -374,6 +374,7 @@ namespace WTFnetApp
             bool finalRestore = await RestoreLeaderRouteAsync(output.Winner, cancellationToken);
             if (!finalRestore)
                 return BuildUnreliableResult(output, output.Winner, rawScore, "winner-restore-failed");
+            output.FinalRestoreSucceeded = true;
 
             if (output.Winner != null)
                 output.Winner.IsWinner = true;
@@ -548,8 +549,8 @@ namespace WTFnetApp
                     if (trustReason == "large mismatch before trust gate")
                     {
                         Log("startup-probe | mismatch ignored before trust | " + candidate);
+                        warmupTag = AppendNote(warmupTag, "large-mismatch-before-trust-gate");
                     }
-                    warmupTag = AppendNote(warmupTag, "large-mismatch-before-trust-gate");
                 }
 
                 if (hasIdentity && !loggedIdentity)
@@ -732,20 +733,6 @@ namespace WTFnetApp
             bool hasFastPingPing = windowValid && window.AvgPingMs > 0;
             bool hasFastPingJitter = windowValid && window.AvgJitterMs > 0;
 
-            bool fastPingCollapsed =
-                (state != null && (state.IsStale || (!state.PrimaryFresh && !state.SecondaryFresh) || (state.Confidence >= 0 && state.Confidence < 0.15))) ||
-                (window != null && (
-                    window.StaleRate >= 0.70 ||
-                    window.AvgLossRate >= 0.70 ||
-                    window.P95PingMs >= 2200.0 ||
-                    window.AvgPingMs >= 1600.0));
-
-            {
-                negativeOnlyTrust = true;
-                reason = "catastrophic-match";
-                return true;
-            }
-            
             if (!hasFastPingPing)
             {
                 reason = "fastping not stable yet";
@@ -911,6 +898,8 @@ namespace WTFnetApp
                     candidate,
                     timing.MeasurementStartGuard,
                     provisional);
+                if (provisionalRuntime == null)
+                    return null;
 
                 provisionalRuntime.ReachedUsableState = true;
                 provisionalRuntime.MeasurementStarted = true;
@@ -931,6 +920,8 @@ namespace WTFnetApp
                 candidate,
                 TimeSpan.Zero,
                 main);
+            if (mainRuntime == null)
+                return null;
 
             mainRuntime.ReachedUsableState = true;
             mainRuntime.MeasurementStarted = true;
@@ -1111,6 +1102,7 @@ namespace WTFnetApp
             ProbeScoreResult rawScore,
             string reason)
         {
+            output.FinalRestoreSucceeded = false;
             output.Winner = leader ?? rawScore;
 
             if (output.Winner != null)
@@ -1262,6 +1254,7 @@ namespace WTFnetApp
         public ProbeReadinessResult RawReadiness { get; set; }
         public ProbeScoreResult Baseline { get; set; }
         public ProbeScoreResult Winner { get; set; }
+        public bool FinalRestoreSucceeded { get; set; }
 
         public List<ProbeScoreResult> AllResults { get; set; } = new List<ProbeScoreResult>();
         public List<ProbeScoreResult> Shortlist { get; set; } = new List<ProbeScoreResult>();

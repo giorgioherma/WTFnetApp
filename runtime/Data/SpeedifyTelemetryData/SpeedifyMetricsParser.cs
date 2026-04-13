@@ -763,6 +763,12 @@ namespace WTFnetApp
                 if (link.IsAggregate)
                     continue;
 
+                bool staleForConnectionStats =
+                    structuredState.HasConnectionStats &&
+                    (link.LastSeenGeneration <= 0 || link.LastSeenGeneration < linkRefreshGeneration - 1);
+                if (staleForConnectionStats)
+                    continue;
+
                 bool hasIdentity = !string.IsNullOrWhiteSpace(link.Name) ||
                                    !string.IsNullOrWhiteSpace(link.Description) ||
                                    !string.IsNullOrWhiteSpace(link.Isp);
