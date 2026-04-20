@@ -98,6 +98,9 @@ namespace WTFnetApp
         public double SpeedifyAggregateLatencyMs { get; set; } = -1;
         public double SpeedifyAggregateJitterMs { get; set; } = -1;
         public double SpeedifyReportedLatencyMs { get; set; } = -1;
+        public int SpeedifyFreshSampleCount { get; set; }
+        public double SpeedifyExpectedSampleCount { get; set; } = -1;
+        public double SpeedifyAggregateLatencyStdDevMs { get; set; } = -1;
 
         public bool IsValid { get; set; } = true;
         public string Notes { get; set; }
@@ -150,6 +153,7 @@ namespace WTFnetApp
         public double SpeedifySpikeModifier { get; set; } = 1.0;
         public double SpeedifyLossStaleModifier { get; set; } = 1.0;
         public string SpeedifyHealthLabel { get; set; } = "n/a";
+        public double ConfidenceModifier { get; set; } = 1.0;
     }
 
     public sealed class ProbeWinnerConfidenceResult
@@ -164,6 +168,38 @@ namespace WTFnetApp
     {
         public bool ShouldDiscard { get; set; }
         public string ReasonCategory { get; set; }
+    }
+
+    public sealed class ProbeDecisionDiagnostics
+    {
+        public bool IsLowConfidence { get; set; }
+        public bool IsCloseCall { get; set; }
+        public bool HasHighVariance { get; set; }
+        public bool HasCrossSignalMismatch { get; set; }
+        public bool HasLowSampleCoverage { get; set; }
+        public string Summary { get; set; }
+    }
+
+    public sealed class ProbeDecisionStabilityState
+    {
+        public string LastWinnerRouteKey { get; set; }
+        public double LastWinnerScore { get; set; }
+        public DateTime LastSwitchUtc { get; set; }
+        public int ConsecutiveSameWinnerCount { get; set; }
+        public double LastConfidenceModifier { get; set; }
+    }
+
+    public sealed class ProbeDecisionPolicyResult
+    {
+        public bool ShouldDeferDecision { get; set; }
+        public bool ShouldReprobe { get; set; }
+        public bool ShouldDelaySwitch { get; set; }
+        public int DelayMs { get; set; }
+        public bool ShouldStickToPrevious { get; set; }
+        public bool IsStabilityHold { get; set; }
+        public string PolicyReason { get; set; }
+        public string DecisionType { get; set; }
+        public bool HoldFallbackToCurrent { get; set; }
     }
 
     public static class ProbeScoring
@@ -263,7 +299,6 @@ namespace WTFnetApp
             double spikeModifier = GetSpikePenaltyModifier(runtime, healthBucket);
             double lossStaleModifier = GetLossStalePenaltyModifier(runtime, healthBucket);
             double speedifyAdjustment = SpeedifyPenalty(runtime, healthBucket);
-            double confidencePenalty = ConfidencePenalty(runtime.AvgConfidence);
 
             bool speedifyValid =
                 runtime.Candidate != null &&
@@ -312,15 +347,13 @@ namespace WTFnetApp
                 jitterContribution +
                 spikeContribution +
                 lossStaleBadContribution +
-                confidencePenalty +
                 speedifyAdjustment;
 
             double fastPingDominantScore =
                 ((p95Ping * 0.10) + (avgPing * 0.05)) +
                 ((avgJitter * 1.75) + (jitterRange * 1.05)) +
                 (spikeDensity * 2.95) +
-                ((badRate * 112.0) + (lossRate * 52.0) + (staleRate * 108.0)) +
-                confidencePenalty;
+                ((badRate * 112.0) + (lossRate * 52.0) + (staleRate * 108.0));
 
             double cappedScore = ApplySpeedifyPositiveInfluenceCap(
                 speedifyAdjustedScore,
@@ -336,8 +369,33 @@ namespace WTFnetApp
             result.SpeedifyPositiveInfluenceCapApplied = capApplied;
             result.OverallStabilityScore = cappedScore;
 
+            Logger.Log("score",
+                "compute | " + (runtime.Candidate?.ToString() ?? "unknown") +
+                " | lat=" + F(result.LatencyContribution) +
+                " | jit=" + F(result.JitterContribution) +
+                " | spk=" + F(result.SpikeContribution) +
+                " | lsb=" + F(result.LossStaleBadContribution) +
+                " | adj=" + F(result.SpeedifyGlobalAdjustment) +
+                " | cap=" + F(result.SpeedifyPositiveInfluenceCapApplied));
+
             if (runtime.MeasurementStoppedEarly)
                 result.OverallStabilityScore += ComputeEarlyStopPenalty(runtime.MeasurementStopReason);
+
+            double confidenceModifier = ComputeConfidenceModifier(runtime);
+            result.ConfidenceModifier = confidenceModifier;
+
+            Logger.Log("score-final",
+                "finalize | " + (runtime.Candidate?.ToString() ?? "unknown") +
+                " | baseQuality=" + F(cappedScore) +
+                " | confM=" + confidenceModifier.ToString("0.00") +
+                " | finalQuality=" + F(result.OverallStabilityScore));
+
+            if (confidenceModifier < 0.70)
+            {
+                Logger.Log("decision-warning",
+                    "low-confidence | " + (runtime.Candidate?.ToString() ?? "unknown") +
+                    " | confM=" + confidenceModifier.ToString("0.00"));
+            }
 
             result.StartupSelectionScore = result.OverallStabilityScore;
             result.WarningLevel = ClassifyWarning(runtime);
@@ -372,10 +430,6 @@ namespace WTFnetApp
             double lossPenalty = effectiveLoss * 100.0 * 0.18;
             double badQualityPenalty = effectiveBadQuality * 100.0 * 0.10;
 
-            double confidencePenalty =
-                runtime.AvgConfidence < 0 ? 4.0 :
-                Math.Max(0.0, 1.0 - Safe(runtime.AvgConfidence)) * 6.0;
-
             double avgJitter = Safe(runtime.AvgJitterMs);
             double jitterRange = Safe(ComputeJitterRange(runtime));
             double jitterStabilityPenalty = (avgJitter * 0.85) + (jitterRange * 0.70);
@@ -398,10 +452,208 @@ namespace WTFnetApp
                    spikePenalty +
                    lossPenalty +
                    badQualityPenalty +
-                   confidencePenalty +
                    smallLatencyPenalty +
                    warningAdjustment +
                    learningAdjustment;
+        }
+
+        public static ProbeDecisionDiagnostics AnalyzeDecision(
+            ProbeScoreResult winner,
+            ProbeScoreResult runnerUp)
+        {
+            ProbeDecisionDiagnostics diagnostics = new ProbeDecisionDiagnostics();
+
+            if (winner == null || winner.Runtime == null)
+            {
+                diagnostics.Summary = "clean";
+                return diagnostics;
+            }
+
+            ProbeCandidateRuntimeData runtime = winner.Runtime;
+
+            diagnostics.IsLowConfidence = winner.ConfidenceModifier < 0.70;
+
+            if (runnerUp != null)
+            {
+                double gap = Math.Abs(winner.StartupSelectionScore - runnerUp.StartupSelectionScore);
+                diagnostics.IsCloseCall = gap <= 5.0;
+            }
+
+            if (runtime.SpeedifyAggregateLatencyStdDevMs > 0 &&
+                runtime.SpeedifyAggregateLatencyMs > 0)
+            {
+                double relStd = runtime.SpeedifyAggregateLatencyStdDevMs / runtime.SpeedifyAggregateLatencyMs;
+                diagnostics.HasHighVariance = relStd > 0.35;
+            }
+
+            if (runtime.SpeedifyAggregateLatencyMs > 0 && runtime.AvgPingMs > 0)
+            {
+                double diff = Math.Abs(runtime.SpeedifyAggregateLatencyMs - runtime.AvgPingMs) / runtime.AvgPingMs;
+                diagnostics.HasCrossSignalMismatch = diff > 0.40;
+            }
+
+            if (runtime.SpeedifyExpectedSampleCount > 0)
+            {
+                double coverage = runtime.SpeedifyFreshSampleCount / runtime.SpeedifyExpectedSampleCount;
+                diagnostics.HasLowSampleCoverage = coverage < 0.6;
+            }
+
+            List<string> flags = new List<string>();
+            if (diagnostics.IsLowConfidence) flags.Add("low-confidence");
+            if (diagnostics.IsCloseCall) flags.Add("close-call");
+            if (diagnostics.HasHighVariance) flags.Add("high-variance");
+            if (diagnostics.HasCrossSignalMismatch) flags.Add("latency-mismatch");
+            if (diagnostics.HasLowSampleCoverage) flags.Add("low-samples");
+
+            diagnostics.Summary = flags.Count > 0
+                ? string.Join(", ", flags)
+                : "clean";
+
+            return diagnostics;
+        }
+
+        public static ProbeDecisionPolicyResult ApplyDecisionPolicy(
+            ProbeScoreResult winner,
+            ProbeScoreResult runnerUp,
+            ProbeDecisionDiagnostics diagnostics)
+        {
+            ProbeDecisionPolicyResult policy = new ProbeDecisionPolicyResult();
+            if (winner == null)
+            {
+                policy.ShouldDeferDecision = true;
+                policy.ShouldReprobe = true;
+                policy.PolicyReason = "winner-missing";
+                return policy;
+            }
+
+            double confidence = winner.ConfidenceModifier;
+            bool lowConfidence = diagnostics?.IsLowConfidence == true || confidence < 0.70;
+            bool closeCall = diagnostics?.IsCloseCall == true;
+
+            if (lowConfidence && closeCall)
+            {
+                policy.ShouldDelaySwitch = true;
+                policy.ShouldReprobe = true;
+                policy.DelayMs = 1200;
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "low-confidence-close-call");
+                return policy;
+            }
+
+            if (lowConfidence)
+            {
+                policy.ShouldReprobe = true;
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "low-confidence");
+                return policy;
+            }
+
+            if (closeCall)
+            {
+                policy.ShouldDelaySwitch = true;
+                policy.DelayMs = 900;
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "close-call");
+                return policy;
+            }
+
+            policy.PolicyReason = AppendReason(policy.PolicyReason, "clean-decision");
+            return policy;
+        }
+
+        public static void ApplyStabilityLayer(
+            ProbeScoreResult winner,
+            ProbeScoreResult runnerUp,
+            ProbeDecisionDiagnostics diagnostics,
+            ProbeDecisionStabilityState state,
+            ProbeDecisionPolicyResult policy)
+        {
+            if (winner == null || state == null || policy == null)
+                return;
+
+            string currentKey = winner.Candidate?.RouteKey;
+            string lastKey = state.LastWinnerRouteKey;
+
+            if (string.IsNullOrWhiteSpace(lastKey))
+                return;
+
+            bool isSameRoute = string.Equals(currentKey, lastKey, StringComparison.OrdinalIgnoreCase);
+
+            if (isSameRoute)
+            {
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "stable-current-route");
+                policy.DecisionType = "no-switch-same-route";
+                return;
+            }
+
+            double currentScore = winner.StartupSelectionScore;
+            double lastScore = state.LastWinnerScore;
+            double improvement = lastScore - currentScore;
+            double confidence = winner.ConfidenceModifier;
+
+            bool closeCall = diagnostics?.IsCloseCall == true;
+
+            if (improvement >= 10.0)
+            {
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "strong-switch-emergency-override");
+                policy.DecisionType = "emergency-override-switch";
+                return;
+            }
+
+            double secondsSinceLastSwitch = state.LastSwitchUtc == DateTime.MinValue
+                ? double.MaxValue
+                : (DateTime.UtcNow - state.LastSwitchUtc).TotalSeconds;
+
+            if (secondsSinceLastSwitch < 10.0)
+            {
+                ApplyHold(
+                    policy,
+                    "cooldown-hold",
+                    extendWindow: false,
+                    decisionType: "cooldown-hold");
+                return;
+            }
+
+            if (improvement >= 8.0)
+            {
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "strong-switch");
+                policy.DecisionType = "strong-switch";
+                return;
+            }
+
+            if (confidence < 0.70)
+            {
+                ApplyHold(
+                    policy,
+                    "low-confidence-hold",
+                    extendWindow: true,
+                    decisionType: "low-confidence-hold");
+                return;
+            }
+
+            if (closeCall && confidence < 0.80)
+            {
+                ApplyHold(
+                    policy,
+                    "close-call-hold",
+                    extendWindow: true,
+                    decisionType: "close-call-hold");
+                return;
+            }
+
+            if (improvement >= 4.0 && confidence >= 0.70)
+            {
+                policy.PolicyReason = AppendReason(policy.PolicyReason, "safe-switch");
+                policy.DecisionType = "safe-switch";
+                return;
+            }
+
+            if (improvement < 4.0)
+            {
+                ApplyHold(
+                    policy,
+                    "weak-win-hold",
+                    extendWindow: false,
+                    decisionType: "weak-win-hold");
+                return;
+            }
         }
 
         private static double ComputeStartupPersistenceFactor(ProbeCandidateRuntimeData runtime)
@@ -1114,18 +1366,6 @@ namespace WTFnetApp
             return safeLoss;
         }
 
-        private static double ConfidencePenalty(double confidence)
-        {
-            if (confidence < 0)
-                return 15.0;
-
-            if (confidence >= 0.90) return 0.0;
-            if (confidence >= 0.75) return 3.0;
-            if (confidence >= 0.60) return 7.0;
-            if (confidence >= 0.45) return 12.0;
-            return 18.0;
-        }
-
         private static string BuildSummary(ProbeCandidateRuntimeData runtime, ProbeScoreResult result)
         {
             string warning =
@@ -1166,7 +1406,58 @@ namespace WTFnetApp
                    ",mLsb=" + result.SpeedifyLossStaleModifier.ToString("0.00") +
                    ",adj=" + F(result.SpeedifyGlobalAdjustment) +
                    ",cap=" + F(result.SpeedifyPositiveInfluenceCapApplied) +
+                   ",confM=" + result.ConfidenceModifier.ToString("0.00") +
                    ",final=" + F(result.OverallStabilityScore) + "}";
+        }
+
+        public static double ComputeConfidenceModifier(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime?.Candidate == null || runtime.Candidate.Kind != ProbeCandidateKind.Speedify)
+                return 1.0;
+
+            double expectedSamples = runtime.SpeedifyExpectedSampleCount > 0
+                ? runtime.SpeedifyExpectedSampleCount
+                : 4.0;
+            double freshSamples = Math.Max(0.0, runtime.SpeedifyFreshSampleCount);
+            double sampleCoverage = Clamp(freshSamples / Math.Max(1.0, expectedSamples), 0.0, 1.2);
+            double sampleConfidence = Clamp(0.40 + (sampleCoverage * 0.65), 0.35, 1.08);
+
+            double speedifyLatency = ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs);
+            double stdDev = runtime.SpeedifyAggregateLatencyStdDevMs;
+            double relativeStdDev = speedifyLatency > 0 ? stdDev / Math.Max(1.0, speedifyLatency) : -1;
+            double stabilityConfidence = relativeStdDev >= 0
+                ? Clamp(1.03 - (relativeStdDev * 0.85), 0.45, 1.05)
+                : 0.92;
+
+            string notes = runtime.Notes ?? string.Empty;
+            double noteConfidence = 1.0;
+            if (notes.IndexOf("low-confidence", StringComparison.OrdinalIgnoreCase) >= 0)
+                noteConfidence *= 0.90;
+            if (notes.IndexOf("unstable", StringComparison.OrdinalIgnoreCase) >= 0)
+                noteConfidence *= 0.88;
+
+            double fastPingLatency = Safe(runtime.AvgPingMs);
+            double crossSignalConfidence = 1.0;
+            if (speedifyLatency > 0 && fastPingLatency > 0)
+            {
+                double relativeDifference = Math.Abs(speedifyLatency - fastPingLatency) / Math.Max(1.0, fastPingLatency);
+                crossSignalConfidence = Clamp(1.10 - (relativeDifference * 0.75), 0.45, 1.12);
+            }
+
+            double modifier = sampleConfidence * stabilityConfidence * noteConfidence * crossSignalConfidence;
+            modifier = Clamp(modifier, 0.3, 1.15);
+
+            Logger.Log("conf",
+                "compute | " + (runtime.Candidate?.ToString() ?? "unknown") +
+                " | samples=" + freshSamples.ToString("0") + "/" + expectedSamples.ToString("0") +
+                " | sampleC=" + sampleConfidence.ToString("0.00") +
+                " | std=" + (stdDev >= 0 ? stdDev.ToString("0.0") : "--") +
+                " | stabilityC=" + stabilityConfidence.ToString("0.00") +
+                " | noteC=" + noteConfidence.ToString("0.00") +
+                " | crossC=" + crossSignalConfidence.ToString("0.00") +
+                " | final=" + modifier.ToString("0.00"));
+
+            return modifier;
         }
 
         private static string GetMeasurementStatusLabel(ProbeCandidateRuntimeData runtime)
@@ -1295,6 +1586,51 @@ namespace WTFnetApp
         private static string F(double value)
         {
             return value < 0 ? "--" : value.ToString("0.0");
+        }
+
+        private static string AppendReason(string current, string addition)
+        {
+            if (string.IsNullOrWhiteSpace(addition))
+                return current;
+
+            if (string.IsNullOrWhiteSpace(current))
+                return addition;
+
+            return current + "," + addition;
+        }
+
+        private static void ApplyHold(
+            ProbeDecisionPolicyResult policy,
+            string reason,
+            bool extendWindow,
+            string decisionType)
+        {
+            if (policy == null)
+                return;
+
+            policy.ShouldStickToPrevious = true;
+            policy.IsStabilityHold = true;
+            policy.PolicyReason = AppendReason(policy.PolicyReason, reason);
+            policy.DecisionType = decisionType;
+
+            if (extendWindow)
+            {
+                policy.ShouldDelaySwitch = true;
+                policy.ShouldReprobe = true;
+                if (policy.DelayMs <= 0)
+                    policy.DelayMs = 1200;
+            }
+        }
+
+        private static double Clamp(double value, double min, double max)
+        {
+            if (value < min)
+                return min;
+
+            if (value > max)
+                return max;
+
+            return value;
         }
     }
 }

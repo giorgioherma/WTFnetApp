@@ -14,9 +14,14 @@ namespace WTFnetApp
             public bool TunnelConnected { get; set; }
             public bool HasFreshTelemetry { get; set; }
             public int ActiveConnectionCount { get; set; }
+            public DateTime TimeUtc { get; set; }
             public double AggregateLatencyMs { get; set; } = -1;
             public double AggregateJitterMs { get; set; } = -1;
+            public double QueueDelayMs { get; set; } = -1;
             public double ReportedLatencyMs { get; set; } = -1;
+            public bool AggregateCongested { get; set; }
+            public bool DownloadCongested { get; set; }
+            public bool UploadCongested { get; set; }
         }
 
         private readonly struct CandidateWarmupResult
@@ -42,6 +47,83 @@ namespace WTFnetApp
             public string WarmupTag { get; }
         }
 
+        private sealed class SpeedifyWarmupWindowBuffer
+        {
+            private readonly List<StartupWarmupTelemetrySnapshot> samples = new List<StartupWarmupTelemetrySnapshot>();
+            private readonly int minimumSamples;
+            private readonly double minimumSpreadMs;
+            private DateTime firstAcceptedUtc = DateTime.MinValue;
+            private DateTime lastAcceptedUtc = DateTime.MinValue;
+            private int usableSampleCount;
+
+            public SpeedifyWarmupWindowBuffer(int minimumSamples, double minimumSpreadMs)
+            {
+                this.minimumSamples = Math.Max(1, minimumSamples);
+                this.minimumSpreadMs = Math.Max(0.0, minimumSpreadMs);
+            }
+
+            public int FreshSampleCount => samples.Count;
+            public bool MeetsMinimum => samples.Count >= minimumSamples;
+            public int UsableSampleCount => usableSampleCount;
+            public double SampleDurationMs =>
+                firstAcceptedUtc != DateTime.MinValue &&
+                lastAcceptedUtc != DateTime.MinValue &&
+                lastAcceptedUtc > firstAcceptedUtc
+                    ? (lastAcceptedUtc - firstAcceptedUtc).TotalMilliseconds
+                    : 0.0;
+            public bool HasGoodTimeSpread => SampleDurationMs >= minimumSpreadMs;
+            public bool StableEnough => samples.Count > 0 && usableSampleCount >= (samples.Count * 0.60);
+            public double AverageAggregateLatencyMs => Average(s => s.AggregateLatencyMs);
+            public double AverageAggregateJitterMs => Average(s => s.AggregateJitterMs);
+            public double AverageQueueDelayMs => Average(s => s.QueueDelayMs);
+
+            public bool AnyCongestion => samples.Any(s => s.AggregateCongested || s.DownloadCongested || s.UploadCongested);
+
+            public void AddIfFresh(StartupWarmupTelemetrySnapshot snapshot, bool isUsable)
+            {
+                if (snapshot == null || !snapshot.HasFreshTelemetry)
+                    return;
+
+                if (snapshot.TimeUtc == DateTime.MinValue)
+                    return;
+
+                if (lastAcceptedUtc != DateTime.MinValue &&
+                    snapshot.TimeUtc <= lastAcceptedUtc)
+                {
+                    return;
+                }
+
+                if (firstAcceptedUtc == DateTime.MinValue)
+                    firstAcceptedUtc = snapshot.TimeUtc;
+
+                lastAcceptedUtc = snapshot.TimeUtc;
+                samples.Add(snapshot);
+
+                if (isUsable)
+                    usableSampleCount++;
+            }
+
+            private double Average(Func<StartupWarmupTelemetrySnapshot, double> selector)
+            {
+                if (samples.Count == 0)
+                    return -1;
+
+                double sum = 0;
+                int count = 0;
+                for (int i = 0; i < samples.Count; i++)
+                {
+                    double value = selector(samples[i]);
+                    if (value > 0)
+                    {
+                        sum += value;
+                        count++;
+                    }
+                }
+
+                return count > 0 ? sum / count : -1;
+            }
+        }
+
         private readonly Func<Task<bool>> disableSpeedifyAsync;
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
@@ -51,6 +133,7 @@ namespace WTFnetApp
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
+        private readonly ProbeDecisionStabilityState stabilityState = new ProbeDecisionStabilityState();
 
         private static readonly HashSet<string> SpeedifyWarmupSoftReasons =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -340,6 +423,95 @@ namespace WTFnetApp
 
             output.Winner = leader ?? rawScore;
 
+            ProbeScoreResult runnerUp = output.Shortlist
+                .Where(x => x != null && !ReferenceEquals(x, output.Winner))
+                .OrderBy(x => x.StartupSelectionScore)
+                .FirstOrDefault();
+
+            ProbeDecisionDiagnostics diagnostics = ProbeScoring.AnalyzeDecision(output.Winner, runnerUp);
+            ProbeDecisionPolicyResult policy = ProbeScoring.ApplyDecisionPolicy(output.Winner, runnerUp, diagnostics);
+
+            ProbeScoring.ApplyStabilityLayer(
+                output.Winner,
+                runnerUp,
+                diagnostics,
+                stabilityState,
+                policy);
+
+            string previousRouteKey = stabilityState?.LastWinnerRouteKey;
+            double previousScore = stabilityState?.LastWinnerScore ?? -1;
+            double currentScore = output.Winner?.StartupSelectionScore ?? -1;
+            double improvement = (previousScore >= 0 && currentScore >= 0)
+                ? previousScore - currentScore
+                : 0.0;
+            double confidence = output.Winner?.ConfidenceModifier ?? 0.0;
+            bool holdRequested = policy.ShouldStickToPrevious;
+            bool holdSucceeded = false;
+
+            if (policy.ShouldStickToPrevious && !string.IsNullOrWhiteSpace(stabilityState?.LastWinnerRouteKey))
+            {
+                Logger.Log("decision-stability",
+                    "hold | keeping=" + stabilityState.LastWinnerRouteKey +
+                    " | new=" + output.Winner?.Candidate +
+                    " | reason=" + (policy.PolicyReason ?? "stability-hold"));
+
+                ProbeScoreResult heldWinner = output.Shortlist?
+                    .FirstOrDefault(x => x?.Candidate?.RouteKey == stabilityState.LastWinnerRouteKey);
+
+                if (heldWinner != null)
+                {
+                    output.Winner = heldWinner;
+                    holdSucceeded = true;
+                }
+                else
+                {
+                    policy.HoldFallbackToCurrent = true;
+                    policy.PolicyReason = AppendNote(policy.PolicyReason, "hold-requested-previous-missing");
+                }
+            }
+
+            confidence = output.Winner?.ConfidenceModifier ?? confidence;
+
+            string finalRouteKey = output.Winner?.Candidate?.RouteKey;
+            bool hasPreviousRoute = !string.IsNullOrWhiteSpace(previousRouteKey);
+            bool routeChanged = hasPreviousRoute &&
+                !string.Equals(previousRouteKey, finalRouteKey, StringComparison.OrdinalIgnoreCase);
+
+            string decisionType;
+            if (policy.HoldFallbackToCurrent)
+            {
+                decisionType = "fallback-switch-previous-missing";
+            }
+            else if (holdRequested && holdSucceeded)
+            {
+                decisionType = !string.IsNullOrWhiteSpace(policy.DecisionType)
+                    ? policy.DecisionType
+                    : "stability-hold";
+            }
+            else if (hasPreviousRoute && !routeChanged)
+            {
+                decisionType = "no-switch-same-route";
+            }
+            else
+            {
+                decisionType = !string.IsNullOrWhiteSpace(policy.DecisionType)
+                    ? policy.DecisionType
+                    : (hasPreviousRoute ? "safe-switch" : "initial-selection");
+            }
+
+            policy.DecisionType = decisionType;
+
+            string advisory = BuildAdvisoryFlags(policy);
+
+            Logger.Log("decision",
+                "policy | winner=" + (output.Winner?.Candidate?.RouteKey ?? "unknown") +
+                " | previous=" + (previousRouteKey ?? "none") +
+                " | improvement=" + improvement.ToString("0.0") +
+                " | confidence=" + confidence.ToString("0.00") +
+                " | type=" + decisionType +
+                " | reason=" + (policy?.PolicyReason ?? "none") +
+                " | advisory=" + advisory);
+
             bool finalRestore = await RestoreLeaderRouteAsync(output.Winner, cancellationToken);
             if (!finalRestore)
                 return BuildUnreliableResult(output, output.Winner, rawScore, "winner-restore-failed");
@@ -349,7 +521,7 @@ namespace WTFnetApp
             if (output.Winner != null)
                 output.Winner.IsWinner = true;
 
-            ProbeScoreResult runnerUp = output.Shortlist
+            runnerUp = output.Shortlist
                 .Where(x => x != null && !ReferenceEquals(x, output.Winner))
                 .OrderBy(x => x.StartupSelectionScore)
                 .FirstOrDefault();
@@ -368,7 +540,83 @@ namespace WTFnetApp
                 winnerLearned,
                 x => x.StartupSelectionScore);
 
+            if (output.Winner != null)
+            {
+                Log("decision | winner | " + output.Winner.Candidate +
+                    " | score=" + output.Winner.OverallStabilityScore.ToString("0.0") +
+                    " | confM=" + output.Winner.ConfidenceModifier.ToString("0.00") +
+                    " | reason=best-score");
+            }
+
+            if (output.Winner != null && runnerUp != null)
+            {
+                double gap = Math.Abs(output.Winner.StartupSelectionScore - runnerUp.StartupSelectionScore);
+                if (gap <= 5.0)
+                {
+                    Log("decision | close-call | " +
+                        "winner=" + output.Winner.Candidate +
+                        " | runnerUp=" + runnerUp.Candidate +
+                        " | gap=" + gap.ToString("0.0"));
+                }
+            }
+
+            diagnostics = ProbeScoring.AnalyzeDecision(output.Winner, runnerUp);
+            if (output.Winner != null)
+            {
+                Logger.Log("decision-diagnostics",
+                    "analyze | " + output.Winner.Candidate +
+                    " | winner=" + output.Winner.Candidate +
+                    " | flags=" + (diagnostics?.Summary ?? "clean") +
+                    " | confM=" + output.Winner.ConfidenceModifier.ToString("0.00"));
+            }
+
+            if (output.Winner != null &&
+                diagnostics != null &&
+                !string.Equals(diagnostics.Summary, "clean", StringComparison.OrdinalIgnoreCase))
+            {
+                Logger.Log("decision-alert",
+                    "attention | " + output.Winner.Candidate +
+                    " | winner=" + output.Winner.Candidate +
+                    " | issues=" + diagnostics.Summary);
+            }
+
+            if (output.Winner != null &&
+                diagnostics != null &&
+                diagnostics.IsLowConfidence &&
+                diagnostics.IsCloseCall)
+            {
+                Logger.Log("decision-critical",
+                    "unstable-decision | " + output.Winner.Candidate +
+                    " | winner=" + output.Winner.Candidate +
+                    " | recommend=reprobe-or-delay-switch");
+            }
+
+            if (output.Winner != null)
+            {
+                string newKey = output.Winner.Candidate?.RouteKey;
+                if (string.Equals(stabilityState.LastWinnerRouteKey, newKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    stabilityState.ConsecutiveSameWinnerCount++;
+                }
+                else
+                {
+                    stabilityState.ConsecutiveSameWinnerCount = 1;
+                    stabilityState.LastSwitchUtc = DateTime.UtcNow;
+                }
+
+                stabilityState.LastWinnerRouteKey = newKey;
+                stabilityState.LastWinnerScore = output.Winner.StartupSelectionScore;
+                stabilityState.LastConfidenceModifier = output.Winner.ConfidenceModifier;
+
+                Logger.Log("decision-stability",
+                    "state | last=" + (stabilityState.LastWinnerRouteKey ?? "none") +
+                    " | score=" + stabilityState.LastWinnerScore.ToString("0.0") +
+                    " | streak=" + stabilityState.ConsecutiveSameWinnerCount);
+            }
+
             output.SummaryText = BuildSummary(output);
+            if (policy != null && policy.IsStabilityHold && !policy.HoldFallbackToCurrent && holdSucceeded)
+                output.SummaryText += " | stability hold";
 
             Log(output.SummaryText);
 
@@ -384,6 +632,20 @@ namespace WTFnetApp
                 return suffix;
 
             return notes + " | " + suffix;
+        }
+
+        private static string BuildAdvisoryFlags(ProbeDecisionPolicyResult policy)
+        {
+            if (policy == null)
+                return "none";
+
+            List<string> flags = new List<string>();
+            if (policy.ShouldDelaySwitch)
+                flags.Add("delay-switch");
+            if (policy.ShouldReprobe)
+                flags.Add("reprobe");
+
+            return flags.Count == 0 ? "none" : string.Join(",", flags);
         }
 
         private async Task BeginTransitionGraceAsync(string reason, CancellationToken cancellationToken)
@@ -473,186 +735,97 @@ namespace WTFnetApp
                 return new CandidateWarmupResult(immediateUsable, immediateReason, 0.0, false, "warmup-skipped");
             }
 
+            TimeSpan fixedWindow = timing.SpeedifyWarmupTolerance;
+            if (fixedWindow < TimeSpan.FromSeconds(2))
+                fixedWindow = TimeSpan.FromSeconds(2);
+            if (fixedWindow > TimeSpan.FromSeconds(4))
+                fixedWindow = TimeSpan.FromSeconds(4);
+
+            const int minimumFreshSamples = 4;
+            const double minimumSpreadMs = 1500.0;
             DateTime warmupStartUtc = DateTime.UtcNow;
-            DateTime warmupDeadlineUtc = DateTime.UtcNow + timing.SpeedifyWarmupTolerance;
-            DateTime nextWarmupLogUtc = DateTime.UtcNow;
+            DateTime warmupDeadlineUtc = warmupStartUtc + fixedWindow;
+            DateTime nextWarmupLogUtc = warmupStartUtc;
 
-            bool loggedIdentity = false;
-            bool loggedTunnel = false;
-            bool loggedFreshTelemetry = false;
-            bool loggedUsable = false;
-            bool loggedStableUsable = false;
-            bool loggedNotTrustworthy = false;
-            bool startupTrustEstablished = false;
+            SpeedifyWarmupWindowBuffer buffer = new SpeedifyWarmupWindowBuffer(minimumFreshSamples, minimumSpreadMs);
 
-            int consecutiveUsableCount = 0;
-            string warmupTag = "activation-slow";
-
-            while (DateTime.UtcNow <= warmupDeadlineUtc)
+            while (DateTime.UtcNow < warmupDeadlineUtc)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                bool isUsableNow = IsCandidateUsableForMeasurement(candidate, out string reason);
                 StartupWarmupTelemetrySnapshot telemetry = getWarmupTelemetry != null
                     ? getWarmupTelemetry()
                     : null;
 
-                bool hasIdentity = telemetry?.HasIdentity ?? false;
-                bool tunnelConnected = telemetry?.TunnelConnected ?? false;
-                bool hasFreshTelemetry = telemetry?.HasFreshTelemetry ?? false;
-                int activeConnections = telemetry?.ActiveConnectionCount ?? 0;
-                double activationElapsedMs = Math.Max(0.0, (DateTime.UtcNow - activationRequestedUtc).TotalMilliseconds);
-
-                bool trustNow = EvaluateStartupTrustGate(telemetry, out string trustReason);
-                if (trustNow && !startupTrustEstablished)
-                {
-                    startupTrustEstablished = true;
-                    Log("startup-probe | speedify became trustworthy | " + candidate + " | via=" + trustReason);
-                    warmupTag = AppendNote(warmupTag, "speedify-trust-after-warmup");
-                }
-                else if (!startupTrustEstablished && !loggedNotTrustworthy && hasFreshTelemetry && tunnelConnected)
-                {
-                    loggedNotTrustworthy = true;
-                    Log("startup-probe | speedify not yet trustworthy | " + candidate + " | reason=" + trustReason);
-
-                    if (trustReason == "large mismatch before trust gate")
-                        Log("startup-probe | mismatch ignored before trust | " + candidate);
-
-                    warmupTag = AppendNote(warmupTag, "large-mismatch-before-trust-gate");
-                }
-
-                if (hasIdentity && !loggedIdentity)
-                {
-                    loggedIdentity = true;
-                    Log("startup-probe | warmup-milestone | " + candidate +
-                        " | firstIdentityMs=" + activationElapsedMs.ToString("0"));
-                }
-
-                if (tunnelConnected && !loggedTunnel)
-                {
-                    loggedTunnel = true;
-                    Log("startup-probe | warmup-milestone | " + candidate +
-                        " | firstTunnelMs=" + activationElapsedMs.ToString("0"));
-                }
-
-                if (hasFreshTelemetry && !loggedFreshTelemetry)
-                {
-                    loggedFreshTelemetry = true;
-                    Log("startup-probe | warmup-milestone | " + candidate +
-                        " | firstFreshTelemetryMs=" + activationElapsedMs.ToString("0"));
-                }
-
-                if (isUsableNow && !loggedUsable)
-                {
-                    loggedUsable = true;
-                    Log("startup-probe | warmup-milestone | " + candidate +
-                        " | firstUsableMs=" + activationElapsedMs.ToString("0"));
-                }
-
-                bool speedifyReadyNow =
-                    hasIdentity &&
-                    tunnelConnected &&
-                    hasFreshTelemetry &&
-                    activeConnections > 0;
-
-                bool candidateReadyForMeasurement =
-                    isUsableNow &&
-                    speedifyReadyNow &&
-                    startupTrustEstablished;
-
-                if (candidateReadyForMeasurement)
-                    consecutiveUsableCount++;
-                else
-                    consecutiveUsableCount = 0;
-
-                if (candidateReadyForMeasurement && !loggedStableUsable && consecutiveUsableCount >= 2)
-                {
-                    loggedStableUsable = true;
-                    Log("startup-probe | warmup-stable | " + candidate +
-                        " | stableUsableMs=" + activationElapsedMs.ToString("0") +
-                        " | consecutiveUsable=2");
-                    warmupTag = AppendNote(warmupTag, "stable-usable-route");
-                }
-
-                if (consecutiveUsableCount >= 2)
-                {
-                    double waitedMs = Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds);
-
-                    Log("startup-probe | activate warm-up elapsed before measurement start | " + candidate +
-                        " | waitedMs=" + waitedMs.ToString("0"));
-                    Log("startup-probe | warmup-finished | " + candidate +
-                        " | elapsedMs=" + activationElapsedMs.ToString("0"));
-
-                    if (waitedMs >= 3500.0)
-                        warmupTag = AppendNote(warmupTag, "activation-slow-but-eventually-usable");
-
-                    return new CandidateWarmupResult(
-                        true,
-                        reason,
-                        waitedMs,
-                        startupTrustEstablished,
-                        warmupTag);
-                }
-
-                if (!string.Equals(reason, "usable", StringComparison.OrdinalIgnoreCase) &&
-                    !SpeedifyWarmupSoftReasons.Contains(reason))
-                {
-                    warmupTag = AppendNote(
-                        warmupTag,
-                        reason == "stale route state"
-                            ? "stale-route-state-after-warmup-timeout"
-                            : "warmup-hard-failure-" + reason.Replace(' ', '-'));
-
-                    return new CandidateWarmupResult(
-                        false,
-                        reason,
-                        Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
-                        startupTrustEstablished,
-                        warmupTag);
-                }
+                bool usableNow = IsCandidateUsableForMeasurement(candidate, out string reasonNow);
+                buffer.AddIfFresh(telemetry, usableNow);
 
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
+                    double activationElapsedMs = Math.Max(0.0, (DateTime.UtcNow - activationRequestedUtc).TotalMilliseconds);
                     double remainingMs = Math.Max(0.0, (warmupDeadlineUtc - DateTime.UtcNow).TotalMilliseconds);
 
                     Log("startup-probe | candidate warm-up waiting | " + candidate +
-                        " | reason=" + reason +
+                        " | reason=" + reasonNow +
                         " | remainingMs=" + remainingMs.ToString("0"));
 
                     Log("startup-probe | warmup-observe | " + candidate +
                         " | elapsedMs=" + activationElapsedMs.ToString("0") +
-                        " | identity=" + (hasIdentity ? "yes" : "no") +
-                        " | tunnel=" + (tunnelConnected ? "yes" : "no") +
-                        " | fresh=" + (hasFreshTelemetry ? "yes" : "no") +
-                        " | active=" + activeConnections +
-                        " | usable=" + (isUsableNow ? "yes" : "no") +
-                        " | speedifyReady=" + (speedifyReadyNow ? "yes" : "no") +
-                        " | trusted=" + (startupTrustEstablished ? "yes" : "no") +
-                        " | ready=" + (candidateReadyForMeasurement ? "yes" : "no") +
-                        " | trustReason=" + trustReason +
-                        " | reason=" + reason);
+                        " | freshSamples=" + buffer.FreshSampleCount +
+                        " | minRequired=" + minimumFreshSamples +
+                        " | spreadMs=" + buffer.SampleDurationMs.ToString("0") +
+                        " | minSpreadMs=" + minimumSpreadMs.ToString("0") +
+                        " | usableSamples=" + buffer.UsableSampleCount +
+                        " | avgAggLat=" + FormatMetric(buffer.AverageAggregateLatencyMs) +
+                        " | avgAggJit=" + FormatMetric(buffer.AverageAggregateJitterMs) +
+                        " | avgQueue=" + FormatMetric(buffer.AverageQueueDelayMs) +
+                        " | congested=" + (buffer.AnyCongestion ? "yes" : "no") +
+                        " | stableEnough=" + (buffer.StableEnough ? "yes" : "no") +
+                        " | usable=" + (usableNow ? "yes" : "no") +
+                        " | reason=" + reasonNow);
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
 
-                if (reason == "stale route state")
-                    warmupTag = AppendNote(warmupTag, "stale-route-state-during-warmup");
-
-                if (reason == "missing probe telemetry" || reason == "no fresh probes")
-                    warmupTag = AppendNote(warmupTag, "no-fresh-telemetry");
-
                 await Task.Delay(timing.SpeedifyWarmupPollInterval, cancellationToken);
             }
 
-            IsCandidateUsableForMeasurement(candidate, out string finalReason);
-            warmupTag = AppendNote(warmupTag, BuildWarmupTimeoutTag(finalReason));
+            bool finalUsable = IsCandidateUsableForMeasurement(candidate, out string finalReason);
+            bool startupTrustEstablished = buffer.MeetsMinimum && buffer.HasGoodTimeSpread;
+            finalUsable = finalUsable && buffer.StableEnough;
+            string warmupTag = "window-sampled";
+
+            if (!buffer.MeetsMinimum)
+                warmupTag = AppendNote(warmupTag, "speedify-low-confidence-insufficient-samples");
+            if (!buffer.HasGoodTimeSpread)
+                warmupTag = AppendNote(warmupTag, "speedify-low-confidence-poor-time-spread");
+            if (!buffer.StableEnough)
+                warmupTag = AppendNote(warmupTag, "speedify-unstable-window");
+
+            if (buffer.AnyCongestion)
+                warmupTag = AppendNote(warmupTag, "speedify-congestion-observed");
+
+            if (!string.Equals(finalReason, "usable", StringComparison.OrdinalIgnoreCase) &&
+                !SpeedifyWarmupSoftReasons.Contains(finalReason))
+            {
+                warmupTag = AppendNote(
+                    warmupTag,
+                    finalReason == "stale route state"
+                        ? "stale-route-state-after-warmup-window"
+                        : "warmup-hard-failure-" + finalReason.Replace(' ', '-'));
+            }
 
             return new CandidateWarmupResult(
-                false,
+                finalUsable,
                 finalReason,
                 Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                 startupTrustEstablished,
                 warmupTag);
+        }
+
+        private static string FormatMetric(double value)
+        {
+            return value > 0 ? value.ToString("0.0") : "--";
         }
 
         private bool EvaluateStartupTrustGate(
@@ -778,6 +951,9 @@ namespace WTFnetApp
                 SpeedifyAggregateLatencyMs = Weighted(first.SpeedifyAggregateLatencyMs, second.SpeedifyAggregateLatencyMs, w1, w2),
                 SpeedifyAggregateJitterMs = Weighted(first.SpeedifyAggregateJitterMs, second.SpeedifyAggregateJitterMs, w1, w2),
                 SpeedifyReportedLatencyMs = Weighted(first.SpeedifyReportedLatencyMs, second.SpeedifyReportedLatencyMs, w1, w2),
+                SpeedifyFreshSampleCount = Math.Max(0, first.SpeedifyFreshSampleCount) + Math.Max(0, second.SpeedifyFreshSampleCount),
+                SpeedifyExpectedSampleCount = Weighted(first.SpeedifyExpectedSampleCount, second.SpeedifyExpectedSampleCount, w1, w2),
+                SpeedifyAggregateLatencyStdDevMs = Weighted(first.SpeedifyAggregateLatencyStdDevMs, second.SpeedifyAggregateLatencyStdDevMs, w1, w2),
 
                 IsValid = first.IsValid || second.IsValid,
                 Notes = AppendNote(first.Notes, second.Notes),
