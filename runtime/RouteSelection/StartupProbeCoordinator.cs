@@ -8,22 +8,6 @@ namespace WTFnetApp
 {
     public sealed class StartupProbeCoordinator
     {
-        public sealed class StartupWarmupTelemetrySnapshot
-        {
-            public bool HasIdentity { get; set; }
-            public bool TunnelConnected { get; set; }
-            public bool HasFreshTelemetry { get; set; }
-            public int ActiveConnectionCount { get; set; }
-            public DateTime TimeUtc { get; set; }
-            public double AggregateLatencyMs { get; set; } = -1;
-            public double AggregateJitterMs { get; set; } = -1;
-            public double QueueDelayMs { get; set; } = -1;
-            public double ReportedLatencyMs { get; set; } = -1;
-            public bool AggregateCongested { get; set; }
-            public bool DownloadCongested { get; set; }
-            public bool UploadCongested { get; set; }
-        }
-
         private readonly struct CandidateWarmupResult
         {
             public CandidateWarmupResult(
@@ -49,7 +33,7 @@ namespace WTFnetApp
 
         private sealed class SpeedifyWarmupWindowBuffer
         {
-            private readonly List<StartupWarmupTelemetrySnapshot> samples = new List<StartupWarmupTelemetrySnapshot>();
+            private readonly List<StartupDecisionSnapshot> samples = new List<StartupDecisionSnapshot>();
             private readonly int minimumSamples;
             private readonly double minimumSpreadMs;
             private DateTime firstAcceptedUtc = DateTime.MinValue;
@@ -79,7 +63,7 @@ namespace WTFnetApp
 
             public bool AnyCongestion => samples.Any(s => s.AggregateCongested || s.DownloadCongested || s.UploadCongested);
 
-            public void AddIfFresh(StartupWarmupTelemetrySnapshot snapshot, bool isUsable)
+            public void AddIfFresh(StartupDecisionSnapshot snapshot, bool isUsable)
             {
                 if (snapshot == null || !snapshot.HasFreshTelemetry)
                     return;
@@ -103,7 +87,7 @@ namespace WTFnetApp
                     usableSampleCount++;
             }
 
-            private double Average(Func<StartupWarmupTelemetrySnapshot, double> selector)
+            private double Average(Func<StartupDecisionSnapshot, double> selector)
             {
                 if (samples.Count == 0)
                     return -1;
@@ -128,7 +112,7 @@ namespace WTFnetApp
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
-        private readonly Func<StartupWarmupTelemetrySnapshot> getWarmupTelemetry;
+        private readonly Func<StartupDecisionSnapshot> getWarmupTelemetry;
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
@@ -149,7 +133,7 @@ namespace WTFnetApp
             Func<string, Task<bool>> activateSpeedifyAsync,
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
-            Func<StartupWarmupTelemetrySnapshot> getWarmupTelemetry,
+            Func<StartupDecisionSnapshot> getWarmupTelemetry,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             ServerProbeLearningStore learningStore,
             StartupProbeTimingConfig timing = null,
@@ -753,7 +737,7 @@ namespace WTFnetApp
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                StartupWarmupTelemetrySnapshot telemetry = getWarmupTelemetry != null
+                StartupDecisionSnapshot telemetry = getWarmupTelemetry != null
                     ? getWarmupTelemetry()
                     : null;
 
@@ -829,7 +813,7 @@ namespace WTFnetApp
         }
 
         private bool EvaluateStartupTrustGate(
-            StartupWarmupTelemetrySnapshot telemetry,
+            StartupDecisionSnapshot telemetry,
             out string reason)
         {
             reason = "missing speedify telemetry";

@@ -94,8 +94,40 @@ namespace WTFnetApp
                 state.JitterPressure,
                 ComputeJitterPressure(state.JitterMs));
 
+            PopulateStartupDecision(state);
+
             state.RefreshDisplayState(natState);
             return state;
+        }
+
+        private static void PopulateStartupDecision(UnifiedNetworkState state)
+        {
+            if (state == null)
+                return;
+
+            StartupDecisionSnapshot startup = state.StartupDecision ?? new StartupDecisionSnapshot();
+            SpeedifyTelemetrySnapshot speedify = state.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
+
+            bool hasLiveTelemetrySignal =
+                speedify.ActiveConnectionCount > 0 ||
+                speedify.LatencyMs > 0 ||
+                speedify.AggregateLatencyMs > 0 ||
+                speedify.AggregateJitterMs > 0 ||
+                state.QueueDelayMs > 0;
+
+            startup.TunnelConnected = speedify.TunnelConnected;
+            startup.HasFreshTelemetry = state.SpeedifyTelemetryFresh && hasLiveTelemetrySignal;
+            startup.ActiveConnectionCount = speedify.ActiveConnectionCount;
+            startup.TimeUtc = state.TimeUtc;
+            startup.AggregateLatencyMs = speedify.AggregateLatencyMs;
+            startup.AggregateJitterMs = speedify.AggregateJitterMs;
+            startup.QueueDelayMs = state.QueueDelayMs;
+            startup.ReportedLatencyMs = speedify.LatencyMs;
+            startup.AggregateCongested = speedify.AggregateCongested;
+            startup.DownloadCongested = speedify.DownloadCongested;
+            startup.UploadCongested = speedify.UploadCongested;
+
+            state.StartupDecision = startup;
         }
 
         private static bool IsStableSpeedifySnapshot(MetricsSnapshot snapshot, out string reason)
@@ -334,99 +366,76 @@ namespace WTFnetApp
 
         private static void ApplySpeedifyFields(UnifiedNetworkState state, MetricsSnapshot snapshot)
         {
-            state.TunnelConnected = snapshot.TunnelConnected;
-            state.AggregateCongested = snapshot.AggregateCongested;
-            state.ActiveConnectionCount = snapshot.ActiveConnectionCount;
-            state.BackupConnectionCount = snapshot.BackupConnectionCount;
+            SpeedifyTelemetrySnapshot speedify = state.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
 
-            state.AggregateLatencyMs = snapshot.AggregateLatencyMs;
-            state.AggregateJitterMs = snapshot.AggregateJitterMs;
-            state.AggregateRxBps = snapshot.AggregateRxBps;
-            state.AggregateTxBps = snapshot.AggregateTxBps;
-            state.AggregateTotalBps = snapshot.AggregateTotalBps;
+            speedify.TunnelConnected = snapshot.TunnelConnected;
+            speedify.AggregateCongested = snapshot.AggregateCongested;
+            speedify.ActiveConnectionCount = snapshot.ActiveConnectionCount;
+            speedify.BackupConnectionCount = snapshot.BackupConnectionCount;
+            speedify.AggregateLatencyMs = snapshot.AggregateLatencyMs;
+            speedify.AggregateJitterMs = snapshot.AggregateJitterMs;
+            speedify.AggregateRxBps = snapshot.AggregateRxBps;
+            speedify.AggregateTxBps = snapshot.AggregateTxBps;
+            speedify.AggregateTotalBps = snapshot.AggregateTotalBps;
+            speedify.ConnectedServerName = snapshot.ConnectedServerName;
+            speedify.ConnectedServerPublicIp = snapshot.ConnectedServerPublicIp;
+            speedify.PrimaryRemoteIp = snapshot.PrimaryRemoteIp;
+            speedify.SpeedifyRemoteIp = snapshot.SpeedifyRemoteIp;
+            speedify.Adapter1Latency = snapshot.Adapter1Latency;
+            speedify.Adapter2Latency = snapshot.Adapter2Latency;
+            speedify.CurrentState = snapshot.TunnelCurrentState;
+            speedify.CurrentMode = snapshot.TunnelCurrentMode;
+            speedify.HasConnectionStats = snapshot.HasConnectionStats;
+            speedify.HasNetworks = snapshot.HasNetworks;
+            speedify.HasSessionStats = snapshot.HasSessionStats;
+            speedify.HasCurrentState = snapshot.HasCurrentState;
+            speedify.HasConnectedServer = snapshot.HasConnectedServer;
+            speedify.StructuredCoreComplete = snapshot.StructuredCoreComplete;
+            speedify.ParseWarningCount = snapshot.ParseWarningCount;
+            speedify.ConnectedLegacy = snapshot.Connected;
+            speedify.CongestedLegacy = snapshot.Congested;
+            speedify.DownloadCongested = snapshot.IsDownloadCongested;
+            speedify.UploadCongested = snapshot.IsUploadCongested;
+            speedify.LatencyMs = snapshot.LatencyMs;
+            speedify.BaseLatencyMs = snapshot.BaseLatencyMs;
+            speedify.LegacyJitterMs = snapshot.Jitter;
+            speedify.ExternalPingMs = snapshot.ExternalPingMs;
+            speedify.MosScore = snapshot.MosScore;
+            speedify.ReceiveBytesPerSecond = snapshot.ReceiveBytesPerSecond;
+            speedify.SendBytesPerSecond = snapshot.SendBytesPerSecond;
+            speedify.ReceiveBytes = snapshot.ReceiveBytes;
+            speedify.SendBytes = snapshot.SendBytes;
+            speedify.LagScore = snapshot.LagScore;
+            speedify.QueueDelay = snapshot.QueueDelay;
+            speedify.QueueGrowth = snapshot.QueueGrowth;
+            speedify.QueueAcceleration = snapshot.QueueAcceleration;
+            speedify.LatencyDrift = snapshot.LatencyDrift;
+            speedify.RetransmissionGrowth = snapshot.RetransmissionGrowth;
+            speedify.QueuePressure = snapshot.QueuePressure;
+            speedify.AggressionFactor = snapshot.AggressionFactor;
+            speedify.ServerScore = snapshot.ServerScore;
+            speedify.BurstMultiplier = snapshot.BurstMultiplier;
+            speedify.PatternMatchScore = snapshot.PatternMatchScore;
+            speedify.SignatureAvgQueueGrowth = snapshot.SignatureAvgQueueGrowth;
+            speedify.LagPressure = snapshot.LagPressure;
+            speedify.RetransmissionRate = snapshot.RetransmissionRate;
+            speedify.PredictionConfidence = snapshot.PredictionConfidence;
+            speedify.DominantSignal = snapshot.DominantSignal;
+            speedify.LagEventType = snapshot.LagEventType;
+            speedify.GamePhase = snapshot.GamePhase;
+            speedify.NetworkState = snapshot.NetworkState;
+            speedify.ControlState = snapshot.ControlState;
+            speedify.IssueSource = snapshot.IssueSource;
+            speedify.PendingLagEvents = snapshot.PendingLagEvents;
+            speedify.LearningEnabled = snapshot.LearningEnabled;
 
-            state.ConnectedServerName = snapshot.ConnectedServerName;
-            state.ConnectedServerPublicIp = snapshot.ConnectedServerPublicIp;
-            state.PrimaryRemoteIp = snapshot.PrimaryRemoteIp;
-            state.SpeedifyRemoteIp = snapshot.SpeedifyRemoteIp;
-
-            state.Adapter1Latency = snapshot.Adapter1Latency;
-            state.Adapter2Latency = snapshot.Adapter2Latency;
-
-            state.RecentLatencyMs = snapshot.Recent;
-            state.AverageLatencyMs = snapshot.Average;
-            state.MaxLatencyMs = snapshot.Max;
-            state.MicroJitterMs = snapshot.MicroJitter;
-            state.DynamicBaseMs = snapshot.DynamicBase;
-            state.QueueDelayMs = snapshot.QueueDelayMs;
-            state.PacketLoss = snapshot.PacketLoss;
-
-            state.LatencyDriftMs = snapshot.LatencyDrift;
-            state.CongestionScore = snapshot.CongestionScore;
-            state.LagProbability = snapshot.LagProbability;
-            state.PredictionConfidence = ParsePredictionConfidence(snapshot.PredictionConfidence);
-
-            state.SpeedifyConnectedLegacy = snapshot.Connected;
-            state.SpeedifyCongestedLegacy = snapshot.Congested;
-            state.SpeedifyDownloadCongested = snapshot.IsDownloadCongested;
-            state.SpeedifyUploadCongested = snapshot.IsUploadCongested;
-
-            state.SpeedifyLatencyMs = snapshot.LatencyMs;
-            state.SpeedifyBaseLatencyMs = snapshot.BaseLatencyMs;
-            state.SpeedifyLegacyJitterMs = snapshot.Jitter;
-            state.SpeedifyExternalPingMs = snapshot.ExternalPingMs;
-
-            state.SpeedifyMosScore = snapshot.MosScore;
-
-            state.SpeedifyReceiveBytesPerSecond = snapshot.ReceiveBytesPerSecond;
-            state.SpeedifySendBytesPerSecond = snapshot.SendBytesPerSecond;
-            state.SpeedifyReceiveBytes = snapshot.ReceiveBytes;
-            state.SpeedifySendBytes = snapshot.SendBytes;
-
-            state.SpeedifyLagScore = snapshot.LagScore;
-            state.SpeedifyQueueDelay = snapshot.QueueDelay;
-            state.SpeedifyQueueGrowth = snapshot.QueueGrowth;
-            state.SpeedifyQueueAcceleration = snapshot.QueueAcceleration;
-            state.SpeedifyLatencyDrift = snapshot.LatencyDrift;
-            state.SpeedifyRetransmissionGrowth = snapshot.RetransmissionGrowth;
-            state.SpeedifyQueuePressure = snapshot.QueuePressure;
-            state.SpeedifyAggressionFactor = snapshot.AggressionFactor;
-            state.SpeedifyServerScore = snapshot.ServerScore;
-            state.SpeedifyBurstMultiplier = snapshot.BurstMultiplier;
-            state.SpeedifyPatternMatchScore = snapshot.PatternMatchScore;
-            state.SpeedifySignatureAvgQueueGrowth = snapshot.SignatureAvgQueueGrowth;
-            state.SpeedifyLagPressure = snapshot.LagPressure;
-            state.SpeedifyRetransmissionRate = snapshot.RetransmissionRate;
-
-            state.SpeedifyPredictionConfidence = snapshot.PredictionConfidence;
-            state.SpeedifyDominantSignal = snapshot.DominantSignal;
-            state.SpeedifyLagEventType = snapshot.LagEventType;
-            state.SpeedifyGamePhase = snapshot.GamePhase;
-            state.SpeedifyNetworkState = snapshot.NetworkState;
-            state.SpeedifyControlState = snapshot.ControlState;
-            state.SpeedifyIssueSource = snapshot.IssueSource;
-
-            state.SpeedifyPendingLagEvents = snapshot.PendingLagEvents;
-            state.SpeedifyLearningEnabled = snapshot.LearningEnabled;
-
-            state.SpeedifyCurrentState = snapshot.TunnelCurrentState;
-            state.SpeedifyCurrentMode = snapshot.TunnelCurrentMode;
-
-            state.SpeedifyHasConnectionStats = snapshot.HasConnectionStats;
-            state.SpeedifyHasNetworks = snapshot.HasNetworks;
-            state.SpeedifyHasSessionStats = snapshot.HasSessionStats;
-            state.SpeedifyHasCurrentState = snapshot.HasCurrentState;
-            state.SpeedifyHasConnectedServer = snapshot.HasConnectedServer;
-            state.SpeedifyStructuredCoreComplete = snapshot.StructuredCoreComplete;
-            state.SpeedifyParseWarningCount = snapshot.ParseWarningCount;
-
-            state.SpeedifySessionWindows.Clear();
+            speedify.SessionWindows.Clear();
             foreach (SpeedifySessionWindowStats src in snapshot.SessionWindows)
             {
                 if (src == null)
                     continue;
 
-                state.SpeedifySessionWindows.Add(new SpeedifySessionWindowStats
+                speedify.SessionWindows.Add(new SpeedifySessionWindowStats
                 {
                     WindowKey = src.WindowKey,
                     BytesRecv = src.BytesRecv,
@@ -461,6 +470,21 @@ namespace WTFnetApp
                     UniqueSaves = src.UniqueSaves
                 });
             }
+
+            state.SpeedifyTelemetry = speedify;
+
+            // resolved-consumer convenience fields preserved
+            state.QueueDelayMs = snapshot.QueueDelayMs;
+            state.PacketLoss = snapshot.PacketLoss;
+            state.RecentLatencyMs = snapshot.Recent;
+            state.AverageLatencyMs = snapshot.Average;
+            state.MaxLatencyMs = snapshot.Max;
+            state.MicroJitterMs = snapshot.MicroJitter;
+            state.DynamicBaseMs = snapshot.DynamicBase;
+            state.LatencyDriftMs = snapshot.LatencyDrift;
+            state.CongestionScore = snapshot.CongestionScore;
+            state.LagProbability = snapshot.LagProbability;
+            state.PredictionConfidence = ParsePredictionConfidence(snapshot.PredictionConfidence);
 
             state.Links.Clear();
             foreach (LinkSnapshot src in snapshot.Links)
@@ -497,47 +521,45 @@ namespace WTFnetApp
 
         private static void ApplyFastPingFields(UnifiedNetworkState state, FastPingState fastPing)
         {
-            state.FastPingPrimaryTarget = fastPing.PrimaryTarget;
-            state.FastPingSecondaryTarget = fastPing.SecondaryTarget;
+            FastPingTelemetrySnapshot telemetry = state.FastPingTelemetry ?? new FastPingTelemetrySnapshot();
 
-            state.FastPingInstantMs = fastPing.InstantPingMs;
-            state.FastPingStableMs = fastPing.StablePingMs;
-            state.FastPingBaselineMs = fastPing.BaselinePingMs;
-            state.FastPingFloorMs = fastPing.FloorPingMs;
-            state.FastPingJitterMs = fastPing.JitterMs;
-            state.FastPingDisplayedPingMs = fastPing.DisplayedPingMs;
-            state.FastPingTunnelLatencyMs = fastPing.TunnelLatencyMs;
+            telemetry.PrimaryTarget = fastPing.PrimaryTarget;
+            telemetry.SecondaryTarget = fastPing.SecondaryTarget;
+            telemetry.InstantMs = fastPing.InstantPingMs;
+            telemetry.StableMs = fastPing.StablePingMs;
+            telemetry.BaselineMs = fastPing.BaselinePingMs;
+            telemetry.FloorMs = fastPing.FloorPingMs;
+            telemetry.JitterMs = fastPing.JitterMs;
+            telemetry.DisplayedPingMs = fastPing.DisplayedPingMs;
+            telemetry.TunnelLatencyMs = fastPing.TunnelLatencyMs;
+            telemetry.Confidence = fastPing.Confidence;
+            telemetry.LossRate = fastPing.LossRate;
+            telemetry.BadQualityRate = fastPing.BadQualityRate;
+            telemetry.PrimarySecondaryDivergenceMs = fastPing.PrimarySecondaryDivergenceMs;
+            telemetry.SpikeDetected = fastPing.SpikeDetected;
+            telemetry.IsStale = fastPing.IsStale;
+            telemetry.HealthState = fastPing.HealthState.ToString();
+            telemetry.PrimaryFresh = fastPing.PrimaryFresh;
+            telemetry.SecondaryFresh = fastPing.SecondaryFresh;
+            telemetry.IsEvaluationMode = fastPing.IsEvaluationMode;
+            telemetry.PrimaryInstantMs = fastPing.PrimaryInstantMs;
+            telemetry.PrimaryStableMs = fastPing.PrimaryStableMs;
+            telemetry.PrimaryFloorMs = fastPing.PrimaryFloorMs;
+            telemetry.PrimaryBaselineMs = fastPing.PrimaryBaselineMs;
+            telemetry.PrimaryJitterMs = fastPing.PrimaryJitterMs;
+            telemetry.PrimaryLossRate = fastPing.PrimaryLossRate;
+            telemetry.PrimaryBadQualityRate = fastPing.PrimaryBadQualityRate;
+            telemetry.PrimaryConfidence = fastPing.PrimaryConfidence;
+            telemetry.SecondaryInstantMs = fastPing.SecondaryInstantMs;
+            telemetry.SecondaryStableMs = fastPing.SecondaryStableMs;
+            telemetry.SecondaryFloorMs = fastPing.SecondaryFloorMs;
+            telemetry.SecondaryBaselineMs = fastPing.SecondaryBaselineMs;
+            telemetry.SecondaryJitterMs = fastPing.SecondaryJitterMs;
+            telemetry.SecondaryLossRate = fastPing.SecondaryLossRate;
+            telemetry.SecondaryBadQualityRate = fastPing.SecondaryBadQualityRate;
+            telemetry.SecondaryConfidence = fastPing.SecondaryConfidence;
 
-            state.FastPingConfidence = fastPing.Confidence;
-            state.FastPingLossRate = fastPing.LossRate;
-            state.FastPingBadQualityRate = fastPing.BadQualityRate;
-            state.FastPingPrimarySecondaryDivergenceMs = fastPing.PrimarySecondaryDivergenceMs;
-
-            state.FastPingSpikeDetected = fastPing.SpikeDetected;
-            state.FastPingIsStale = fastPing.IsStale;
-            state.FastPingHealthState = fastPing.HealthState.ToString();
-
-            state.FastPingPrimaryFresh = fastPing.PrimaryFresh;
-            state.FastPingSecondaryFresh = fastPing.SecondaryFresh;
-            state.FastPingIsEvaluationMode = fastPing.IsEvaluationMode;
-
-            state.FastPingPrimaryInstantMs = fastPing.PrimaryInstantMs;
-            state.FastPingPrimaryStableMs = fastPing.PrimaryStableMs;
-            state.FastPingPrimaryFloorMs = fastPing.PrimaryFloorMs;
-            state.FastPingPrimaryBaselineMs = fastPing.PrimaryBaselineMs;
-            state.FastPingPrimaryJitterMs = fastPing.PrimaryJitterMs;
-            state.FastPingPrimaryLossRate = fastPing.PrimaryLossRate;
-            state.FastPingPrimaryBadQualityRate = fastPing.PrimaryBadQualityRate;
-            state.FastPingPrimaryConfidence = fastPing.PrimaryConfidence;
-
-            state.FastPingSecondaryInstantMs = fastPing.SecondaryInstantMs;
-            state.FastPingSecondaryStableMs = fastPing.SecondaryStableMs;
-            state.FastPingSecondaryFloorMs = fastPing.SecondaryFloorMs;
-            state.FastPingSecondaryBaselineMs = fastPing.SecondaryBaselineMs;
-            state.FastPingSecondaryJitterMs = fastPing.SecondaryJitterMs;
-            state.FastPingSecondaryLossRate = fastPing.SecondaryLossRate;
-            state.FastPingSecondaryBadQualityRate = fastPing.SecondaryBadQualityRate;
-            state.FastPingSecondaryConfidence = fastPing.SecondaryConfidence;
+            state.FastPingTelemetry = telemetry;
         }
 
         private static void ResolveEmpty(UnifiedNetworkState state)
