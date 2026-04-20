@@ -98,6 +98,9 @@
     <Compile Include="runtime\Data\SpeedifyTelemetryData\MetricsSnapshot.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
+    <Compile Include="runtime\Data\WTFnetDataGOSPEL\FastPingTelemetrySnapshot.cs" />
+    <Compile Include="runtime\Data\WTFnetDataGOSPEL\SpeedifyTelemetrySnapshot.cs" />
+    <Compile Include="runtime\Data\WTFnetDataGOSPEL\StartupDecisionSnapshot.cs" />
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\UnifiedNetworkState.cs" />
     <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyStructuredState.cs" />
     <None Include="lab\StartupServerTest.cs">
