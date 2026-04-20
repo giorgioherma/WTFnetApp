@@ -157,7 +157,7 @@ namespace WTFnetApp
                 activateSpeedifyAsync: ActivateSpeedifyTargetAsync,
                 getFastPingState: () => fastPing.GetState(),
                 getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
-                getWarmupTelemetry: GetStartupWarmupTelemetrySnapshot,
+                getWarmupTelemetry: GetStartupDecisionSnapshot,
                 captureProbeAsync: CaptureProbeRuntimeAsync,
                 learningStore: probeLearningStore,
                 timing: StartupProbeTiming,
@@ -994,40 +994,35 @@ namespace WTFnetApp
             return ageMs >= 0 && ageMs <= 3000;
         }
 
-        private StartupProbeCoordinator.StartupWarmupTelemetrySnapshot GetStartupWarmupTelemetrySnapshot()
+        private StartupDecisionSnapshot GetStartupDecisionSnapshot()
         {
             UnifiedNetworkState unified = GetLastUnifiedState();
             if (unified == null)
-                return new StartupProbeCoordinator.StartupWarmupTelemetrySnapshot();
+                return new StartupDecisionSnapshot();
 
-            bool hasRecentTelemetry = IsFreshSpeedifyState(unified);
+            StartupDecisionSnapshot startup = unified.StartupDecision;
+            if (startup == null)
+                return new StartupDecisionSnapshot();
 
-            bool hasIdentity =
-                !string.IsNullOrWhiteSpace(unified.ConnectedServerPublicIp) ||
-                !string.IsNullOrWhiteSpace(unified.ConnectedServerName);
-
-            bool hasLiveTelemetrySignal =
-                unified.ActiveConnectionCount > 0 ||
-                unified.SpeedifyLatencyMs > 0 ||
-                unified.AggregateLatencyMs > 0 ||
-                unified.AggregateJitterMs > 0 ||
-                unified.QueueDelayMs > 0;
-
-            return new StartupProbeCoordinator.StartupWarmupTelemetrySnapshot
+            StartupDecisionSnapshot snapshot = new StartupDecisionSnapshot
             {
-                HasIdentity = hasIdentity,
-                TunnelConnected = unified.TunnelConnected,
-                HasFreshTelemetry = hasRecentTelemetry && hasLiveTelemetrySignal,
-                ActiveConnectionCount = unified.ActiveConnectionCount,
-                TimeUtc = unified.TimeUtc,
-                AggregateLatencyMs = unified.AggregateLatencyMs,
-                AggregateJitterMs = unified.AggregateJitterMs,
-                QueueDelayMs = unified.QueueDelayMs,
-                ReportedLatencyMs = unified.SpeedifyLatencyMs,
-                AggregateCongested = unified.AggregateCongested,
-                DownloadCongested = unified.SpeedifyDownloadCongested,
-                UploadCongested = unified.SpeedifyUploadCongested
+                TunnelConnected = startup.TunnelConnected,
+                HasFreshTelemetry = startup.HasFreshTelemetry,
+                ActiveConnectionCount = startup.ActiveConnectionCount,
+                TimeUtc = startup.TimeUtc,
+                AggregateLatencyMs = startup.AggregateLatencyMs,
+                AggregateJitterMs = startup.AggregateJitterMs,
+                QueueDelayMs = startup.QueueDelayMs,
+                ReportedLatencyMs = startup.ReportedLatencyMs,
+                AggregateCongested = startup.AggregateCongested,
+                DownloadCongested = startup.DownloadCongested,
+                UploadCongested = startup.UploadCongested
             };
+
+            if (!IsFreshSpeedifyState(unified))
+                snapshot.HasFreshTelemetry = false;
+
+            return snapshot;
         }
 
         // =========================
