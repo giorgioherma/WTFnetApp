@@ -1773,7 +1773,10 @@ namespace WTFnetApp
             try
             {
                 if (nat != null)
+                {
                     nat.StopNatKeepAlive();
+                    await nat.RunningTask;
+                }
             }
             catch (Exception ex)
             {
