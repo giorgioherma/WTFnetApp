@@ -299,6 +299,8 @@ namespace WTFnetApp
             if (s == null)
                 return;
 
+            SpeedifyTelemetrySnapshot speedify = s.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
+
             DateTime now = DateTime.Now;
             double shownPing = s.DisplayedPingMs > 0 ? s.DisplayedPingMs : s.LatencyMs;
 
@@ -306,11 +308,11 @@ namespace WTFnetApp
             {
                 string source = SafeCsv(GetUnifiedSourceForCsv(s.SourceKind));
                 string health = SafeCsv(s.HealthState);
-                string server = SafeCsv(s.ConnectedServerName);
-                string mode = SafeCsv(s.SpeedifyCurrentMode);
+                string server = SafeCsv(speedify.ConnectedServerName);
+                string mode = SafeCsv(speedify.CurrentMode);
 
-                bool tunnel = s.TunnelConnected;
-                bool aggCongested = s.AggregateCongested;
+                bool tunnel = speedify.TunnelConnected;
+                bool aggCongested = speedify.AggregateCongested;
                 bool spike = s.SpikeDetected;
                 bool stale = s.IsStale;
 
@@ -517,11 +519,14 @@ namespace WTFnetApp
 
         private static string BuildUnifiedRow(UnifiedNetworkState s, DateTime now)
         {
+            FastPingTelemetrySnapshot fastPing = s.FastPingTelemetry ?? new FastPingTelemetrySnapshot();
+            SpeedifyTelemetrySnapshot speedify = s.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
+
             double shownPing = s.DisplayedPingMs > 0 ? s.DisplayedPingMs : s.LatencyMs;
 
-            double deltaFpSp = SafeDelta(s.FastPingDisplayedPingMs, s.AggregateLatencyMs);
-            double deltaResFp = SafeDelta(shownPing, s.FastPingDisplayedPingMs);
-            double deltaResSp = SafeDelta(shownPing, s.AggregateLatencyMs);
+            double deltaFpSp = SafeDelta(fastPing.DisplayedPingMs, speedify.AggregateLatencyMs);
+            double deltaResFp = SafeDelta(shownPing, fastPing.DisplayedPingMs);
+            double deltaResSp = SafeDelta(shownPing, speedify.AggregateLatencyMs);
 
             return string.Join(";", new[]
             {
@@ -544,82 +549,82 @@ namespace WTFnetApp
                 SafeCsv(s.DisplayNatText),
                 SafeCsv(s.DisplayNatColorKey),
 
-                F(s.FastPingDisplayedPingMs),
-                F(s.FastPingInstantMs),
-                F(s.FastPingStableMs),
-                F(s.FastPingBaselineMs),
-                F(s.FastPingFloorMs),
-                F(s.FastPingJitterMs),
-                F(s.FastPingConfidence),
-                F(s.FastPingLossRate),
-                F(s.FastPingBadQualityRate),
-                B(s.FastPingSpikeDetected),
-                B(s.FastPingIsStale),
-                B(s.FastPingPrimaryFresh),
-                B(s.FastPingSecondaryFresh),
-                B(s.FastPingIsEvaluationMode),
-                F(s.FastPingPrimarySecondaryDivergenceMs),
-                F(s.FastPingTunnelLatencyMs),
-                SafeCsv(s.FastPingPrimaryTarget),
-                SafeCsv(s.FastPingSecondaryTarget),
+                F(fastPing.DisplayedPingMs),
+                F(fastPing.InstantMs),
+                F(fastPing.StableMs),
+                F(fastPing.BaselineMs),
+                F(fastPing.FloorMs),
+                F(fastPing.JitterMs),
+                F(fastPing.Confidence),
+                F(fastPing.LossRate),
+                F(fastPing.BadQualityRate),
+                B(fastPing.SpikeDetected),
+                B(fastPing.IsStale),
+                B(fastPing.PrimaryFresh),
+                B(fastPing.SecondaryFresh),
+                B(fastPing.IsEvaluationMode),
+                F(fastPing.PrimarySecondaryDivergenceMs),
+                F(fastPing.TunnelLatencyMs),
+                SafeCsv(fastPing.PrimaryTarget),
+                SafeCsv(fastPing.SecondaryTarget),
 
-                F(s.FastPingPrimaryInstantMs),
-                F(s.FastPingPrimaryStableMs),
-                F(s.FastPingPrimaryBaselineMs),
-                F(s.FastPingPrimaryFloorMs),
-                F(s.FastPingPrimaryJitterMs),
-                F(s.FastPingPrimaryConfidence),
-                F(s.FastPingPrimaryLossRate),
-                F(s.FastPingPrimaryBadQualityRate),
+                F(fastPing.PrimaryInstantMs),
+                F(fastPing.PrimaryStableMs),
+                F(fastPing.PrimaryBaselineMs),
+                F(fastPing.PrimaryFloorMs),
+                F(fastPing.PrimaryJitterMs),
+                F(fastPing.PrimaryConfidence),
+                F(fastPing.PrimaryLossRate),
+                F(fastPing.PrimaryBadQualityRate),
 
-                F(s.FastPingSecondaryInstantMs),
-                F(s.FastPingSecondaryStableMs),
-                F(s.FastPingSecondaryBaselineMs),
-                F(s.FastPingSecondaryFloorMs),
-                F(s.FastPingSecondaryJitterMs),
-                F(s.FastPingSecondaryConfidence),
-                F(s.FastPingSecondaryLossRate),
-                F(s.FastPingSecondaryBadQualityRate),
+                F(fastPing.SecondaryInstantMs),
+                F(fastPing.SecondaryStableMs),
+                F(fastPing.SecondaryBaselineMs),
+                F(fastPing.SecondaryFloorMs),
+                F(fastPing.SecondaryJitterMs),
+                F(fastPing.SecondaryConfidence),
+                F(fastPing.SecondaryLossRate),
+                F(fastPing.SecondaryBadQualityRate),
 
-                B(s.TunnelConnected),
-                B(s.AggregateCongested),
-                I(s.ActiveConnectionCount),
-                I(s.BackupConnectionCount),
-                F(s.AggregateLatencyMs),
-                F(s.AggregateJitterMs),
-                F(s.AggregateRxBps),
-                F(s.AggregateTxBps),
-                F(s.AggregateTotalBps),
-                SafeCsv(s.ConnectedServerName),
-                SafeCsv(s.ConnectedServerPublicIp),
-                SafeCsv(s.PrimaryRemoteIp),
-                SafeCsv(s.SpeedifyRemoteIp),
-                F(s.Adapter1Latency),
-                F(s.Adapter2Latency),
-                SafeCsv(s.SpeedifyCurrentMode),
-                SafeCsv(s.SpeedifyCurrentState),
+                B(speedify.TunnelConnected),
+                B(speedify.AggregateCongested),
+                I(speedify.ActiveConnectionCount),
+                I(speedify.BackupConnectionCount),
+                F(speedify.AggregateLatencyMs),
+                F(speedify.AggregateJitterMs),
+                F(speedify.AggregateRxBps),
+                F(speedify.AggregateTxBps),
+                F(speedify.AggregateTotalBps),
+                SafeCsv(speedify.ConnectedServerName),
+                SafeCsv(speedify.ConnectedServerPublicIp),
+                SafeCsv(speedify.PrimaryRemoteIp),
+                SafeCsv(speedify.SpeedifyRemoteIp),
+                F(speedify.Adapter1Latency),
+                F(speedify.Adapter2Latency),
+                SafeCsv(speedify.CurrentMode),
+                SafeCsv(speedify.CurrentState),
 
-                B(s.SpeedifyStructuredCoreComplete),
-                B(s.SpeedifyHasConnectionStats),
-                B(s.SpeedifyHasNetworks),
-                B(s.SpeedifyHasSessionStats),
-                B(s.SpeedifyHasCurrentState),
-                B(s.SpeedifyHasConnectedServer),
-                I(s.SpeedifyParseWarningCount),
+                B(speedify.StructuredCoreComplete),
+                B(speedify.HasConnectionStats),
+                B(speedify.HasNetworks),
+                B(speedify.HasSessionStats),
+                B(speedify.HasCurrentState),
+                B(speedify.HasConnectedServer),
+                I(speedify.ParseWarningCount),
 
-                F(s.SpeedifyLatencyMs),
-                F(s.SpeedifyBaseLatencyMs),
-                F(s.SpeedifyLegacyJitterMs),
-                F(s.SpeedifyExternalPingMs),
-                F(s.SpeedifyMosScore),
-                B(s.SpeedifyConnectedLegacy),
-                B(s.SpeedifyCongestedLegacy),
-                B(s.SpeedifyDownloadCongested),
-                B(s.SpeedifyUploadCongested),
-                L(s.SpeedifyReceiveBytesPerSecond),
-                L(s.SpeedifySendBytesPerSecond),
-                L(s.SpeedifyReceiveBytes),
-                L(s.SpeedifySendBytes),
+                F(speedify.LatencyMs),
+                F(speedify.BaseLatencyMs),
+                F(speedify.LegacyJitterMs),
+                F(speedify.ExternalPingMs),
+                F(speedify.MosScore),
+                B(speedify.ConnectedLegacy),
+                B(speedify.CongestedLegacy),
+                B(speedify.DownloadCongested),
+                B(speedify.UploadCongested),
+                L(speedify.ReceiveBytesPerSecond),
+                L(speedify.SendBytesPerSecond),
+                L(speedify.ReceiveBytes),
+                L(speedify.SendBytes),
 
                 F(s.RecentLatencyMs),
                 F(s.AverageLatencyMs),
@@ -629,32 +634,32 @@ namespace WTFnetApp
                 F(s.QueueDelayMs),
                 F(s.PacketLoss),
 
-                F(s.SpeedifyLagScore),
-                F(s.SpeedifyQueueDelay),
-                F(s.SpeedifyQueueGrowth),
-                F(s.SpeedifyQueueAcceleration),
-                F(s.SpeedifyLatencyDrift),
-                F(s.SpeedifyRetransmissionGrowth),
-                F(s.SpeedifyQueuePressure),
+                F(speedify.LagScore),
+                F(speedify.QueueDelay),
+                F(speedify.QueueGrowth),
+                F(speedify.QueueAcceleration),
+                F(speedify.LatencyDrift),
+                F(speedify.RetransmissionGrowth),
+                F(speedify.QueuePressure),
                 F(s.CongestionScore),
-                F(s.SpeedifyAggressionFactor),
-                F(s.SpeedifyServerScore),
+                F(speedify.AggressionFactor),
+                F(speedify.ServerScore),
                 F(s.LagProbability),
-                SafeCsv(s.SpeedifyPredictionConfidence),
+                SafeCsv(speedify.PredictionConfidence),
                 F(s.PredictionConfidence),
-                SafeCsv(s.SpeedifyDominantSignal),
-                SafeCsv(s.SpeedifyLagEventType),
-                SafeCsv(s.SpeedifyGamePhase),
-                SafeCsv(s.SpeedifyNetworkState),
-                SafeCsv(s.SpeedifyControlState),
-                I(s.SpeedifyPendingLagEvents),
-                F(s.SpeedifyBurstMultiplier),
-                B(s.SpeedifyLearningEnabled),
-                F(s.SpeedifyPatternMatchScore),
-                F(s.SpeedifySignatureAvgQueueGrowth),
-                F(s.SpeedifyLagPressure),
-                F(s.SpeedifyRetransmissionRate),
-                SafeCsv(s.SpeedifyIssueSource),
+                SafeCsv(speedify.DominantSignal),
+                SafeCsv(speedify.LagEventType),
+                SafeCsv(speedify.GamePhase),
+                SafeCsv(speedify.NetworkState),
+                SafeCsv(speedify.ControlState),
+                I(speedify.PendingLagEvents),
+                F(speedify.BurstMultiplier),
+                B(speedify.LearningEnabled),
+                F(speedify.PatternMatchScore),
+                F(speedify.SignatureAvgQueueGrowth),
+                F(speedify.LagPressure),
+                F(speedify.RetransmissionRate),
+                SafeCsv(speedify.IssueSource),
 
                 F(deltaFpSp),
                 F(deltaResFp),

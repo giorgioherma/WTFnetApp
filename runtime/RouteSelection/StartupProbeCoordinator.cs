@@ -1242,14 +1242,14 @@ namespace WTFnetApp
                 rawScore?.StartupSelectionScore ??
                 double.MaxValue;
 
-            if (baseline >= double.MaxValue)
-                return true;
-
             double gap = snapshot.StartupSelectionScore - baseline;
+            bool competitive = gap <= 5.0;
+            if (!competitive)
+                return false;
 
-            return gap <= 22.0 ||
-                   snapshot.OverallStabilityScore <= baseline + 18.0 ||
-                   snapshot.WarningLevel == ProbeWarningLevel.None;
+            return gap <= 3.0 ||
+                   snapshot.WarningLevel != ProbeWarningLevel.None ||
+                   runtime.AvgConfidence < 0.90;
         }
 
         private StartupProbeResult BuildUnreliableResult(

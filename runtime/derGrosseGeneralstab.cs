@@ -81,7 +81,7 @@ namespace WTFnetApp
             SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
 
             CommonProtectedStartupBufferDuration = TimeSpan.FromSeconds(3.0),
-            CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(6.0),
+            CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(3.0),
 
             BaseMeasuredDuration = TimeSpan.FromSeconds(10.0),
             PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
@@ -1243,6 +1243,8 @@ namespace WTFnetApp
                 if (!IsFreshSpeedifyState(state))
                     return;
 
+                SpeedifyTelemetrySnapshot speedify = state.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
+
                 if (lastAcceptedUtc != DateTime.MinValue &&
                     state.TimeUtc <= lastAcceptedUtc)
                 {
@@ -1251,27 +1253,27 @@ namespace WTFnetApp
 
                 freshSampleCount++;
                 lastAcceptedUtc = state.TimeUtc;
-                tunnelConnected = tunnelConnected || state.TunnelConnected;
-                aggregateCongested = aggregateCongested || state.AggregateCongested || state.SpeedifyDownloadCongested || state.SpeedifyUploadCongested;
-                activeConnectionMax = Math.Max(activeConnectionMax, state.ActiveConnectionCount);
-                backupConnectionMax = Math.Max(backupConnectionMax, state.BackupConnectionCount);
+                tunnelConnected = tunnelConnected || speedify.TunnelConnected;
+                aggregateCongested = aggregateCongested || speedify.AggregateCongested || speedify.DownloadCongested || speedify.UploadCongested;
+                activeConnectionMax = Math.Max(activeConnectionMax, speedify.ActiveConnectionCount);
+                backupConnectionMax = Math.Max(backupConnectionMax, speedify.BackupConnectionCount);
 
-                if (state.AggregateLatencyMs > 0)
+                if (speedify.AggregateLatencyMs > 0)
                 {
-                    aggregateLatencySum += state.AggregateLatencyMs;
+                    aggregateLatencySum += speedify.AggregateLatencyMs;
                     aggregateLatencyCount++;
-                    aggregateLatencySamples.Add(state.AggregateLatencyMs);
+                    aggregateLatencySamples.Add(speedify.AggregateLatencyMs);
                 }
 
-                if (state.AggregateJitterMs > 0)
+                if (speedify.AggregateJitterMs > 0)
                 {
-                    aggregateJitterSum += state.AggregateJitterMs;
+                    aggregateJitterSum += speedify.AggregateJitterMs;
                     aggregateJitterCount++;
                 }
 
-                if (state.SpeedifyLatencyMs > 0)
+                if (speedify.LatencyMs > 0)
                 {
-                    reportedLatencySum += state.SpeedifyLatencyMs;
+                    reportedLatencySum += speedify.LatencyMs;
                     reportedLatencyCount++;
                 }
             }
@@ -1324,6 +1326,7 @@ namespace WTFnetApp
 
             FastPingState fastPingState = fastPing.GetState();
             UnifiedNetworkState unified = GetLastUnifiedState();
+            SpeedifyTelemetrySnapshot speedify = unified?.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
             MetricsSnapshot snapshot;
             lock (publishSync)
             {
@@ -1353,25 +1356,25 @@ namespace WTFnetApp
 
                 TunnelConnected = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.TunnelConnected
-                    : (unified != null ? unified.TunnelConnected : snapshot != null && snapshot.TunnelConnected),
+                    : (unified != null ? speedify.TunnelConnected : snapshot != null && snapshot.TunnelConnected),
                 AggregateCongested = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.AggregateCongested
-                    : (unified != null ? (unified.AggregateCongested || unified.SpeedifyDownloadCongested || unified.SpeedifyUploadCongested) : snapshot != null && snapshot.AggregateCongested),
+                    : (unified != null ? (speedify.AggregateCongested || speedify.DownloadCongested || speedify.UploadCongested) : snapshot != null && snapshot.AggregateCongested),
                 ActiveConnectionCount = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.ActiveConnectionCount
-                    : (unified != null ? unified.ActiveConnectionCount : snapshot != null ? snapshot.ActiveConnectionCount : 0),
+                    : (unified != null ? speedify.ActiveConnectionCount : snapshot != null ? snapshot.ActiveConnectionCount : 0),
                 BackupConnectionCount = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.BackupConnectionCount
-                    : (unified != null ? unified.BackupConnectionCount : snapshot != null ? snapshot.BackupConnectionCount : 0),
+                    : (unified != null ? speedify.BackupConnectionCount : snapshot != null ? snapshot.BackupConnectionCount : 0),
                 SpeedifyAggregateLatencyMs = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.AverageAggregateLatencyMs
-                    : (unified != null ? unified.AggregateLatencyMs : snapshot != null ? snapshot.AggregateLatencyMs : -1),
+                    : (unified != null ? speedify.AggregateLatencyMs : snapshot != null ? snapshot.AggregateLatencyMs : -1),
                 SpeedifyAggregateJitterMs = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.AverageAggregateJitterMs
-                    : (unified != null ? unified.AggregateJitterMs : snapshot != null ? snapshot.AggregateJitterMs : -1),
+                    : (unified != null ? speedify.AggregateJitterMs : snapshot != null ? snapshot.AggregateJitterMs : -1),
                 SpeedifyReportedLatencyMs = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
                     ? speedifyWindow.AverageReportedLatencyMs
-                    : (unified != null ? unified.SpeedifyLatencyMs : snapshot != null ? snapshot.LatencyMs : -1),
+                    : (unified != null ? speedify.LatencyMs : snapshot != null ? snapshot.LatencyMs : -1),
                 SpeedifyFreshSampleCount = speedifyWindow != null ? speedifyWindow.FreshSampleCount : 0,
                 SpeedifyExpectedSampleCount = speedifyWindow != null ? Math.Max(1.0, Math.Round(observe.TotalMilliseconds / (observe <= TimeSpan.FromSeconds(5) ? 200.0 : 300.0))) : -1,
                 SpeedifyAggregateLatencyStdDevMs = speedifyWindow != null ? speedifyWindow.AggregateLatencyStdDevMs : -1,

@@ -1007,13 +1007,13 @@ namespace WTFnetApp
             result.ConfidenceScore = finalScore;
 
             if (!missingRunnerUp &&
-                finalScore >= 72.0 &&
+                finalScore >= 74.0 &&
                 gap >= 8.0 &&
                 winner.WarningLevel == ProbeWarningLevel.None)
             {
                 result.Kind = ProbeWinnerConfidenceKind.HighConfidence;
             }
-            else if (!missingRunnerUp && finalScore >= 45.0 && gap >= 3.0)
+            else if (!missingRunnerUp && finalScore >= 38.0 && gap >= 2.0 && winner.WarningLevel != ProbeWarningLevel.Risky)
             {
                 result.Kind = ProbeWinnerConfidenceKind.Tentative;
             }
