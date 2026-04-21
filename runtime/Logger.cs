@@ -18,17 +18,25 @@ namespace WTFnetApp
         private static string unifiedCsvFile = "wtfnet_unified_metrics.csv";
         private static string speedifyDebugLogFile = "wtfnet_speedify_debug.txt";
 
-        private static DateTime lastAnalysisLog = DateTime.MinValue;
+        private static DateTime lastOperationalLog = DateTime.MinValue;
         private static DateTime lastUnifiedCsvLog = DateTime.MinValue;
+        private static bool isShuttingDown;
 
-        private static string lastAnalysisHealth = string.Empty;
-        private static string lastAnalysisNatColor = string.Empty;
-        private static bool lastAnalysisStale;
-        private static bool lastAnalysisSpike;
-        private static int lastAnalysisLossBucket = -1;
-        private static int lastAnalysisBadBucket = -1;
-        private static int lastAnalysisPingBucket = -1;
-        private static int lastAnalysisJitterBucket = -1;
+        private static string lastLogRoute = string.Empty;
+        private static string lastLogSource = string.Empty;
+        private static string lastLogServer = string.Empty;
+        private static string lastLogPublicIp = string.Empty;
+        private static string lastLogHealth = string.Empty;
+        private static string lastLogWarning = string.Empty;
+        private static bool lastLogTunnelConnected;
+        private static bool lastLogStale;
+        private static bool lastLogSpeedifyValid;
+        private static int lastLogActiveCount = -1;
+        private static int lastLogBackupCount = -1;
+        private static int lastLogLatencyBucket = -1;
+        private static int lastLogJitterBucket = -1;
+        private static int lastLogLossBucket = -1;
+        private static int lastLogConfidenceBand = -1;
 
         private static string lastUnifiedSource = string.Empty;
         private static string lastUnifiedHealth = string.Empty;
@@ -219,8 +227,16 @@ namespace WTFnetApp
             WriteRawFastPingLine(line);
         }
 
+        public static void SetShuttingDown(bool shuttingDown)
+        {
+            lock (lockObj)
+            {
+                isShuttingDown = shuttingDown;
+            }
+        }
+
         // =========================================================
-        // ANALYSIS LOGGING (compact + change-based + heartbeat)
+        // OPERATIONAL LOGGING (compact + change-based + heartbeat)
         // =========================================================
 
         public static void LogAnalysis(UnifiedNetworkState s)
@@ -229,65 +245,94 @@ namespace WTFnetApp
                 return;
 
             DateTime now = DateTime.Now;
-
-            double shownPing = s.DisplayedPingMs > 0 ? s.DisplayedPingMs : s.LatencyMs;
+            SpeedifyTelemetrySnapshot speedify = s.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
+            string route = ResolveRouteLabel(s);
+            string source = ResolveSourceLabel(s.SourceKind);
+            string server = SafeText(speedify.ConnectedServerName);
+            string publicIp = SafeText(speedify.ConnectedServerPublicIp);
+            string health = SafeText(s.HealthState);
+            string warning = ResolveWarningLabel(s);
+            bool tunnelConnected = speedify.TunnelConnected;
+            bool stale = s.IsStale;
+            bool speedifyValid = s.SpeedifyAvailable;
+            int activeCount = speedify.ActiveConnectionCount;
+            int backupCount = speedify.BackupConnectionCount;
+            int latencyBucket = GetPingBucket(s.DisplayedPingMs > 0 ? s.DisplayedPingMs : s.LatencyMs);
+            int jitterBucket = GetJitterBucket(s.JitterMs);
+            int lossBucket = GetRateBucket(s.LossRate);
+            int confidenceBand = GetConfidenceBand(s.Confidence);
 
             lock (lockObj)
             {
-                string health = SafeText(s.HealthState);
-                string natColor = SafeText(s.DisplayNatColorKey);
-
-                bool stale = s.IsStale;
-                bool spike = s.SpikeDetected;
-
-                int lossBucket = GetRateBucket(s.LossRate);
-                int badBucket = GetRateBucket(s.BadQualityRate);
-                int pingBucket = GetPingBucket(shownPing);
-                int jitterBucket = GetJitterBucket(s.JitterMs);
-
                 bool changed =
-                    health != lastAnalysisHealth ||
-                    natColor != lastAnalysisNatColor ||
-                    stale != lastAnalysisStale ||
-                    spike != lastAnalysisSpike ||
-                    lossBucket != lastAnalysisLossBucket ||
-                    badBucket != lastAnalysisBadBucket ||
-                    pingBucket != lastAnalysisPingBucket ||
-                    jitterBucket != lastAnalysisJitterBucket;
+                    route != lastLogRoute ||
+                    source != lastLogSource ||
+                    tunnelConnected != lastLogTunnelConnected ||
+                    server != lastLogServer ||
+                    publicIp != lastLogPublicIp ||
+                    health != lastLogHealth ||
+                    warning != lastLogWarning ||
+                    stale != lastLogStale ||
+                    speedifyValid != lastLogSpeedifyValid ||
+                    activeCount != lastLogActiveCount ||
+                    backupCount != lastLogBackupCount ||
+                    latencyBucket != lastLogLatencyBucket ||
+                    jitterBucket != lastLogJitterBucket ||
+                    lossBucket != lastLogLossBucket ||
+                    confidenceBand != lastLogConfidenceBand;
 
                 bool heartbeatDue =
-                    (now - lastAnalysisLog).TotalSeconds >= 15;
+                    !isShuttingDown &&
+                    (now - lastOperationalLog).TotalSeconds >= 5;
 
                 bool tooSoon =
-                    (now - lastAnalysisLog).TotalMilliseconds < 1200;
+                    (now - lastOperationalLog).TotalMilliseconds < 1200;
 
                 if ((!changed && !heartbeatDue) || (tooSoon && !heartbeatDue))
                     return;
 
-                lastAnalysisLog = now;
-                lastAnalysisHealth = health;
-                lastAnalysisNatColor = natColor;
-                lastAnalysisStale = stale;
-                lastAnalysisSpike = spike;
-                lastAnalysisLossBucket = lossBucket;
-                lastAnalysisBadBucket = badBucket;
-                lastAnalysisPingBucket = pingBucket;
-                lastAnalysisJitterBucket = jitterBucket;
+                lastOperationalLog = now;
+                lastLogRoute = route;
+                lastLogSource = source;
+                lastLogTunnelConnected = tunnelConnected;
+                lastLogServer = server;
+                lastLogPublicIp = publicIp;
+                lastLogHealth = health;
+                lastLogWarning = warning;
+                lastLogStale = stale;
+                lastLogSpeedifyValid = speedifyValid;
+                lastLogActiveCount = activeCount;
+                lastLogBackupCount = backupCount;
+                lastLogLatencyBucket = latencyBucket;
+                lastLogJitterBucket = jitterBucket;
+                lastLogLossBucket = lossBucket;
+                lastLogConfidenceBand = confidenceBand;
             }
 
-            string line =
-                $"{now:HH:mm:ss} [a] " +
-                $"{ShortHealth(s.HealthState)} " +
-                $"p{ShortMs(shownPing)} " +
-                $"j{ShortMs(s.JitterMs)} " +
-                $"l{ShortPct(s.LossRate)} " +
-                $"b{ShortPct(s.BadQualityRate)} " +
-                $"c{Short01Compact(s.Confidence)} " +
-                $"{(s.SpikeDetected ? "!" : "-")}" +
-                $"{(s.IsStale ? "S" : "-")}" +
-                $"{ShortNat(s.DisplayNatColorKey)}";
+            Logger.Log("resolver",
+                "route=" + route +
+                " | src=" + source +
+                " | tunnel=" + speedify.TunnelConnected +
+                " | server=" + server +
+                " | ip=" + publicIp +
+                " | active=" + speedify.ActiveConnectionCount +
+                " | backup=" + speedify.BackupConnectionCount +
+                " | lat=" + ShortMs(speedify.AggregateLatencyMs > 0 ? speedify.AggregateLatencyMs : speedify.LatencyMs) +
+                " | jit=" + ShortMs(speedify.AggregateJitterMs) +
+                " | valid=" + (speedifyValid ? "True" : "False") +
+                " | warn=" + warning);
 
-            WriteLine(line);
+            Logger.Log("unified",
+                "route=" + route +
+                " | stable=" + ShortMs(s.FastPingStableMs) +
+                " | inst=" + ShortMs(s.FastPingInstantMs) +
+                " | lat=" + ShortMs(s.DisplayedPingMs > 0 ? s.DisplayedPingMs : s.LatencyMs) +
+                " | jit=" + ShortMs(s.JitterMs) +
+                " | loss=" + ShortLoss(s.LossRate) +
+                " | conf=" + ShortConf(s.Confidence) +
+                " | stale=" + s.IsStale +
+                " | quality=" + ShortHealth(s.HealthState) +
+                " | valid=" + (speedifyValid ? "True" : "False"));
         }
 
         // =========================================================
@@ -748,9 +793,22 @@ namespace WTFnetApp
             {
                 case "speedify":
                 case "speedify-ws":
-                case "speedify-parser":
                 case "speedify-snapshot-raw":
                 case "speedify-snapshot-event":
+                case "speedify-raw-in":
+                case "speedify-payload":
+                case "speedify-snapshot-payload":
+                case "speedify-state":
+                case "speedify-link":
+                case "speedify-event":
+                case "speedify-reader-snapshot":
+                case "speedify-parsed":
+                case "speedify-conn-row":
+                case "speedify-net-row":
+                case "speedify-snapshot":
+                case "speedify-check":
+                case "speedify-new-event":
+                case "speedify-snapshot-skip":
                     return true;
 
                 default:
@@ -866,6 +924,22 @@ namespace WTFnetApp
             return ((int)Math.Round(v * 100)).ToString();
         }
 
+        private static string ShortLoss(double v)
+        {
+            if (v < 0)
+                return "-";
+
+            return v.ToString("0.00");
+        }
+
+        private static string ShortConf(double v)
+        {
+            if (v < 0)
+                return "-";
+
+            return v.ToString("0.00");
+        }
+
         private static string ShortNat(object color)
         {
             string c = color?.ToString()?.ToLowerInvariant();
@@ -948,6 +1022,62 @@ namespace WTFnetApp
                 return -1;
 
             return a - b;
+        }
+
+        private static string ResolveRouteLabel(UnifiedNetworkState state)
+        {
+            if (state != null &&
+                (state.SourceKind == UnifiedNetworkSourceKind.Speedify ||
+                 state.SourceKind == UnifiedNetworkSourceKind.FastPingWithSpeedify))
+                return "speedify";
+
+            return "raw";
+        }
+
+        private static string ResolveSourceLabel(UnifiedNetworkSourceKind sourceKind)
+        {
+            switch (sourceKind)
+            {
+                case UnifiedNetworkSourceKind.FastPing:
+                    return "fastping";
+                case UnifiedNetworkSourceKind.Speedify:
+                    return "speedify";
+                case UnifiedNetworkSourceKind.FastPingWithSpeedify:
+                    return "fastping+speedify";
+                default:
+                    return "none";
+            }
+        }
+
+        private static string ResolveWarningLabel(UnifiedNetworkState state)
+        {
+            if (state == null)
+                return "-";
+
+            if (state.HealthState == UnifiedNetworkHealthState.Critical)
+                return "Critical";
+
+            if (state.HealthState == UnifiedNetworkHealthState.Warning)
+                return "Warning";
+
+            if (state.HealthState == UnifiedNetworkHealthState.Stale || state.IsStale)
+                return "Stale";
+
+            return "None";
+        }
+
+        private static int GetConfidenceBand(double value)
+        {
+            if (value < 0)
+                return -1;
+
+            if (value < 0.35)
+                return 0;
+
+            if (value < 0.70)
+                return 1;
+
+            return 2;
         }
     }
 }
