@@ -195,6 +195,7 @@ namespace WTFnetApp
 
                     SpeedifyLinkState link = GetOrCreateLink(key);
                     MarkLinkSeen(link, generation);
+                    bool wasConnected = link.Connected;
 
                     link.Guid = FirstNonEmpty(link.Guid, guid);
                     link.Key = key;
@@ -248,6 +249,12 @@ namespace WTFnetApp
                     link.RemoteIp = !string.IsNullOrWhiteSpace(remoteIp) ? remoteIp : null;
 
                     link.IpList = ReadStringArray(row, "ipList", link.IpList);
+
+                    if (!wasConnected && link.Connected)
+                    {
+                        Logger.Log("speedify-link",
+                            "recovered | key=" + link.Key + " | connected=true");
+                    }
                 }
             }
 

@@ -116,6 +116,150 @@ namespace WTFnetApp
             public int FreshnessRank { get; set; }
         }
 
+        private enum StartupLossGateState
+        {
+            IgnoringLoss,
+            LossRecoveryCandidate,
+            LossValidated
+        }
+
+        private sealed class StartupLossGateTracker
+        {
+            private const int MinimumIgnoredSamplesBeforeTrigger = 2;
+            private const int RequiredValidationSamples = 3;
+            private const double MinimumBaselineLossForTrigger = 0.08;
+            private const double MinimumMeaningfulDrop = 0.05;
+            private const double TriggerDropRatio = 0.65;
+            private const double TriggerUpperBandAbsolute = 0.08;
+            private const double CandidateHeadroom = 0.02;
+            private const double CandidateBaselineRatio = 0.75;
+            private const double RelapseHeadroom = 0.06;
+            private const double RelapseBaselineRatio = 0.90;
+            private const double RelapseFloorAbsolute = 0.18;
+
+            private readonly Action<string> logger;
+            private readonly ProbeCandidateDefinition candidate;
+            private double ignoredLossSum;
+            private int ignoredLossCount;
+            private double candidateBaselineLoss = -1;
+            private double triggerLoss = -1;
+            private int candidateAcceptableCount;
+
+            public StartupLossGateTracker(ProbeCandidateDefinition candidate, Action<string> logger)
+            {
+                this.candidate = candidate;
+                this.logger = logger;
+            }
+
+            public StartupLossGateState State { get; private set; } = StartupLossGateState.IgnoringLoss;
+            public bool IsValidated => State == StartupLossGateState.LossValidated;
+
+            public void Observe(double observedLoss, TimeSpan measuredBeforeSlice, bool isExtensionSlice)
+            {
+                if (observedLoss < 0)
+                    return;
+
+                if (State == StartupLossGateState.LossValidated)
+                    return;
+
+                switch (State)
+                {
+                    case StartupLossGateState.IgnoringLoss:
+                        ObserveIgnoring(observedLoss, measuredBeforeSlice, isExtensionSlice);
+                        break;
+
+                    case StartupLossGateState.LossRecoveryCandidate:
+                        ObserveCandidate(observedLoss, measuredBeforeSlice, isExtensionSlice);
+                        break;
+                }
+            }
+
+            private void ObserveIgnoring(double observedLoss, TimeSpan measuredBeforeSlice, bool isExtensionSlice)
+            {
+                ignoredLossSum += observedLoss;
+                ignoredLossCount++;
+
+                if (ignoredLossCount < MinimumIgnoredSamplesBeforeTrigger)
+                    return;
+
+                double baselineLoss = ignoredLossSum / Math.Max(1, ignoredLossCount);
+                if (baselineLoss < MinimumBaselineLossForTrigger)
+                    return;
+
+                double triggerDropThreshold = Math.Min(TriggerUpperBandAbsolute, baselineLoss * TriggerDropRatio);
+                bool meaningfulDrop = (baselineLoss - observedLoss) >= MinimumMeaningfulDrop;
+                bool enteredLowerBand = observedLoss <= triggerDropThreshold;
+
+                if (!meaningfulDrop || !enteredLowerBand)
+                    return;
+
+                State = StartupLossGateState.LossRecoveryCandidate;
+                candidateBaselineLoss = baselineLoss;
+                triggerLoss = observedLoss;
+                candidateAcceptableCount = 1;
+
+                logger?.Invoke("startup-probe | startup-loss trigger | " +
+                    (candidate?.ToString() ?? "unknown") +
+                    " | atMs=" + measuredBeforeSlice.TotalMilliseconds.ToString("0") +
+                    " | phase=" + (isExtensionSlice ? "extension" : "main") +
+                    " | baseline=" + (baselineLoss * 100.0).ToString("0.0") + "%" +
+                    " | triggerLoss=" + (observedLoss * 100.0).ToString("0.0") + "%");
+            }
+
+            private void ObserveCandidate(double observedLoss, TimeSpan measuredBeforeSlice, bool isExtensionSlice)
+            {
+                double baselineLoss = candidateBaselineLoss > 0 ? candidateBaselineLoss : observedLoss;
+                double acceptableUpperBound = Math.Min(triggerLoss + CandidateHeadroom, baselineLoss * CandidateBaselineRatio);
+                double relapseThreshold = Math.Max(
+                    RelapseFloorAbsolute,
+                    Math.Max(triggerLoss + RelapseHeadroom, baselineLoss * RelapseBaselineRatio));
+
+                if (observedLoss >= relapseThreshold)
+                {
+                    State = StartupLossGateState.IgnoringLoss;
+                    candidateBaselineLoss = -1;
+                    triggerLoss = -1;
+                    candidateAcceptableCount = 0;
+                    ResetIgnoredBaseline(observedLoss);
+
+                    logger?.Invoke("startup-probe | startup-loss relapse -> ignore | " +
+                        (candidate?.ToString() ?? "unknown") +
+                        " | atMs=" + measuredBeforeSlice.TotalMilliseconds.ToString("0") +
+                        " | phase=" + (isExtensionSlice ? "extension" : "main") +
+                        " | loss=" + (observedLoss * 100.0).ToString("0.0") + "%" +
+                        " | relapseThreshold=" + (relapseThreshold * 100.0).ToString("0.0") + "%");
+                    return;
+                }
+
+                if (observedLoss <= acceptableUpperBound)
+                    candidateAcceptableCount++;
+                else
+                    candidateAcceptableCount = Math.Max(0, candidateAcceptableCount - 1);
+
+                if (candidateAcceptableCount < RequiredValidationSamples)
+                    return;
+
+                State = StartupLossGateState.LossValidated;
+                logger?.Invoke("startup-probe | startup-loss validated | " +
+                    (candidate?.ToString() ?? "unknown") +
+                    " | atMs=" + measuredBeforeSlice.TotalMilliseconds.ToString("0") +
+                    " | phase=" + (isExtensionSlice ? "extension" : "main") +
+                    " | validatedSamples=" + candidateAcceptableCount);
+            }
+
+            private void ResetIgnoredBaseline(double seedLoss)
+            {
+                ignoredLossSum = 0;
+                ignoredLossCount = 0;
+
+                if (seedLoss < 0)
+                    return;
+
+                ignoredLossSum = seedLoss;
+                ignoredLossCount = 1;
+            }
+        }
+
         private readonly Func<Task<bool>> disableSpeedifyAsync;
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
@@ -128,9 +272,6 @@ namespace WTFnetApp
         private readonly ProbeDecisionStabilityState stabilityState = new ProbeDecisionStabilityState();
 
         private const double CloseScoreOrderingMargin = 6.0;
-        private const double StartupLossRampInitialWeight = 0.25;
-        private const double StartupLossRampFullWeightStartSeconds = 3.0;
-        private const double StartupLossRampFullWeightReachedSeconds = 5.0;
         private const int ProtectedFullResultCountBeforeContentionDrop = 3;
         private const int ContenderBoundarySize = 4;
         private const double EarlyDropStartProgress = 0.50;
@@ -1292,6 +1433,7 @@ namespace WTFnetApp
 
             double adjustedLossWeightedSum = 0.0;
             double adjustedLossDurationSum = 0.0;
+            StartupLossGateTracker startupLossGate = new StartupLossGateTracker(candidate, Log);
 
             for (int i = 0; i < slices.Count; i++)
             {
@@ -1316,10 +1458,11 @@ namespace WTFnetApp
                 sliceRuntime.MeasurementStoppedEarly = false;
                 sliceRuntime.Notes = AppendNote(sliceRuntime.Notes, "measured-main");
 
+                startupLossGate.Observe(sliceRuntime.AvgLossRate, measuredBeforeSlice, isExtensionSlice: false);
                 AccumulateStartupAdjustedLoss(
                     sliceRuntime,
-                    measuredBeforeSlice,
                     slice,
+                    startupLossGate.IsValidated,
                     ref adjustedLossWeightedSum,
                     ref adjustedLossDurationSum);
 
@@ -1342,6 +1485,15 @@ namespace WTFnetApp
                         aggregateRuntime,
                         adjustedLossWeightedSum,
                         adjustedLossDurationSum);
+
+                    if (!startupLossGate.IsValidated)
+                    {
+                        aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, "startup-loss-ignored");
+                    }
+                    else
+                    {
+                        aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, "startup-loss-validated");
+                    }
                 }
 
                 if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(aggregateRuntime, out string mainStopReason))
@@ -1430,8 +1582,9 @@ namespace WTFnetApp
 
                     if (extensionRuntime.AvgLossRate >= 0)
                     {
+                        startupLossGate.Observe(extensionRuntime.AvgLossRate, main, isExtensionSlice: true);
                         double extensionSeconds = Math.Max(0.0, extension.TotalSeconds);
-                        if (extensionSeconds > 0.0)
+                        if (extensionSeconds > 0.0 && startupLossGate.IsValidated)
                         {
                             adjustedLossWeightedSum += extensionRuntime.AvgLossRate * extensionSeconds;
                             adjustedLossDurationSum += extensionSeconds;
@@ -1467,6 +1620,9 @@ namespace WTFnetApp
 
                     aggregateRuntime = MergeMeasuredRuntime(aggregateRuntime, extensionRuntime, main, extension);
                     aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, "startup-confidence-extension");
+                    aggregateRuntime.Notes = AppendNote(
+                        aggregateRuntime.Notes,
+                        startupLossGate.IsValidated ? "startup-loss-validated" : "startup-loss-ignored");
 
                     ApplyStartupAdjustedLossRate(
                         aggregateRuntime,
@@ -1598,32 +1754,10 @@ namespace WTFnetApp
             return true;
         }
 
-        private static double GetStartupLossWeight(double measuredSecondsMidpoint)
-        {
-            if (measuredSecondsMidpoint <= StartupLossRampFullWeightStartSeconds)
-                return StartupLossRampInitialWeight;
-
-            if (measuredSecondsMidpoint >= StartupLossRampFullWeightReachedSeconds)
-                return 1.0;
-
-            double span =
-                StartupLossRampFullWeightReachedSeconds -
-                StartupLossRampFullWeightStartSeconds;
-
-            if (span <= 0.0)
-                return 1.0;
-
-            double progress =
-                (measuredSecondsMidpoint - StartupLossRampFullWeightStartSeconds) / span;
-
-            return StartupLossRampInitialWeight +
-                   ((1.0 - StartupLossRampInitialWeight) * progress);
-        }
-
         private static void AccumulateStartupAdjustedLoss(
             ProbeCandidateRuntimeData sliceRuntime,
-            TimeSpan measuredBeforeSlice,
             TimeSpan sliceDuration,
+            bool lossValidated,
             ref double adjustedLossWeightedSum,
             ref double adjustedLossDurationSum)
         {
@@ -1637,12 +1771,10 @@ namespace WTFnetApp
             if (sliceSeconds <= 0.0)
                 return;
 
-            double midpointSeconds =
-                measuredBeforeSlice.TotalSeconds + (sliceSeconds * 0.5);
+            if (!lossValidated)
+                return;
 
-            double lossWeight = GetStartupLossWeight(midpointSeconds);
-
-            adjustedLossWeightedSum += sliceRuntime.AvgLossRate * lossWeight * sliceSeconds;
+            adjustedLossWeightedSum += sliceRuntime.AvgLossRate * sliceSeconds;
             adjustedLossDurationSum += sliceSeconds;
         }
 
@@ -1941,11 +2073,15 @@ namespace WTFnetApp
             if (runtime == null)
                 return;
 
-            if (runtime.AvgLossRate < 0.05)
+            double effectiveLoss = runtime.StartupAdjustedLossRate >= 0
+                ? runtime.StartupAdjustedLossRate
+                : runtime.AvgLossRate;
+
+            if (effectiveLoss < 0.05)
                 return;
 
             Log("startup-probe | risky loss trigger | " + (candidate?.ToString() ?? "unknown") +
-                " | lossPct=" + (runtime.AvgLossRate * 100.0).ToString("0.0") +
+                " | lossPct=" + (effectiveLoss * 100.0).ToString("0.0") +
                 " | warning=" + ProbeScoring.GetWarningLabel(score));
         }
     }
