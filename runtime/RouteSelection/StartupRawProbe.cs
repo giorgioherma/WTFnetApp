@@ -10,7 +10,11 @@ namespace WTFnetApp
     {
         private struct RawPreMeasureSignal
         {
-            public int Count;
+            public int LossCount;
+            public int JitterCount;
+            public int PingCount;
+            public int SpikeCount;
+
             public double LossSum;
             public double JitterSum;
             public double PingSum;
@@ -21,15 +25,60 @@ namespace WTFnetApp
                 if (window == null || !window.IsValid)
                     return;
 
-                Count++;
                 if (window.AvgLossRate >= 0)
+                {
                     LossSum += window.AvgLossRate;
+                    LossCount++;
+                }
+
                 if (window.AvgJitterMs >= 0)
+                {
                     JitterSum += window.AvgJitterMs;
+                    JitterCount++;
+                }
+
                 if (window.AvgPingMs >= 0)
+                {
                     PingSum += window.AvgPingMs;
+                    PingCount++;
+                }
+
                 if (window.SpikeDensityPerMinute >= 0)
+                {
                     SpikeSum += window.SpikeDensityPerMinute;
+                    SpikeCount++;
+                }
+            }
+
+            public bool HasAnyData
+            {
+                get
+                {
+                    return LossCount > 0 ||
+                           JitterCount > 0 ||
+                           PingCount > 0 ||
+                           SpikeCount > 0;
+                }
+            }
+
+            public double AvgLossRate
+            {
+                get { return LossCount > 0 ? (LossSum / LossCount) : -1; }
+            }
+
+            public double AvgJitterMs
+            {
+                get { return JitterCount > 0 ? (JitterSum / JitterCount) : -1; }
+            }
+
+            public double AvgPingMs
+            {
+                get { return PingCount > 0 ? (PingSum / PingCount) : -1; }
+            }
+
+            public double AvgSpikeDensityPerMinute
+            {
+                get { return SpikeCount > 0 ? (SpikeSum / SpikeCount) : -1; }
             }
         }
 
@@ -129,7 +178,8 @@ namespace WTFnetApp
                 if (!check1Done && nowUtc >= check1Utc)
                 {
                     check1Done = true;
-                    log?.Invoke("startup-probe | raw stable-start check | checkpoint=4s | usable=" + (usableNow ? "yes" : "no") +
+                    log?.Invoke("startup-probe | raw stable-start check | checkpoint=" +
+                        check1.TotalSeconds.ToString("0.#") + "s | usable=" + (usableNow ? "yes" : "no") +
                         " | reason=" + reasonNow);
                     if (usableNow)
                         break;
@@ -138,7 +188,8 @@ namespace WTFnetApp
                 if (!check2Done && nowUtc >= check2Utc)
                 {
                     check2Done = true;
-                    log?.Invoke("startup-probe | raw stable-start check | checkpoint=6s | usable=" + (usableNow ? "yes" : "no") +
+                    log?.Invoke("startup-probe | raw stable-start check | checkpoint=" +
+                        check2.TotalSeconds.ToString("0.#") + "s | usable=" + (usableNow ? "yes" : "no") +
                         " | reason=" + reasonNow);
                     if (usableNow)
                         break;
@@ -148,8 +199,10 @@ namespace WTFnetApp
             }
 
             bool forceUsable = isCandidateUsableForMeasurement(candidate, out string forceReason);
-            log?.Invoke("startup-probe | raw stable-start check | checkpoint=8s | usable=" + (forceUsable ? "yes" : "no") +
+            log?.Invoke("startup-probe | raw stable-start check | checkpoint=" +
+                forceStart.TotalSeconds.ToString("0.#") + "s | usable=" + (forceUsable ? "yes" : "no") +
                 " | reason=" + forceReason);
+
             log?.Invoke("startup-probe | raw measurement start | durationMs=" + rawDuration.TotalMilliseconds.ToString("0"));
 
             List<TimeSpan> measuredSlices = BuildMainWindowSlices(rawDuration);
@@ -204,7 +257,7 @@ namespace WTFnetApp
             aggregateRuntime.StartupAdjustedLossRate = -1;
             aggregateRuntime.StabilizationReached = false;
             aggregateRuntime.StabilizationTimedOut = false;
-            aggregateRuntime.StabilizationReason = "raw-legacy-gated-measure";
+            aggregateRuntime.StabilizationReason = "raw-fixed-settle-direct-measure";
 
             ApplyRawPreMeasureInfluence(aggregateRuntime, preMeasureSignal);
 
@@ -215,42 +268,64 @@ namespace WTFnetApp
             ProbeCandidateRuntimeData runtime,
             RawPreMeasureSignal preMeasureSignal)
         {
-            if (runtime == null || preMeasureSignal.Count <= 0)
+            if (runtime == null || !preMeasureSignal.HasAnyData)
                 return;
 
-            double preLoss = preMeasureSignal.LossSum / preMeasureSignal.Count;
-            double preJitter = preMeasureSignal.JitterSum / preMeasureSignal.Count;
-            double prePing = preMeasureSignal.PingSum / preMeasureSignal.Count;
+            double preLoss = preMeasureSignal.AvgLossRate;
+            double preJitter = preMeasureSignal.AvgJitterMs;
+            double prePing = preMeasureSignal.AvgPingMs;
+            double preSpike = preMeasureSignal.AvgSpikeDensityPerMinute;
 
-            if (runtime.AvgPingMs >= 0 && prePing > 0)
-                runtime.AvgPingMs = (runtime.AvgPingMs * 0.95) + (prePing * 0.05);
+            double measuredPing = runtime.AvgPingMs;
+            double measuredJitter = runtime.AvgJitterMs;
+            double measuredLoss = runtime.AvgLossRate;
+            double measuredSpike = runtime.SpikeDensityPerMinute;
 
-            if (runtime.AvgJitterMs >= 0 && preJitter > 0)
-                runtime.AvgJitterMs = (runtime.AvgJitterMs * 0.95) + (preJitter * 0.05);
+            if (measuredPing >= 0 && prePing > 0)
+                runtime.AvgPingMs = (measuredPing * 0.95) + (prePing * 0.05);
 
-            if (runtime.AvgLossRate >= 0 && preLoss >= 0)
-            {
-                double lossAdjustment = 0.0;
-                bool earlyUgly =
-                    preLoss > runtime.AvgLossRate + 0.08 ||
-                    (runtime.AvgJitterMs > 0 && preJitter > runtime.AvgJitterMs * 1.6);
-                bool earlyExcellent =
-                    runtime.AvgLossRate > preLoss + 0.08 &&
-                    (runtime.AvgJitterMs > 0 && preJitter < runtime.AvgJitterMs * 0.75);
+            if (measuredJitter >= 0 && preJitter > 0)
+                runtime.AvgJitterMs = (measuredJitter * 0.95) + (preJitter * 0.05);
 
-                if (earlyUgly)
-                    lossAdjustment = 0.006;
-                else if (earlyExcellent)
-                    lossAdjustment = -0.003;
+            if (measuredLoss < 0 || preLoss < 0)
+                return;
 
-                runtime.AvgLossRate = Math.Max(0.0, runtime.AvgLossRate + lossAdjustment);
-                runtime.StartupAdjustedLossRate = runtime.AvgLossRate;
+            bool uglyLoss = preLoss > measuredLoss + 0.08;
+            bool uglyJitter = measuredJitter > 0 && preJitter > measuredJitter * 1.6;
+            bool uglySpike =
+                preSpike >= 0 &&
+                measuredSpike >= 0 &&
+                (preSpike > measuredSpike + 12.0 || (measuredSpike > 0 && preSpike > measuredSpike * 1.75));
 
-                if (earlyUgly)
-                    runtime.Notes = appendNote(runtime.Notes, "raw-premeasure-small-penalty");
-                else if (earlyExcellent)
-                    runtime.Notes = appendNote(runtime.Notes, "raw-premeasure-tiny-boost");
-            }
+            bool earlyUgly = uglyLoss || uglyJitter || uglySpike;
+
+            bool earlyExcellent =
+                preLoss >= 0 && preLoss <= 0.02 &&
+                preJitter > 0 && preJitter <= 6.0 &&
+                prePing > 0 &&
+                measuredPing > 0 &&
+                prePing <= measuredPing + 2.0 &&
+                measuredLoss >= 0 && measuredLoss <= 0.04 &&
+                measuredJitter > 0 && measuredJitter <= 8.0 &&
+                (preSpike < 0 || preSpike <= 4.0) &&
+                (measuredSpike < 0 || measuredSpike <= 6.0);
+
+            double lossAdjustment = 0.0;
+            if (earlyUgly)
+                lossAdjustment = 0.006;
+            else if (earlyExcellent)
+                lossAdjustment = -0.003;
+
+            if (lossAdjustment == 0.0)
+                return;
+
+            runtime.AvgLossRate = Math.Max(0.0, measuredLoss + lossAdjustment);
+            runtime.StartupAdjustedLossRate = runtime.AvgLossRate;
+
+            if (earlyUgly)
+                runtime.Notes = appendNote(runtime.Notes, "raw-premeasure-small-penalty");
+            else if (earlyExcellent)
+                runtime.Notes = appendNote(runtime.Notes, "raw-premeasure-tiny-boost");
         }
 
         private static List<TimeSpan> BuildMainWindowSlices(TimeSpan totalDuration)
@@ -264,25 +339,20 @@ namespace WTFnetApp
             }
 
             long totalTicks = totalDuration.Ticks;
-            long consumedTicks = 0;
+            long baseSliceTicks = totalTicks / MainWindowSliceCount;
+            long remainderTicks = totalTicks % MainWindowSliceCount;
 
             for (int i = 0; i < MainWindowSliceCount; i++)
             {
-                long remainingTicks = totalTicks - consumedTicks;
-                int remainingSlices = MainWindowSliceCount - i;
+                long sliceTicks = baseSliceTicks;
 
-                long sliceTicks = remainingSlices <= 1
-                    ? remainingTicks
-                    : totalTicks / MainWindowSliceCount;
-
-                if (sliceTicks <= 0)
-                    sliceTicks = remainingTicks;
+                if (i == MainWindowSliceCount - 1)
+                    sliceTicks += remainderTicks;
 
                 slices.Add(TimeSpan.FromTicks(sliceTicks));
-                consumedTicks += sliceTicks;
             }
 
-            return slices.Where(x => x >= TimeSpan.Zero).ToList();
+            return slices;
         }
     }
 }

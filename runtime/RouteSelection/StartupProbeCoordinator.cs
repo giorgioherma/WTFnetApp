@@ -293,6 +293,7 @@ namespace WTFnetApp
             return await finalization.FinalizeAsync(
                 output,
                 rawScore,
+                leader,
                 timeBucket,
                 cancellationToken);
         }

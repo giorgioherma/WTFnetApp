@@ -309,8 +309,12 @@ namespace WTFnetApp
             DateTime gateForceUtc = gateStartUtc + forceStart;
             DateTime nextWarmupLogUtc = warmupStartUtc;
 
-            SpeedifyWarmupWindowBuffer buffer = new SpeedifyWarmupWindowBuffer(minimumFreshSamples, minimumSpreadMs);
+            TimeSpan pollInterval = timing.SpeedifyTelemetryCheckInterval > TimeSpan.Zero
+                ? timing.SpeedifyTelemetryCheckInterval
+                : TimeSpan.FromMilliseconds(250);
 
+            SpeedifyWarmupWindowBuffer buffer = new SpeedifyWarmupWindowBuffer(minimumFreshSamples, minimumSpreadMs);
+                        
             while (DateTime.UtcNow < fixedSettleEndUtc)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -335,8 +339,7 @@ namespace WTFnetApp
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
-
-                await Task.Delay(timing.SpeedifyTelemetryCheckInterval, cancellationToken);
+                await Task.Delay(pollInterval, cancellationToken);
             }
 
             bool check1Done = false;
@@ -346,9 +349,7 @@ namespace WTFnetApp
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                StartupDecisionSnapshot telemetry = getWarmupTelemetry != null
-                    ? getWarmupTelemetry()
-                    : null;
+                StartupDecisionSnapshot telemetry = getWarmupTelemetry?.Invoke();
 
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
                 buffer.AddIfFresh(telemetry, usableNow, out _);
@@ -407,14 +408,16 @@ namespace WTFnetApp
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
-
-                await Task.Delay(timing.SpeedifyTelemetryCheckInterval, cancellationToken);
+                await Task.Delay(pollInterval, cancellationToken);
             }
 
             bool finalUsable = isCandidateUsableForMeasurement(candidate, out string finalReason);
             bool warmupTelemetryTrusted = buffer.MeetsMinimum && buffer.HasGoodTimeSpread && buffer.StableEnough;
 
-            string finalTag = "fixed-settle-6s | stable-start-auto-8s";
+            string finalTag =
+                "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-auto-" +
+                forceStart.TotalSeconds.ToString("0.#") + "s";
+
             if (!buffer.MeetsMinimum)
                 finalTag = appendNote(finalTag, "speedify-low-confidence-insufficient-samples");
             if (!buffer.HasGoodTimeSpread)
