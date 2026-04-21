@@ -54,9 +54,10 @@ namespace WTFnetApp
             }
         }
 
-      void Exit(object sender, EventArgs e)
+        void Exit(object sender, EventArgs e)
         {
             Logger.Log("system", "application exiting");
+            Logger.SetShuttingDown(true);
 
             trayIcon.Visible = false;
             trayIcon.Dispose();
