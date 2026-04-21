@@ -85,6 +85,7 @@ namespace WTFnetApp
         public double P95JitterMs { get; set; } = -1;
 
         public double AvgLossRate { get; set; } = -1;
+        public double StartupAdjustedLossRate { get; set; } = -1;
         public double AvgBadQualityRate { get; set; } = -1;
         public double AvgConfidence { get; set; } = -1;
 
@@ -288,7 +289,7 @@ namespace WTFnetApp
             double jitterRange = Safe(ComputeJitterRange(runtime));
             double p95Ping = Safe(runtime.P95PingMs);
             double spikeDensity = Safe(runtime.SpikeDensityPerMinute);
-            double lossRate = EffectiveLossRate(runtime.AvgLossRate);
+            double lossRate = EffectiveLossRate(GetLossRateForScoring(runtime));
             double staleRate = Safe(runtime.StaleRate);
             double badRate = Safe(runtime.AvgBadQualityRate);
             double avgPing = Safe(runtime.AvgPingMs);
@@ -424,7 +425,7 @@ namespace WTFnetApp
             double spikePenalty = Safe(runtime.SpikeDensityPerMinute) * 1.20;
 
             double persistenceFactor = ComputeStartupPersistenceFactor(runtime);
-            double effectiveLoss = Math.Min(1.0, EffectiveLossRate(runtime.AvgLossRate) * persistenceFactor);
+            double effectiveLoss = Math.Min(1.0, EffectiveLossRate(GetLossRateForScoring(runtime)) * persistenceFactor);
             double effectiveBadQuality = Math.Min(1.0, Safe(runtime.AvgBadQualityRate) * persistenceFactor);
 
             double lossPenalty = effectiveLoss * 100.0 * 0.18;
@@ -1072,7 +1073,7 @@ namespace WTFnetApp
             double jitterRange = Safe(ComputeJitterRange(runtime));
             double p95Ping = Safe(runtime.P95PingMs);
             double spikeDensity = Safe(runtime.SpikeDensityPerMinute);
-            double lossRate = EffectiveLossRate(runtime.AvgLossRate);
+            double lossRate = EffectiveLossRate(GetLossRateForScoring(runtime));
             double staleRate = Safe(runtime.StaleRate);
             double badRate = Safe(runtime.AvgBadQualityRate);
 
@@ -1366,6 +1367,17 @@ namespace WTFnetApp
             return safeLoss;
         }
 
+        private static double GetLossRateForScoring(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null)
+                return -1;
+
+            if (runtime.StartupAdjustedLossRate >= 0)
+                return runtime.StartupAdjustedLossRate;
+
+            return runtime.AvgLossRate;
+        }
+
         private static string BuildSummary(ProbeCandidateRuntimeData runtime, ProbeScoreResult result)
         {
             string warning =
@@ -1505,7 +1517,7 @@ namespace WTFnetApp
             if (Safe(runtime.P95PingMs) >= BorderlineP95PingMs)
                 return "high p95 latency";
 
-            if (EffectiveLossRate(runtime.AvgLossRate) >= BorderlineLossRate)
+            if (EffectiveLossRate(GetLossRateForScoring(runtime)) >= BorderlineLossRate)
                 return "loss pressure";
 
             if (Safe(runtime.StaleRate) >= BorderlineStaleRate)

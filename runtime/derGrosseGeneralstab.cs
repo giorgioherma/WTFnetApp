@@ -1576,6 +1576,7 @@ namespace WTFnetApp
                 MaxJitterMs = source.MaxJitterMs,
                 P95JitterMs = source.P95JitterMs,
                 AvgLossRate = source.AvgLossRate,
+                StartupAdjustedLossRate = source.StartupAdjustedLossRate,
                 AvgBadQualityRate = source.AvgBadQualityRate,
                 AvgConfidence = source.AvgConfidence,
                 SpikeDensityPerMinute = source.SpikeDensityPerMinute,

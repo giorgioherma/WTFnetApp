@@ -128,6 +128,9 @@ namespace WTFnetApp
         private readonly ProbeDecisionStabilityState stabilityState = new ProbeDecisionStabilityState();
 
         private const double CloseScoreOrderingMargin = 6.0;
+        private const double StartupLossRampInitialWeight = 0.25;
+        private const double StartupLossRampFullWeightStartSeconds = 3.0;
+        private const double StartupLossRampFullWeightReachedSeconds = 5.0;
         private const int ProtectedFullResultCountBeforeContentionDrop = 3;
         private const int ContenderBoundarySize = 4;
         private const double EarlyDropStartProgress = 0.50;
@@ -1203,6 +1206,7 @@ namespace WTFnetApp
                 P95JitterMs = Weighted(first.P95JitterMs, second.P95JitterMs, w1, w2),
 
                 AvgLossRate = Weighted(first.AvgLossRate, second.AvgLossRate, w1, w2),
+                StartupAdjustedLossRate = Weighted(first.StartupAdjustedLossRate, second.StartupAdjustedLossRate, w1, w2),
                 AvgBadQualityRate = Weighted(first.AvgBadQualityRate, second.AvgBadQualityRate, w1, w2),
                 AvgConfidence = Weighted(first.AvgConfidence, second.AvgConfidence, w1, w2),
                 SpikeDensityPerMinute = Weighted(first.SpikeDensityPerMinute, second.SpikeDensityPerMinute, w1, w2),
@@ -1286,11 +1290,16 @@ namespace WTFnetApp
             TimeSpan accumulatedMeasured = TimeSpan.Zero;
             LearnedProbeStateProfile learned = learningStore.GetProfile(candidate?.RouteKey, timeBucketKey);
 
+            double adjustedLossWeightedSum = 0.0;
+            double adjustedLossDurationSum = 0.0;
+
             for (int i = 0; i < slices.Count; i++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 TimeSpan slice = slices[i];
+                TimeSpan measuredBeforeSlice = accumulatedMeasured;
+
                 ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(
                     candidate,
                     TimeSpan.Zero,
@@ -1307,6 +1316,13 @@ namespace WTFnetApp
                 sliceRuntime.MeasurementStoppedEarly = false;
                 sliceRuntime.Notes = AppendNote(sliceRuntime.Notes, "measured-main");
 
+                AccumulateStartupAdjustedLoss(
+                    sliceRuntime,
+                    measuredBeforeSlice,
+                    slice,
+                    ref adjustedLossWeightedSum,
+                    ref adjustedLossDurationSum);
+
                 aggregateRuntime = aggregateRuntime == null
                     ? sliceRuntime
                     : MergeMeasuredRuntime(aggregateRuntime, sliceRuntime, accumulatedMeasured, slice);
@@ -1321,6 +1337,11 @@ namespace WTFnetApp
                     aggregateRuntime.MeasurementStarted = true;
                     aggregateRuntime.MeasurementCompleted = false;
                     aggregateRuntime.MeasurementStoppedEarly = false;
+
+                    ApplyStartupAdjustedLossRate(
+                        aggregateRuntime,
+                        adjustedLossWeightedSum,
+                        adjustedLossDurationSum);
                 }
 
                 if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(aggregateRuntime, out string mainStopReason))
@@ -1359,6 +1380,8 @@ namespace WTFnetApp
                         " | optimisticBest=" + optimisticBestFinal.ToString("0.0") +
                         " | boundary4=" + boundaryScore.ToString("0.0") +
                         " | keepMargin=" + EarlyDropSafetyMargin.ToString("0.0") +
+                        " | lossRaw=" + (aggregateRuntime.AvgLossRate >= 0 ? (aggregateRuntime.AvgLossRate * 100.0).ToString("0.0") + "%" : "--") +
+                        " | lossAdj=" + (aggregateRuntime.StartupAdjustedLossRate >= 0 ? (aggregateRuntime.StartupAdjustedLossRate * 100.0).ToString("0.0") + "%" : "--") +
                         " | decision=" + (outsideContention ? "drop" : "keep"));
 
                     if (outsideContention)
@@ -1405,6 +1428,21 @@ namespace WTFnetApp
                     extensionRuntime.MeasurementStarted = true;
                     extensionRuntime.Notes = AppendNote(extensionRuntime.Notes, "measured-extension");
 
+                    if (extensionRuntime.AvgLossRate >= 0)
+                    {
+                        double extensionSeconds = Math.Max(0.0, extension.TotalSeconds);
+                        if (extensionSeconds > 0.0)
+                        {
+                            adjustedLossWeightedSum += extensionRuntime.AvgLossRate * extensionSeconds;
+                            adjustedLossDurationSum += extensionSeconds;
+                        }
+                    }
+
+                    ApplyStartupAdjustedLossRate(
+                        extensionRuntime,
+                        adjustedLossWeightedSum,
+                        adjustedLossDurationSum);
+
                     if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(extensionRuntime, out string extensionStopReason))
                     {
                         extensionRuntime.MeasurementStoppedEarly = true;
@@ -1416,11 +1454,24 @@ namespace WTFnetApp
                         Log("startup-probe | candidate measured-early-stop | " + candidate +
                             " | reason=" + extensionStopReason);
 
-                        return MergeMeasuredRuntime(aggregateRuntime, extensionRuntime, main, extension);
+                        ProbeCandidateRuntimeData catastrophicMerged =
+                            MergeMeasuredRuntime(aggregateRuntime, extensionRuntime, main, extension);
+
+                        ApplyStartupAdjustedLossRate(
+                            catastrophicMerged,
+                            adjustedLossWeightedSum,
+                            adjustedLossDurationSum);
+
+                        return catastrophicMerged;
                     }
 
                     aggregateRuntime = MergeMeasuredRuntime(aggregateRuntime, extensionRuntime, main, extension);
                     aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, "startup-confidence-extension");
+
+                    ApplyStartupAdjustedLossRate(
+                        aggregateRuntime,
+                        adjustedLossWeightedSum,
+                        adjustedLossDurationSum);
                 }
             }
 
@@ -1431,6 +1482,11 @@ namespace WTFnetApp
             aggregateRuntime.MeasurementStarted = true;
             aggregateRuntime.MeasurementCompleted = true;
             aggregateRuntime.MeasurementStoppedEarly = false;
+
+            ApplyStartupAdjustedLossRate(
+                aggregateRuntime,
+                adjustedLossWeightedSum,
+                adjustedLossDurationSum);
 
             Log("startup-probe | candidate measured-full | " + candidate);
 
@@ -1540,6 +1596,68 @@ namespace WTFnetApp
                 .StartupSelectionScore;
 
             return true;
+        }
+
+        private static double GetStartupLossWeight(double measuredSecondsMidpoint)
+        {
+            if (measuredSecondsMidpoint <= StartupLossRampFullWeightStartSeconds)
+                return StartupLossRampInitialWeight;
+
+            if (measuredSecondsMidpoint >= StartupLossRampFullWeightReachedSeconds)
+                return 1.0;
+
+            double span =
+                StartupLossRampFullWeightReachedSeconds -
+                StartupLossRampFullWeightStartSeconds;
+
+            if (span <= 0.0)
+                return 1.0;
+
+            double progress =
+                (measuredSecondsMidpoint - StartupLossRampFullWeightStartSeconds) / span;
+
+            return StartupLossRampInitialWeight +
+                   ((1.0 - StartupLossRampInitialWeight) * progress);
+        }
+
+        private static void AccumulateStartupAdjustedLoss(
+            ProbeCandidateRuntimeData sliceRuntime,
+            TimeSpan measuredBeforeSlice,
+            TimeSpan sliceDuration,
+            ref double adjustedLossWeightedSum,
+            ref double adjustedLossDurationSum)
+        {
+            if (sliceRuntime == null)
+                return;
+
+            if (sliceRuntime.AvgLossRate < 0)
+                return;
+
+            double sliceSeconds = Math.Max(0.0, sliceDuration.TotalSeconds);
+            if (sliceSeconds <= 0.0)
+                return;
+
+            double midpointSeconds =
+                measuredBeforeSlice.TotalSeconds + (sliceSeconds * 0.5);
+
+            double lossWeight = GetStartupLossWeight(midpointSeconds);
+
+            adjustedLossWeightedSum += sliceRuntime.AvgLossRate * lossWeight * sliceSeconds;
+            adjustedLossDurationSum += sliceSeconds;
+        }
+
+        private static void ApplyStartupAdjustedLossRate(
+            ProbeCandidateRuntimeData runtime,
+            double adjustedLossWeightedSum,
+            double adjustedLossDurationSum)
+        {
+            if (runtime == null)
+                return;
+
+            runtime.StartupAdjustedLossRate =
+                adjustedLossDurationSum > 0.0
+                    ? adjustedLossWeightedSum / adjustedLossDurationSum
+                    : -1;
         }
 
         private static double EstimateOptimisticBestFinalScore(double partialScore, double progress)
