@@ -872,27 +872,41 @@ namespace WTFnetApp
                 candidate != null &&
                 candidate.Kind == ProbeCandidateKind.Speedify;
 
-            if (!isSpeedifyCandidate || timing.SpeedifyWarmupTolerance <= TimeSpan.Zero)
+            if (!isSpeedifyCandidate)
             {
                 bool immediateUsable = IsCandidateUsableForMeasurement(candidate, out string immediateReason);
                 return new CandidateWarmupResult(immediateUsable, immediateReason, 0.0, false, "warmup-skipped");
             }
 
-            TimeSpan fixedWindow = timing.SpeedifyWarmupTolerance;
-            if (fixedWindow < TimeSpan.FromSeconds(2))
-                fixedWindow = TimeSpan.FromSeconds(2);
-            if (fixedWindow > TimeSpan.FromSeconds(4))
-                fixedWindow = TimeSpan.FromSeconds(4);
+            TimeSpan fixedSettle = timing.RoutedFixedSettleDuration;
+            if (fixedSettle < TimeSpan.Zero)
+                fixedSettle = TimeSpan.Zero;
+
+            TimeSpan check1 = timing.RoutedStableGateCheck1;
+            TimeSpan check2 = timing.RoutedStableGateCheck2;
+            TimeSpan forceStart = timing.RoutedStableGateForceStart;
+
+            if (check1 < TimeSpan.Zero)
+                check1 = TimeSpan.Zero;
+            if (check2 < check1)
+                check2 = check1;
+            if (forceStart < check2)
+                forceStart = check2;
 
             const int minimumFreshSamples = 4;
             const double minimumSpreadMs = 1500.0;
+
             DateTime warmupStartUtc = DateTime.UtcNow;
-            DateTime warmupDeadlineUtc = warmupStartUtc + fixedWindow;
+            DateTime fixedSettleEndUtc = warmupStartUtc + fixedSettle;
+            DateTime gateStartUtc = fixedSettleEndUtc;
+            DateTime gateCheck1Utc = gateStartUtc + check1;
+            DateTime gateCheck2Utc = gateStartUtc + check2;
+            DateTime gateForceUtc = gateStartUtc + forceStart;
             DateTime nextWarmupLogUtc = warmupStartUtc;
 
             SpeedifyWarmupWindowBuffer buffer = new SpeedifyWarmupWindowBuffer(minimumFreshSamples, minimumSpreadMs);
 
-            while (DateTime.UtcNow < warmupDeadlineUtc)
+            while (DateTime.UtcNow < fixedSettleEndUtc)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
@@ -906,13 +920,114 @@ namespace WTFnetApp
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
                     double activationElapsedMs = Math.Max(0.0, (DateTime.UtcNow - activationRequestedUtc).TotalMilliseconds);
-                    double remainingMs = Math.Max(0.0, (warmupDeadlineUtc - DateTime.UtcNow).TotalMilliseconds);
+                    double remainingMs = Math.Max(0.0, (fixedSettleEndUtc - DateTime.UtcNow).TotalMilliseconds);
 
-                    Log("startup-probe | candidate warm-up waiting | " + candidate +
+                    Log("startup-probe | candidate fixed-settle waiting | " + candidate +
                         " | reason=" + reasonNow +
                         " | remainingMs=" + remainingMs.ToString("0"));
 
                     Log("startup-probe | warmup-observe | " + candidate +
+                        " | phase=fixed-settle" +
+                        " | elapsedMs=" + activationElapsedMs.ToString("0") +
+                        " | freshSamples=" + buffer.FreshSampleCount +
+                        " | minRequired=" + minimumFreshSamples +
+                        " | spreadMs=" + buffer.SampleDurationMs.ToString("0") +
+                        " | minSpreadMs=" + minimumSpreadMs.ToString("0") +
+                        " | usableSamples=" + buffer.UsableSampleCount +
+                        " | avgAggLat=" + FormatMetric(buffer.AverageAggregateLatencyMs) +
+                        " | avgAggJit=" + FormatMetric(buffer.AverageAggregateJitterMs) +
+                        " | avgQueue=" + FormatMetric(buffer.AverageQueueDelayMs) +
+                        " | congested=" + (buffer.AnyCongestion ? "yes" : "no") +
+                        " | stableEnough=" + (buffer.StableEnough ? "yes" : "no") +
+                        " | usable=" + (usableNow ? "yes" : "no") +
+                        " | reason=" + reasonNow);
+
+                    nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+                }
+
+                await Task.Delay(timing.SpeedifyWarmupPollInterval, cancellationToken);
+            }
+
+            bool check1Done = false;
+            bool check2Done = false;
+
+            while (DateTime.UtcNow < gateForceUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                StartupDecisionSnapshot telemetry = getWarmupTelemetry != null
+                    ? getWarmupTelemetry()
+                    : null;
+
+                bool usableNow = IsCandidateUsableForMeasurement(candidate, out string reasonNow);
+                buffer.AddIfFresh(telemetry, usableNow);
+
+                DateTime nowUtc = DateTime.UtcNow;
+                bool stableNow =
+                    usableNow &&
+                    buffer.MeetsMinimum &&
+                    buffer.HasGoodTimeSpread &&
+                    buffer.StableEnough;
+
+                if (!check1Done && nowUtc >= gateCheck1Utc)
+                {
+                    check1Done = true;
+
+                    Log("startup-probe | stable-start check | " + candidate +
+                        " | checkpoint=4s" +
+                        " | stable=" + (stableNow ? "yes" : "no") +
+                        " | usable=" + (usableNow ? "yes" : "no") +
+                        " | freshSamples=" + buffer.FreshSampleCount +
+                        " | spreadMs=" + buffer.SampleDurationMs.ToString("0") +
+                        " | reason=" + reasonNow);
+
+                    if (stableNow)
+                    {
+                        string warmupTag = "fixed-settle-6s | stable-start-4s";
+                        return new CandidateWarmupResult(
+                            true,
+                            reasonNow,
+                            Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
+                            true,
+                            warmupTag);
+                    }
+                }
+
+                if (!check2Done && nowUtc >= gateCheck2Utc)
+                {
+                    check2Done = true;
+
+                    Log("startup-probe | stable-start check | " + candidate +
+                        " | checkpoint=6s" +
+                        " | stable=" + (stableNow ? "yes" : "no") +
+                        " | usable=" + (usableNow ? "yes" : "no") +
+                        " | freshSamples=" + buffer.FreshSampleCount +
+                        " | spreadMs=" + buffer.SampleDurationMs.ToString("0") +
+                        " | reason=" + reasonNow);
+
+                    if (stableNow)
+                    {
+                        string warmupTag = "fixed-settle-6s | stable-start-6s";
+                        return new CandidateWarmupResult(
+                            true,
+                            reasonNow,
+                            Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
+                            true,
+                            warmupTag);
+                    }
+                }
+
+                if (DateTime.UtcNow >= nextWarmupLogUtc)
+                {
+                    double activationElapsedMs = Math.Max(0.0, (DateTime.UtcNow - activationRequestedUtc).TotalMilliseconds);
+                    double remainingMs = Math.Max(0.0, (gateForceUtc - DateTime.UtcNow).TotalMilliseconds);
+
+                    Log("startup-probe | candidate stable-gate waiting | " + candidate +
+                        " | reason=" + reasonNow +
+                        " | remainingMs=" + remainingMs.ToString("0"));
+
+                    Log("startup-probe | warmup-observe | " + candidate +
+                        " | phase=stable-gate" +
                         " | elapsedMs=" + activationElapsedMs.ToString("0") +
                         " | freshSamples=" + buffer.FreshSampleCount +
                         " | minRequired=" + minimumFreshSamples +
@@ -934,36 +1049,42 @@ namespace WTFnetApp
             }
 
             bool finalUsable = IsCandidateUsableForMeasurement(candidate, out string finalReason);
-            bool startupTrustEstablished = buffer.MeetsMinimum && buffer.HasGoodTimeSpread;
-            finalUsable = finalUsable && buffer.StableEnough;
-            string warmupTag = "window-sampled";
+            bool startupTrustEstablished = buffer.MeetsMinimum && buffer.HasGoodTimeSpread && buffer.StableEnough;
 
+            string finalTag = "fixed-settle-6s | stable-start-auto-8s";
             if (!buffer.MeetsMinimum)
-                warmupTag = AppendNote(warmupTag, "speedify-low-confidence-insufficient-samples");
+                finalTag = AppendNote(finalTag, "speedify-low-confidence-insufficient-samples");
             if (!buffer.HasGoodTimeSpread)
-                warmupTag = AppendNote(warmupTag, "speedify-low-confidence-poor-time-spread");
+                finalTag = AppendNote(finalTag, "speedify-low-confidence-poor-time-spread");
             if (!buffer.StableEnough)
-                warmupTag = AppendNote(warmupTag, "speedify-unstable-window");
-
+                finalTag = AppendNote(finalTag, "speedify-unstable-window");
             if (buffer.AnyCongestion)
-                warmupTag = AppendNote(warmupTag, "speedify-congestion-observed");
+                finalTag = AppendNote(finalTag, "speedify-congestion-observed");
 
             if (!string.Equals(finalReason, "usable", StringComparison.OrdinalIgnoreCase) &&
                 !SpeedifyWarmupSoftReasons.Contains(finalReason))
             {
-                warmupTag = AppendNote(
-                    warmupTag,
+                finalTag = AppendNote(
+                    finalTag,
                     finalReason == "stale route state"
-                        ? "stale-route-state-after-warmup-window"
+                        ? "stale-route-state-after-stable-gate"
                         : "warmup-hard-failure-" + finalReason.Replace(' ', '-'));
             }
+
+            Log("startup-probe | stable-start check | " + candidate +
+                " | checkpoint=8s-auto" +
+                " | stable=" + (startupTrustEstablished ? "yes" : "no") +
+                " | usable=" + (finalUsable ? "yes" : "no") +
+                " | freshSamples=" + buffer.FreshSampleCount +
+                " | spreadMs=" + buffer.SampleDurationMs.ToString("0") +
+                " | reason=" + finalReason);
 
             return new CandidateWarmupResult(
                 finalUsable,
                 finalReason,
                 Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                 startupTrustEstablished,
-                warmupTag);
+                finalTag);
         }
 
         private static string FormatMetric(double value)
@@ -1155,49 +1276,7 @@ namespace WTFnetApp
             string timeBucketKey,
             CancellationToken cancellationToken)
         {
-            TimeSpan protectedStartupBuffer = timing.CommonProtectedStartupBufferDuration;
-            TimeSpan ignoreNegativeWindow = timing.CommonIgnoreNegativeEventsDuration;
-            TimeSpan main = GetEffectiveMeasuredDuration(
-                candidate,
-                protectedStartupBuffer,
-                ignoreNegativeWindow);
-
-            if (protectedStartupBuffer > TimeSpan.Zero)
-            {
-                Log("startup-probe | protected-startup-buffer start | " + candidate +
-                    " | durationMs=" + protectedStartupBuffer.TotalMilliseconds.ToString("0"));
-
-                (bool catastrophic, string stopReason) =
-                    await WaitWithCatastrophicChecksAsync(candidate, protectedStartupBuffer, cancellationToken);
-
-                if (catastrophic)
-                {
-                    return await BuildEarlyStopRuntimeAsync(
-                        candidate,
-                        stopReason ?? "early-stop catastrophic during protected-startup-buffer");
-                }
-
-                Log("startup-probe | protected-startup-buffer end | " + candidate);
-            }
-
-            TimeSpan remainingIgnore = ignoreNegativeWindow;
-
-            if (remainingIgnore > TimeSpan.Zero)
-            {
-                Log("startup-probe | startup-noise-ignore active | " + candidate +
-                    " | durationMs=" + remainingIgnore.TotalMilliseconds.ToString("0") +
-                    " | ignoring spikes/ordinary negatives");
-
-                (bool catastrophic, string stopReason) =
-                    await WaitWithCatastrophicChecksAsync(candidate, remainingIgnore, cancellationToken);
-
-                if (catastrophic)
-                {
-                    return await BuildEarlyStopRuntimeAsync(
-                        candidate,
-                        stopReason ?? "early-stop catastrophic during startup-noise-ignore");
-                }
-            }
+            TimeSpan main = GetEffectiveMeasuredDuration(candidate);
 
             Log("startup-probe | measured-evaluation start | " + candidate +
                 " | durationMs=" + main.TotalMilliseconds.ToString("0"));
@@ -1345,6 +1424,9 @@ namespace WTFnetApp
                 }
             }
 
+            if (aggregateRuntime == null)
+                return null;
+
             aggregateRuntime.ReachedUsableState = true;
             aggregateRuntime.MeasurementStarted = true;
             aggregateRuntime.MeasurementCompleted = true;
@@ -1469,10 +1551,7 @@ namespace WTFnetApp
             return partialScore - improvementAllowance;
         }
 
-        private TimeSpan GetEffectiveMeasuredDuration(
-            ProbeCandidateDefinition candidate,
-            TimeSpan protectedStartupDuration,
-            TimeSpan ignoreNegativeDuration)
+        private TimeSpan GetEffectiveMeasuredDuration(ProbeCandidateDefinition candidate)
         {
             bool isRawCandidate =
                 candidate == null ||
@@ -1481,12 +1560,7 @@ namespace WTFnetApp
             if (isRawCandidate)
                 return timing.RawMeasuredDuration;
 
-            TimeSpan shieldDuration = protectedStartupDuration + ignoreNegativeDuration;
-            TimeSpan minimumRequired = shieldDuration + timing.MinimumPostBufferMeasuredDuration;
-
-            return timing.BaseMeasuredDuration >= minimumRequired
-                ? timing.BaseMeasuredDuration
-                : minimumRequired;
+            return timing.BaseMeasuredDuration;
         }
 
         private async Task<(bool IsCatastrophic, string Reason)> WaitWithCatastrophicChecksAsync(
@@ -1773,19 +1847,13 @@ namespace WTFnetApp
     public sealed class StartupProbeTimingConfig
     {
         public TimeSpan TransitionGrace { get; set; }
-
-        public TimeSpan CommonProtectedStartupBufferDuration { get; set; }
-        public TimeSpan CommonIgnoreNegativeEventsDuration { get; set; }
-
+        public TimeSpan RoutedFixedSettleDuration { get; set; }
+        public TimeSpan RoutedStableGateCheck1 { get; set; }
+        public TimeSpan RoutedStableGateCheck2 { get; set; }
+        public TimeSpan RoutedStableGateForceStart { get; set; }
         public TimeSpan BaseMeasuredDuration { get; set; }
         public TimeSpan RawMeasuredDuration { get; set; }
-        public TimeSpan MinimumPostBufferMeasuredDuration { get; set; }
-
         public TimeSpan PromisingCandidateExtensionDuration { get; set; }
-
-        public TimeSpan SpeedifyWarmupTolerance { get; set; }
         public TimeSpan SpeedifyWarmupPollInterval { get; set; }
-
-        public TimeSpan ObserveDuration { get; set; }
     }
 }

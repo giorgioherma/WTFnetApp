@@ -76,15 +76,16 @@ namespace WTFnetApp
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
             TransitionGrace = TimeSpan.FromSeconds(2.0),
-            SpeedifyWarmupTolerance = TimeSpan.FromSeconds(6.0),
+            RoutedFixedSettleDuration = TimeSpan.FromSeconds(6.0),
             SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
-            CommonProtectedStartupBufferDuration = TimeSpan.FromSeconds(4.0),
-            CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(6.0),
+            
+            RoutedStableGateCheck1 = TimeSpan.FromSeconds(4.0),
+            RoutedStableGateCheck2 = TimeSpan.FromSeconds(6.0),
+            RoutedStableGateForceStart = TimeSpan.FromSeconds(8.0),
+            
             BaseMeasuredDuration = TimeSpan.FromSeconds(13.0),
             RawMeasuredDuration = TimeSpan.FromSeconds(18.0),
-            MinimumPostBufferMeasuredDuration = TimeSpan.FromSeconds(7.0),
             PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
-            ObserveDuration = TimeSpan.Zero
         };
 
         // =========================
@@ -563,14 +564,6 @@ namespace WTFnetApp
 
             return list;
         }
-
-        
-
-        
-
-        
-
-        
 
         private void ApplyLearningFromStartupProbe(StartupProbeResult result)
         {
