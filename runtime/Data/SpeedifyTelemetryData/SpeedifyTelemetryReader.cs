@@ -14,9 +14,9 @@ namespace WTFnetApp
         private const int SpeedifyWsPort = 9330;
         private const string SpeedifyWsPath = "/systemdata";
 
-        private const bool LogAllIncomingMessages = false;
-        private const bool LogAllParsedEvents = false;
-        private const bool LogParserOutput = false;
+        private static readonly bool LogAllIncomingMessages = false;
+        private static readonly bool LogAllParsedEvents = false;
+        private static readonly bool LogParserOutput = false;
 
         private ClientWebSocket ws;
         private volatile bool running;
