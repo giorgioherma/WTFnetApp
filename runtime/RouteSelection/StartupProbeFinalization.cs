@@ -15,6 +15,7 @@ namespace WTFnetApp
         private readonly StartupProbeResultBuilder resultBuilder = new StartupProbeResultBuilder();
         private readonly StartupProbeComparisonEngine comparisonEngine = new StartupProbeComparisonEngine();
         private readonly ProbeDecisionStabilityState stabilityState;
+        private readonly StartupLogger startupLogger;
         private readonly Func<string, string, string> appendNote;
         private readonly Action<string> log;
 
@@ -24,6 +25,7 @@ namespace WTFnetApp
             ServerProbeLearningStore learningStore,
             StartupProbeTimingConfig timing,
             ProbeDecisionStabilityState stabilityState,
+            StartupLogger startupLogger,
             Func<string, string, string> appendNote,
             Action<string> log)
         {
@@ -32,6 +34,7 @@ namespace WTFnetApp
             this.learningStore = learningStore;
             this.timing = timing;
             this.stabilityState = stabilityState;
+            this.startupLogger = startupLogger;
             this.appendNote = appendNote;
             this.log = log;
         }
@@ -184,6 +187,47 @@ namespace WTFnetApp
                 runnerUp,
                 winnerLearned,
                 x => x.StartupSelectionScore);
+
+            List<ProbeScoreResult> rankedShortlist = output.Shortlist != null
+                ? output.Shortlist
+                    .Where(x => x != null)
+                    .OrderBy(x => x.StartupSelectionScore)
+                    .ToList()
+                : new List<ProbeScoreResult>();
+
+            for (int i = 0; i < rankedShortlist.Count; i++)
+            {
+                ProbeScoreResult candidateScore = rankedShortlist[i];
+                bool isWinner = ReferenceEquals(candidateScore, output.Winner);
+                startupLogger?.LogEvent(candidateScore?.Candidate, isWinner ? "WINNER_SELECTED" : "KEPT_NOT_WINNER");
+                startupLogger?.LogStartupProbeSummary(
+                    candidateScore?.Candidate,
+                    -1,
+                    candidateScore?.Runtime?.StabilizationReached == true && candidateScore?.Runtime?.StabilizationTimedOut != true ? "yes" : "no",
+                    candidateScore?.Runtime?.StabilizationReason,
+                    -1,
+                    candidateScore?.Runtime?.Notes != null &&
+                        candidateScore.Runtime.Notes.IndexOf("startup-confidence-extension", StringComparison.OrdinalIgnoreCase) >= 0,
+                    candidateScore?.Runtime,
+                    candidateScore,
+                    isWinner ? "winner" : "kept-not-winner");
+            }
+
+            ProbeScoreResult third = rankedShortlist.Count > 2 ? rankedShortlist[2] : null;
+            string winnerReason = ProbeScoring.BuildWinnerReason(
+                output.Winner,
+                runnerUp,
+                output.WinnerConfidence,
+                x => x.StartupSelectionScore);
+            startupLogger?.LogFinalDecisionBlock(
+                output.Winner,
+                runnerUp,
+                third,
+                output.WinnerConfidence,
+                winnerReason,
+                policy?.DecisionType,
+                output.FinalRestoreSucceeded,
+                rankedShortlist);
 
             if (output.Winner != null)
             {

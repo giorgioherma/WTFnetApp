@@ -21,6 +21,7 @@ namespace WTFnetApp
         private readonly StartupSpeedifyTunnelProbe routedProbe;
         private readonly StartupProbeCandidateOrdering candidateOrdering;
         private readonly StartupProbeFinalization finalization;
+        private readonly StartupLogger startupLogger;
         private readonly StartupProbeResultBuilder resultBuilder = new StartupProbeResultBuilder();
         private readonly ProbeDecisionStabilityState stabilityState = new ProbeDecisionStabilityState();
 
@@ -44,6 +45,7 @@ namespace WTFnetApp
             this.learningStore = learningStore ?? throw new ArgumentNullException(nameof(learningStore));
             this.timing = timing ?? throw new ArgumentNullException(nameof(timing));
             this.log = log;
+            startupLogger = new StartupLogger(Log);
             candidateOrdering = new StartupProbeCandidateOrdering();
             finalization = new StartupProbeFinalization(
                 this.disableSpeedifyAsync,
@@ -51,6 +53,7 @@ namespace WTFnetApp
                 this.learningStore,
                 this.timing,
                 stabilityState,
+                startupLogger,
                 AppendNote,
                 Log);
 
@@ -64,7 +67,6 @@ namespace WTFnetApp
                 AppendNote,
                 Log);
 
-            StartupLogger startupLogger = new StartupLogger(Log);
             routedProbe = new StartupSpeedifyTunnelProbe(
                 this.getFastPingState,
                 this.getShortWindowSnapshot,
@@ -200,7 +202,8 @@ namespace WTFnetApp
                 bool activated = await activateSpeedifyAsync(candidate.ConnectTarget);
                 if (!activated)
                 {
-                    Log("startup-probe | discard | " + candidate + " | discardReason=activation failed");
+                    startupLogger.LogEvent(candidate, "DISCARDED (activation failed)");
+                    startupLogger.LogStartupProbeSummary(candidate, -1, "no", "activation-failed", 0, false, null, null, "activation-failed");
                     continue;
                 }
 
@@ -218,6 +221,8 @@ namespace WTFnetApp
                 {
                     Log("startup-probe | discard | " + candidate +
                         " | discardReason=unusable-before-measurement | reason=" + lifecycle.Reason);
+                    startupLogger.LogEvent(candidate, "DISCARDED (unusable-before-measurement: " + lifecycle.Reason + ")");
+                    startupLogger.LogStartupProbeSummary(candidate, lifecycle.WaitedMs, "no", lifecycle.Reason, 0, false, null, null, "unusable-before-measurement");
                     continue;
                 }
 
@@ -244,6 +249,8 @@ namespace WTFnetApp
                 if (runtime == null)
                 {
                     Log("startup-probe | discard | " + candidate + " | discardReason=measurement-capture-failed");
+                    startupLogger.LogEvent(candidate, "DISCARDED (measurement-capture-failed)");
+                    startupLogger.LogStartupProbeSummary(candidate, lifecycle.WaitedMs, "no", "measurement-capture-failed", 0, false, null, null, "discarded-early");
                     continue;
                 }
 
@@ -266,6 +273,13 @@ namespace WTFnetApp
 
                 LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
                 score.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(score, candidateLearned);
+                startupLogger.RegisterCandidateEvaluation(
+                    candidate,
+                    lifecycle.WaitedMs,
+                    -1,
+                    runtime.Notes != null && runtime.Notes.IndexOf("startup-confidence-extension", StringComparison.OrdinalIgnoreCase) >= 0,
+                    runtime,
+                    score);
 
                 leader = finalization.HandleScoredCandidate(
                     candidate,
