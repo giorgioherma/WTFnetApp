@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 
 namespace WTFnetApp
@@ -28,8 +29,12 @@ namespace WTFnetApp
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, DateTime> lastSpeedifyCategoryLogUtc =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
-        private static readonly HashSet<string> downgradedLinkKeysAwaitingRecovery =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private const int SpeedifyLinkDowngradeConsecutiveThreshold = 2;
+        private const int SpeedifyLinkRecoveryConsecutiveThreshold = 2;
+        private static readonly TimeSpan SpeedifyLinkTransitionCooldown = TimeSpan.FromMilliseconds(1500);
+        private static readonly TimeSpan SpeedifyLinkTransitionRateLimit = TimeSpan.FromMilliseconds(1500);
+        private static readonly Dictionary<string, SpeedifyLinkTransitionLogState> speedifyLinkTransitionLogStates =
+            new Dictionary<string, SpeedifyLinkTransitionLogState>(StringComparer.OrdinalIgnoreCase);
 
         private static string lastLogRoute = string.Empty;
         private static string lastLogSource = string.Empty;
@@ -868,6 +873,8 @@ namespace WTFnetApp
                 case "speedify-new-event":
                 case "speedify-snapshot-event":
                 case "speedify-snapshot-skip":
+                case "speedify-snapshot-raw":
+                case "speedify-snapshot-payload":
                     return true;
 
                 default:
@@ -879,7 +886,7 @@ namespace WTFnetApp
         {
             lock (speedifyDebugFilterLockObj)
             {
-                if (ShouldSuppressDuplicateDowngrade(category, message))
+                if (ShouldSuppressSpeedifyLinkTransition(category, message))
                     return false;
 
                 if (string.Equals(category, "speedify-check", StringComparison.OrdinalIgnoreCase) ||
@@ -894,7 +901,7 @@ namespace WTFnetApp
             return true;
         }
 
-        private static bool ShouldSuppressDuplicateDowngrade(string category, string message)
+        private static bool ShouldSuppressSpeedifyLinkTransition(string category, string message)
         {
             if (!string.Equals(category, "speedify-link", StringComparison.OrdinalIgnoreCase) ||
                 string.IsNullOrWhiteSpace(message))
@@ -906,22 +913,113 @@ namespace WTFnetApp
             if (string.IsNullOrWhiteSpace(key))
                 return false;
 
-            bool isDowngrade = message.IndexOf("downgraded", StringComparison.OrdinalIgnoreCase) >= 0;
-            if (isDowngrade)
+            SpeedifyLinkTransitionLogState state;
+            if (!speedifyLinkTransitionLogStates.TryGetValue(key, out state))
             {
-                if (downgradedLinkKeysAwaitingRecovery.Contains(key))
-                    return true;
-
-                downgradedLinkKeysAwaitingRecovery.Add(key);
-                return false;
+                state = new SpeedifyLinkTransitionLogState();
+                speedifyLinkTransitionLogStates[key] = state;
             }
 
-            string connectedValue = ExtractPipeValue(message, "connected");
-            bool recovered = string.Equals(connectedValue, "true", StringComparison.OrdinalIgnoreCase);
-            if (recovered)
-                downgradedLinkKeysAwaitingRecovery.Remove(key);
+            bool isDowngradeCandidate =
+                message.IndexOf("downgraded", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool isRecoveryCandidate =
+                message.IndexOf("recovered", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                string.Equals(
+                    ExtractPipeValue(message, "connected"),
+                    "true",
+                    StringComparison.OrdinalIgnoreCase);
+
+            if (isDowngradeCandidate)
+            {
+                if (IsOppositeTransitionInCooldown(state, SpeedifyLinkTransitionKind.Downgraded))
+                {
+                    state.ConsecutiveMissingGenerations = 0;
+                    return true;
+                }
+
+                state.ConsecutiveMissingGenerations++;
+                state.ConsecutivePresentConnectedGenerations = 0;
+
+                if (state.ConsecutiveMissingGenerations < SpeedifyLinkDowngradeConsecutiveThreshold)
+                    return true;
+
+                return ShouldSuppressByCooldownOrDuplicate(state, SpeedifyLinkTransitionKind.Downgraded);
+            }
+
+            if (isRecoveryCandidate)
+            {
+                if (IsOppositeTransitionInCooldown(state, SpeedifyLinkTransitionKind.Recovered))
+                {
+                    state.ConsecutivePresentConnectedGenerations = 0;
+                    return true;
+                }
+
+                state.ConsecutivePresentConnectedGenerations++;
+                state.ConsecutiveMissingGenerations = 0;
+
+                if (state.ConsecutivePresentConnectedGenerations < SpeedifyLinkRecoveryConsecutiveThreshold)
+                    return true;
+
+                return ShouldSuppressByCooldownOrDuplicate(state, SpeedifyLinkTransitionKind.Recovered);
+            }
 
             return false;
+        }
+
+        private static bool ShouldSuppressByCooldownOrDuplicate(
+            SpeedifyLinkTransitionLogState state,
+            SpeedifyLinkTransitionKind candidate)
+        {
+            DateTime nowUtc = DateTime.UtcNow;
+
+            if (state.LastLoggedTransition == candidate)
+                return true;
+
+            bool hasOppositeLogged =
+                state.LastLoggedTransition.HasValue &&
+                state.LastLoggedTransition.Value != candidate;
+
+            if (hasOppositeLogged &&
+                (nowUtc - state.LastTransitionLogUtc) < SpeedifyLinkTransitionCooldown)
+            {
+                return true;
+            }
+
+            if ((nowUtc - state.LastTransitionEmitUtc) < SpeedifyLinkTransitionRateLimit)
+                return true;
+
+            state.LastLoggedTransition = candidate;
+            state.LastTransitionLogUtc = nowUtc;
+            state.LastTransitionEmitUtc = nowUtc;
+            return false;
+        }
+
+        private static bool IsOppositeTransitionInCooldown(
+            SpeedifyLinkTransitionLogState state,
+            SpeedifyLinkTransitionKind candidate)
+        {
+            if (!state.LastLoggedTransition.HasValue)
+                return false;
+
+            if (state.LastLoggedTransition.Value == candidate)
+                return false;
+
+            return (DateTime.UtcNow - state.LastTransitionLogUtc) < SpeedifyLinkTransitionCooldown;
+        }
+
+        private sealed class SpeedifyLinkTransitionLogState
+        {
+            public int ConsecutiveMissingGenerations { get; set; }
+            public int ConsecutivePresentConnectedGenerations { get; set; }
+            public SpeedifyLinkTransitionKind? LastLoggedTransition { get; set; }
+            public DateTime LastTransitionLogUtc { get; set; }
+            public DateTime LastTransitionEmitUtc { get; set; }
+        }
+
+        private enum SpeedifyLinkTransitionKind
+        {
+            Downgraded,
+            Recovered
         }
 
         private static bool ShouldWriteByChangeOrHeartbeat(string category, string fingerprint)
@@ -964,6 +1062,7 @@ namespace WTFnetApp
             {
                 return
                     "connected=" + ExtractPipeValue(message, "connected") +
+                    "|latBucket=" + BuildLatencyBucket(ExtractPipeValue(message, "lat"), ExtractPipeValue(message, "aggLat")) +
                     "|server=" + ExtractPipeValue(message, "server") +
                     "|pubIp=" + ExtractPipeValue(message, "pubIp") +
                     "|links=" + ExtractPipeValue(message, "links") +
@@ -971,6 +1070,27 @@ namespace WTFnetApp
             }
 
             return message;
+        }
+
+        private static string BuildLatencyBucket(string primaryValue, string fallbackValue)
+        {
+            string raw = !string.IsNullOrWhiteSpace(primaryValue) ? primaryValue : fallbackValue;
+            if (string.IsNullOrWhiteSpace(raw))
+                return "na";
+
+            string normalized = raw.Trim().Replace(',', '.');
+
+            double value;
+            if (!double.TryParse(normalized, NumberStyles.Float, CultureInfo.InvariantCulture, out value))
+                return "na";
+
+            if (value < 0)
+                return "na";
+
+            const double bucketSizeMs = 10.0;
+            int bucketStart = (int)(Math.Floor(value / bucketSizeMs) * bucketSizeMs);
+            int bucketEnd = bucketStart + (int)bucketSizeMs - 1;
+            return bucketStart + "-" + bucketEnd;
         }
 
         private static string ExtractPipeValue(string message, string key)
