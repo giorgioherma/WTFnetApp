@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -280,9 +281,9 @@ namespace WTFnetApp
                     await BeginTransitionGraceAsync("restore-raw-leader", cancellationToken);
 
                 if (disabled)
-                    log?.Invoke("startup-probe | leader restored -> " + resultBuilder.FormatLeaderLabel(leader));
+                    log?.Invoke("startup-probe | leader restored -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader));
                 else
-                    log?.Invoke("startup-probe | leader restore failed -> " + resultBuilder.FormatLeaderLabel(leader));
+                    log?.Invoke("startup-probe | leader restore failed -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader));
 
                 return disabled;
             }
@@ -292,9 +293,9 @@ namespace WTFnetApp
                 await BeginTransitionGraceAsync("restore-speedify-leader:" + leader.Candidate.RouteKey, cancellationToken);
 
             if (activated)
-                log?.Invoke("startup-probe | leader restored -> " + resultBuilder.FormatLeaderLabel(leader));
+                log?.Invoke("startup-probe | leader restored -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader));
             else
-                log?.Invoke("startup-probe | leader restore failed -> " + resultBuilder.FormatLeaderLabel(leader));
+                log?.Invoke("startup-probe | leader restore failed -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader));
 
             return activated;
         }

@@ -89,6 +89,9 @@
     <Compile Include="runtime\RouteSelection\ServerProbeLearningStore.cs" />
     <Compile Include="runtime\RouteSelection\SpeedifyServerRegionCatalog.cs" />
     <Compile Include="runtime\RouteSelection\StartupProbeCoordinator.cs" />
+	<Compile Include="runtime\RouteSelection\StartupProbeFinalization.cs" />
+	<Compile Include="runtime\RouteSelection\StartupProbeRoutedPath.cs" />
+	<Compile Include="runtime\RouteSelection\StartupRawProbe.cs" />
     <Compile Include="runtime\derGrosseGeneralstab.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
