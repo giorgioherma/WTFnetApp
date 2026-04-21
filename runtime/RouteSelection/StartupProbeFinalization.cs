@@ -57,6 +57,7 @@ namespace WTFnetApp
         public async Task<StartupProbeResult> FinalizeAsync(
             StartupProbeResult output,
             ProbeScoreResult rawScore,
+            ProbeScoreResult leader,
             string timeBucket,
             CancellationToken cancellationToken)
         {
@@ -66,7 +67,13 @@ namespace WTFnetApp
 
             ProbeScoring.AssignSmoothestBadge(output.Shortlist);
 
-            output.Winner = output.Winner ?? rawScore;
+            output.Winner = leader
+                ?? output.Winner
+                ?? output.Shortlist?
+                    .Where(x => x != null && !x.IsDiscardedEarly)
+                    .OrderBy(x => x.StartupSelectionScore)
+                    .FirstOrDefault()
+                ?? rawScore;
 
             ProbeScoreResult runnerUp = output.Shortlist
                 .Where(x => x != null && !ReferenceEquals(x, output.Winner))

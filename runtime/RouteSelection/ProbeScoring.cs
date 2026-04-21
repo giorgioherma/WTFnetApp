@@ -227,8 +227,8 @@ namespace WTFnetApp
         private const double BorderlineSpikeDensity = 4.0;
         private const double RiskySpikeDensity = 8.0;
 
-        private const double BorderlineLossRate = 0.05;
-        private const double RiskyLossRate = 0.075;
+        private const double BorderlineLossRate = 0.08;
+        private const double RiskyLossRate = 0.18;
 
         private const double BorderlineStaleRate = 0.05;
         private const double RiskyStaleRate = 0.15;
@@ -244,8 +244,8 @@ namespace WTFnetApp
         private const double SpeedifyRiskyP95PingMs = 150.0;
         private const double SpeedifyBorderlineSpikeDensity = 5.0;
         private const double SpeedifyRiskySpikeDensity = 9.5;
-        private const double SpeedifyBorderlineLossRate = 0.06;
-        private const double SpeedifyRiskyLossRate = 0.09;
+        private const double SpeedifyBorderlineLossRate = 0.08;
+        private const double SpeedifyRiskyLossRate = 0.12;
         private const double SpeedifyBorderlineStaleRate = 0.07;
         private const double SpeedifyRiskyStaleRate = 0.18;
         private const double SpeedifyBorderlineBadRate = 0.16;
@@ -1401,7 +1401,7 @@ namespace WTFnetApp
                 " jr=" + F(result.JitterRangeMs) +
                 " p95=" + F(runtime.P95PingMs) +
                 " spkD=" + F(runtime.SpikeDensityPerMinute) +
-                " loss=" + F(EffectiveLossRate(runtime.AvgLossRate) * 100.0);
+                " loss=" + F(EffectiveLossRate(GetLossRateForScoring(runtime)) * 100.0);
         }
 
         public static string BuildScoreBreakdown(ProbeScoreResult result)
