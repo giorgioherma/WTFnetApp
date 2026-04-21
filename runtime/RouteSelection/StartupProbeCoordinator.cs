@@ -108,6 +108,14 @@ namespace WTFnetApp
             }
         }
 
+        private sealed class RoutedCandidateOrderingEntry
+        {
+            public ProbeCandidateDefinition Candidate { get; set; }
+            public ServerProbeLearningStore.HistoricalRouteOrderingScore Historical { get; set; }
+            public int OriginalIndex { get; set; }
+            public int FreshnessRank { get; set; }
+        }
+
         private readonly Func<Task<bool>> disableSpeedifyAsync;
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
@@ -118,6 +126,14 @@ namespace WTFnetApp
         private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
         private readonly ProbeDecisionStabilityState stabilityState = new ProbeDecisionStabilityState();
+
+        private const double CloseScoreOrderingMargin = 6.0;
+        private const int ProtectedFullResultCountBeforeContentionDrop = 3;
+        private const int ContenderBoundarySize = 4;
+        private const double EarlyDropStartProgress = 0.50;
+        private const double EarlyDropEndProgress = 0.80;
+        private const double EarlyDropSafetyMargin = 5.0;
+        private const int MainWindowSliceCount = 10;
 
         private static readonly HashSet<string> SpeedifyWarmupSoftReasons =
             new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -146,7 +162,7 @@ namespace WTFnetApp
             this.getWarmupTelemetry = getWarmupTelemetry;
             this.captureProbeAsync = captureProbeAsync ?? throw new ArgumentNullException(nameof(captureProbeAsync));
             this.learningStore = learningStore ?? throw new ArgumentNullException(nameof(learningStore));
-            this.timing = timing ?? StartupProbeTimingConfig.Default;
+            this.timing = timing ?? throw new ArgumentNullException(nameof(timing));
             this.log = log;
         }
 
@@ -159,10 +175,17 @@ namespace WTFnetApp
 
             learningStore.SeedDefaultsIfEmpty();
 
-            List<ProbeCandidateDefinition> ordered = orderedSpeedifyCandidates.ToList();
+            List<ProbeCandidateDefinition> originalRoutedOrder = orderedSpeedifyCandidates
+                .Where(x => x != null)
+                .ToList();
+
             StartupProbeResult output = new StartupProbeResult();
 
             string timeBucket = ProbeScoring.GetCurrentTimeBucketKey(DateTime.Now);
+
+            List<ProbeCandidateDefinition> ordered = ReorderRoutedCandidatesForStartup(
+                originalRoutedOrder,
+                timeBucket);
 
             ProbeCandidateDefinition rawCandidate = new ProbeCandidateDefinition
             {
@@ -218,6 +241,8 @@ namespace WTFnetApp
                 rawCandidate,
                 rawScore: null,
                 leaderScore: null,
+                priorMeasuredResults: output.AllResults,
+                timeBucketKey: timeBucket,
                 cancellationToken: cancellationToken);
 
             if (rawRuntime == null)
@@ -305,6 +330,8 @@ namespace WTFnetApp
                     candidate,
                     rawScore,
                     leader,
+                    output.AllResults,
+                    timeBucket,
                     cancellationToken);
 
                 if (runtime == null)
@@ -346,9 +373,24 @@ namespace WTFnetApp
                         " | " + ProbeScoring.BuildScoreBreakdown(score));
                 }
 
+                if (runtime.MeasurementStoppedEarly)
+                {
+                    score.IsDiscardedEarly = true;
+                    output.AllResults.Add(score);
+
+                    Log("startup-probe | discarded-early | " + candidate +
+                        " | discardReason=" + (runtime.MeasurementStopReason ?? runtime.DiscardReason ?? "unknown") +
+                        " | measured=" + (runtime.MeasurementStarted ? "yes" : "no") +
+                        " | " + ProbeScoring.BuildShortText(score) +
+                        " | overall=" + score.OverallStabilityScore.ToString("0.0") +
+                        " | jitterScore=" + score.JitterStabilityScore.ToString("0.0") +
+                        " | " + ProbeScoring.BuildScoreBreakdown(score) +
+                        " | explain=" + ProbeScoring.BuildRouteExplanation(score));
+                    continue;
+                }
+
                 ProbeDiscardDecision discardDecision = ProbeScoring.EvaluateDiscardDecision(score, rawScore, leader);
 
-                // 🚫 HARD GUARD: do NOT allow discard if minimum measurement not reached
                 bool minimumMet =
                     runtime.MeasurementStarted &&
                     !runtime.MeasurementStoppedEarly &&
@@ -605,6 +647,123 @@ namespace WTFnetApp
             Log(output.SummaryText);
 
             return output;
+        }
+
+        private List<ProbeCandidateDefinition> ReorderRoutedCandidatesForStartup(
+            List<ProbeCandidateDefinition> originalOrder,
+            string timeBucket)
+        {
+            List<ProbeCandidateDefinition> safeOriginal = originalOrder ?? new List<ProbeCandidateDefinition>();
+
+            Log("startup-probe | routed order | original=" +
+                (safeOriginal.Count > 0
+                    ? string.Join(" > ", safeOriginal.Select(x => x?.ToString() ?? "null"))
+                    : "none"));
+
+            List<RoutedCandidateOrderingEntry> entries = safeOriginal
+                .Select((candidate, index) =>
+                {
+                    ServerProbeLearningStore.HistoricalRouteOrderingScore historical =
+                        learningStore.EvaluateHistoricalOrderingScore(candidate?.RouteKey, timeBucket);
+
+                    return new RoutedCandidateOrderingEntry
+                    {
+                        Candidate = candidate,
+                        Historical = historical,
+                        OriginalIndex = index,
+                        FreshnessRank = historical?.FreshnessRank ?? 3
+                    };
+                })
+                .ToList();
+
+            bool allUntrusted = entries.Count > 0 && entries.All(x => x.Historical == null || !x.Historical.IsTrusted);
+            if (allUntrusted)
+            {
+                Log("startup-probe | trusted learning unavailable | using score ordering with close-score tie-breakers only");
+            }
+
+            entries.Sort(CompareRoutedCandidateOrderingEntries);
+
+            Log("startup-probe | routed order | reordered=" +
+                (entries.Count > 0
+                    ? string.Join(" > ", entries.Select(FormatRoutedOrderEntry))
+                    : "none"));
+
+            return entries.Select(x => x.Candidate).ToList();
+        }
+
+        private static int CompareRoutedCandidateOrderingEntries(
+            RoutedCandidateOrderingEntry a,
+            RoutedCandidateOrderingEntry b)
+        {
+            if (ReferenceEquals(a, b))
+                return 0;
+            if (a == null)
+                return 1;
+            if (b == null)
+                return -1;
+
+            double scoreA = a.Historical?.Score ?? double.MaxValue;
+            double scoreB = b.Historical?.Score ?? double.MaxValue;
+            double delta = scoreA - scoreB;
+
+            if (Math.Abs(delta) > CloseScoreOrderingMargin)
+                return scoreA.CompareTo(scoreB);
+
+            bool trustedA = a.Historical != null && a.Historical.IsTrusted;
+            bool trustedB = b.Historical != null && b.Historical.IsTrusted;
+            if (trustedA != trustedB)
+                return trustedA ? -1 : 1;
+
+            if (a.FreshnessRank != b.FreshnessRank)
+                return a.FreshnessRank.CompareTo(b.FreshnessRank);
+
+            int biasA = GetBiasRank(a.Historical);
+            int biasB = GetBiasRank(b.Historical);
+            if (biasA != biasB)
+                return biasA.CompareTo(biasB);
+
+            return a.OriginalIndex.CompareTo(b.OriginalIndex);
+        }
+
+        private static int GetBiasRank(ServerProbeLearningStore.HistoricalRouteOrderingScore score)
+        {
+            if (score == null)
+                return 1;
+
+            if (score.HasGoodBias && !score.HasBadBias)
+                return 0;
+
+            if (!score.HasGoodBias && score.HasBadBias)
+                return 2;
+
+            return 1;
+        }
+
+        private static string FormatRoutedOrderEntry(RoutedCandidateOrderingEntry entry)
+        {
+            if (entry?.Candidate == null)
+                return "unknown";
+
+            string trusted = entry.Historical != null && entry.Historical.IsTrusted ? "trusted" : "untrusted";
+            double score = entry.Historical?.Score ?? double.MaxValue;
+            string freshness =
+                entry.FreshnessRank == 0 ? "fresh" :
+                entry.FreshnessRank == 1 ? "aging" :
+                entry.FreshnessRank == 2 ? "stale" :
+                "very-stale";
+
+            string bias =
+                entry.Historical == null ? "neutral" :
+                entry.Historical.HasGoodBias && !entry.Historical.HasBadBias ? "good-bias" :
+                !entry.Historical.HasGoodBias && entry.Historical.HasBadBias ? "bad-bias" :
+                "mixed";
+
+            return entry.Candidate +
+                   "(score=" + score.ToString("0.0") +
+                   ",trust=" + trusted +
+                   ",fresh=" + freshness +
+                   ",bias=" + bias + ")";
         }
 
         private static string AppendNote(string notes, string suffix)
@@ -953,6 +1112,7 @@ namespace WTFnetApp
                 StabilizationTimedOut = first.StabilizationTimedOut || second.StabilizationTimedOut,
                 ReadinessKind = second.ReadinessKind != ProbeReadinessKind.NotReady ? second.ReadinessKind : first.ReadinessKind,
                 ReadinessReason = second.ReadinessReason ?? first.ReadinessReason,
+                StartupSpeedifyTrusted = first.StartupSpeedifyTrusted || second.StartupSpeedifyTrusted
             };
         }
 
@@ -991,12 +1151,10 @@ namespace WTFnetApp
             ProbeCandidateDefinition candidate,
             ProbeScoreResult rawScore,
             ProbeScoreResult leaderScore,
+            IList<ProbeScoreResult> priorMeasuredResults,
+            string timeBucketKey,
             CancellationToken cancellationToken)
         {
-            bool isSpeedifyCandidate =
-                candidate != null &&
-                candidate.Kind == ProbeCandidateKind.Speedify;
-
             TimeSpan protectedStartupBuffer = timing.CommonProtectedStartupBufferDuration;
             TimeSpan ignoreNegativeWindow = timing.CommonIgnoreNegativeEventsDuration;
             TimeSpan main = GetEffectiveMeasuredDuration(
@@ -1044,33 +1202,109 @@ namespace WTFnetApp
             Log("startup-probe | measured-evaluation start | " + candidate +
                 " | durationMs=" + main.TotalMilliseconds.ToString("0"));
 
-            ProbeCandidateRuntimeData mainRuntime = await captureProbeAsync(
-                candidate,
-                TimeSpan.Zero,
-                main);
+            List<TimeSpan> slices = BuildMainWindowSlices(main);
+            ProbeCandidateRuntimeData aggregateRuntime = null;
+            TimeSpan accumulatedMeasured = TimeSpan.Zero;
+            LearnedProbeStateProfile learned = learningStore.GetProfile(candidate?.RouteKey, timeBucketKey);
 
-            if (mainRuntime == null)
-                return null;
-
-            mainRuntime.ReachedUsableState = true;
-            mainRuntime.MeasurementStarted = true;
-            mainRuntime.Notes = AppendNote(mainRuntime.Notes, "measured-main");
-
-            if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(mainRuntime, out string mainStopReason))
+            for (int i = 0; i < slices.Count; i++)
             {
-                mainRuntime.MeasurementStoppedEarly = true;
-                mainRuntime.MeasurementCompleted = false;
-                mainRuntime.MeasurementStopReason = mainStopReason;
-                mainRuntime.DiscardReason = mainStopReason;
-                mainRuntime.Notes = AppendNote(mainRuntime.Notes, mainStopReason);
+                cancellationToken.ThrowIfCancellationRequested();
 
-                Log("startup-probe | candidate measured-early-stop | " + candidate +
-                    " | reason=" + mainStopReason);
+                TimeSpan slice = slices[i];
+                ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(
+                    candidate,
+                    TimeSpan.Zero,
+                    slice);
 
-                return mainRuntime;
+                if (sliceRuntime == null)
+                    return aggregateRuntime;
+
+                sliceRuntime.Candidate = sliceRuntime.Candidate ?? candidate;
+                sliceRuntime.TimeBucketKey = timeBucketKey;
+                sliceRuntime.ReachedUsableState = true;
+                sliceRuntime.MeasurementStarted = true;
+                sliceRuntime.MeasurementCompleted = false;
+                sliceRuntime.MeasurementStoppedEarly = false;
+                sliceRuntime.Notes = AppendNote(sliceRuntime.Notes, "measured-main");
+
+                aggregateRuntime = aggregateRuntime == null
+                    ? sliceRuntime
+                    : MergeMeasuredRuntime(aggregateRuntime, sliceRuntime, accumulatedMeasured, slice);
+
+                accumulatedMeasured += slice;
+
+                if (aggregateRuntime != null)
+                {
+                    aggregateRuntime.Candidate = aggregateRuntime.Candidate ?? candidate;
+                    aggregateRuntime.TimeBucketKey = timeBucketKey;
+                    aggregateRuntime.ReachedUsableState = true;
+                    aggregateRuntime.MeasurementStarted = true;
+                    aggregateRuntime.MeasurementCompleted = false;
+                    aggregateRuntime.MeasurementStoppedEarly = false;
+                }
+
+                if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(aggregateRuntime, out string mainStopReason))
+                {
+                    aggregateRuntime.MeasurementStoppedEarly = true;
+                    aggregateRuntime.MeasurementCompleted = false;
+                    aggregateRuntime.MeasurementStopReason = mainStopReason;
+                    aggregateRuntime.DiscardReason = mainStopReason;
+                    aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, mainStopReason);
+
+                    Log("startup-probe | candidate measured-early-stop | " + candidate +
+                        " | reason=" + mainStopReason);
+
+                    return aggregateRuntime;
+                }
+
+                double progress = main.TotalMilliseconds > 0
+                    ? accumulatedMeasured.TotalMilliseconds / main.TotalMilliseconds
+                    : 1.0;
+
+                if (CanEvaluateContenderDrop(candidate, progress, priorMeasuredResults) &&
+                    TryGetContenderBoundaryScore(priorMeasuredResults, out double boundaryScore))
+                {
+                    ProbeScoreResult partialScore = ProbeScoring.ScoreCandidate(aggregateRuntime);
+                    partialScore.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(partialScore, learned);
+
+                    double optimisticBestFinal = EstimateOptimisticBestFinalScore(
+                        partialScore.StartupSelectionScore,
+                        progress);
+
+                    bool outsideContention = optimisticBestFinal > boundaryScore + EarlyDropSafetyMargin;
+
+                    Log("startup-probe | contender-check | " + candidate +
+                        " | progress=" + (progress * 100.0).ToString("0") + "%" +
+                        " | partial=" + partialScore.StartupSelectionScore.ToString("0.0") +
+                        " | optimisticBest=" + optimisticBestFinal.ToString("0.0") +
+                        " | boundary4=" + boundaryScore.ToString("0.0") +
+                        " | keepMargin=" + EarlyDropSafetyMargin.ToString("0.0") +
+                        " | decision=" + (outsideContention ? "drop" : "keep"));
+
+                    if (outsideContention)
+                    {
+                        const string stopReason = "early-drop outside top4 contention";
+
+                        aggregateRuntime.MeasurementStoppedEarly = true;
+                        aggregateRuntime.MeasurementCompleted = false;
+                        aggregateRuntime.MeasurementStopReason = stopReason;
+                        aggregateRuntime.DiscardReason = stopReason;
+                        aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, "top4-out-of-contention");
+                        aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, stopReason);
+
+                        Log("startup-probe | candidate measured-early-stop | " + candidate +
+                            " | reason=" + stopReason +
+                            " | progress=" + (progress * 100.0).ToString("0") + "%" +
+                            " | optimisticBest=" + optimisticBestFinal.ToString("0.0") +
+                            " | boundary4=" + boundaryScore.ToString("0.0"));
+
+                        return aggregateRuntime;
+                    }
+                }
             }
 
-            bool promising = IsPromisingForExtension(mainRuntime, rawScore, leaderScore);
+            bool promising = IsPromisingForExtension(aggregateRuntime, rawScore, leaderScore);
             if (promising && timing.PromisingCandidateExtensionDuration > TimeSpan.Zero)
             {
                 TimeSpan extension = timing.PromisingCandidateExtensionDuration;
@@ -1086,6 +1320,8 @@ namespace WTFnetApp
 
                 if (extensionRuntime != null)
                 {
+                    extensionRuntime.Candidate = extensionRuntime.Candidate ?? candidate;
+                    extensionRuntime.TimeBucketKey = timeBucketKey;
                     extensionRuntime.ReachedUsableState = true;
                     extensionRuntime.MeasurementStarted = true;
                     extensionRuntime.Notes = AppendNote(extensionRuntime.Notes, "measured-extension");
@@ -1101,22 +1337,136 @@ namespace WTFnetApp
                         Log("startup-probe | candidate measured-early-stop | " + candidate +
                             " | reason=" + extensionStopReason);
 
-                        return MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
+                        return MergeMeasuredRuntime(aggregateRuntime, extensionRuntime, main, extension);
                     }
 
-                    mainRuntime = MergeMeasuredRuntime(mainRuntime, extensionRuntime, main, extension);
-                    mainRuntime.Notes = AppendNote(mainRuntime.Notes, "startup-confidence-extension");
+                    aggregateRuntime = MergeMeasuredRuntime(aggregateRuntime, extensionRuntime, main, extension);
+                    aggregateRuntime.Notes = AppendNote(aggregateRuntime.Notes, "startup-confidence-extension");
                 }
             }
 
-            mainRuntime.ReachedUsableState = true;
-            mainRuntime.MeasurementStarted = true;
-            mainRuntime.MeasurementCompleted = true;
-            mainRuntime.MeasurementStoppedEarly = false;
+            aggregateRuntime.ReachedUsableState = true;
+            aggregateRuntime.MeasurementStarted = true;
+            aggregateRuntime.MeasurementCompleted = true;
+            aggregateRuntime.MeasurementStoppedEarly = false;
 
             Log("startup-probe | candidate measured-full | " + candidate);
 
-            return mainRuntime;
+            return aggregateRuntime;
+        }
+
+        private static List<TimeSpan> BuildMainWindowSlices(TimeSpan totalDuration)
+        {
+            List<TimeSpan> slices = new List<TimeSpan>();
+
+            if (totalDuration <= TimeSpan.Zero)
+            {
+                slices.Add(TimeSpan.Zero);
+                return slices;
+            }
+
+            long totalTicks = totalDuration.Ticks;
+            long consumedTicks = 0;
+
+            for (int i = 0; i < MainWindowSliceCount; i++)
+            {
+                long remainingTicks = totalTicks - consumedTicks;
+                int remainingSlices = MainWindowSliceCount - i;
+
+                long sliceTicks = remainingSlices <= 1
+                    ? remainingTicks
+                    : totalTicks / MainWindowSliceCount;
+
+                if (sliceTicks <= 0)
+                    sliceTicks = remainingTicks;
+
+                slices.Add(TimeSpan.FromTicks(sliceTicks));
+                consumedTicks += sliceTicks;
+            }
+
+            return slices.Where(x => x >= TimeSpan.Zero).ToList();
+        }
+
+        private static bool CanEvaluateContenderDrop(
+            ProbeCandidateDefinition candidate,
+            double progress,
+            IList<ProbeScoreResult> priorMeasuredResults)
+        {
+            if (candidate == null || candidate.Kind == ProbeCandidateKind.Raw)
+                return false;
+
+            if (progress < EarlyDropStartProgress)
+                return false;
+
+            if (progress >= EarlyDropEndProgress)
+                return false;
+
+            int fullyMeasuredCount = CountFullyMeasuredResults(priorMeasuredResults);
+            if (fullyMeasuredCount < ProtectedFullResultCountBeforeContentionDrop)
+                return false;
+
+            if (fullyMeasuredCount < ContenderBoundarySize)
+                return false;
+
+            return true;
+        }
+
+        private static int CountFullyMeasuredResults(IList<ProbeScoreResult> scores)
+        {
+            if (scores == null)
+                return 0;
+
+            int count = 0;
+            for (int i = 0; i < scores.Count; i++)
+            {
+                if (IsFullyMeasuredResult(scores[i]))
+                    count++;
+            }
+
+            return count;
+        }
+
+        private static bool IsFullyMeasuredResult(ProbeScoreResult score)
+        {
+            return score != null &&
+                   score.Runtime != null &&
+                   score.Runtime.MeasurementStarted &&
+                   score.Runtime.MeasurementCompleted &&
+                   !score.Runtime.MeasurementStoppedEarly;
+        }
+
+        private static bool TryGetContenderBoundaryScore(
+            IList<ProbeScoreResult> priorMeasuredResults,
+            out double boundaryScore)
+        {
+            boundaryScore = double.MaxValue;
+
+            if (priorMeasuredResults == null)
+                return false;
+
+            List<ProbeScoreResult> fullyMeasured = priorMeasuredResults
+                .Where(IsFullyMeasuredResult)
+                .OrderBy(x => x.StartupSelectionScore)
+                .ToList();
+
+            if (fullyMeasured.Count < ContenderBoundarySize)
+                return false;
+
+            boundaryScore = fullyMeasured
+                .Take(ContenderBoundarySize)
+                .Last()
+                .StartupSelectionScore;
+
+            return true;
+        }
+
+        private static double EstimateOptimisticBestFinalScore(double partialScore, double progress)
+        {
+            double safeProgress = Math.Max(EarlyDropStartProgress, Math.Min(EarlyDropEndProgress, progress));
+            double remainingFraction = Math.Max(0.0, 1.0 - safeProgress);
+
+            double improvementAllowance = 24.0 * remainingFraction;
+            return partialScore - improvementAllowance;
         }
 
         private TimeSpan GetEffectiveMeasuredDuration(
@@ -1124,7 +1474,6 @@ namespace WTFnetApp
             TimeSpan protectedStartupDuration,
             TimeSpan ignoreNegativeDuration)
         {
-            // RAW (no Speedify) → always fixed 15s
             bool isRawCandidate =
                 candidate == null ||
                 candidate.Kind == ProbeCandidateKind.Raw;
@@ -1132,13 +1481,9 @@ namespace WTFnetApp
             if (isRawCandidate)
                 return timing.RawMeasuredDuration;
 
-            // Shield time = startup protection + ignore negatives
             TimeSpan shieldDuration = protectedStartupDuration + ignoreNegativeDuration;
-
-            // Ensure at least 7s REAL measurement AFTER shielding
             TimeSpan minimumRequired = shieldDuration + timing.MinimumPostBufferMeasuredDuration;
 
-            // Use base duration (12s) unless it violates the rule
             return timing.BaseMeasuredDuration >= minimumRequired
                 ? timing.BaseMeasuredDuration
                 : minimumRequired;
@@ -1151,6 +1496,11 @@ namespace WTFnetApp
         {
             DateTime endUtc = DateTime.UtcNow + duration;
 
+            TimeSpan pollInterval =
+                timing.SpeedifyWarmupPollInterval > TimeSpan.Zero
+                    ? timing.SpeedifyWarmupPollInterval
+                    : TimeSpan.FromMilliseconds(250);
+
             while (DateTime.UtcNow < endUtc)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -1161,7 +1511,7 @@ namespace WTFnetApp
                     return (true, reason);
                 }
 
-                await Task.Delay(250, cancellationToken);
+                await Task.Delay(pollInterval, cancellationToken);
             }
 
             return (false, null);
@@ -1422,30 +1772,20 @@ namespace WTFnetApp
 
     public sealed class StartupProbeTimingConfig
     {
-        public TimeSpan TransitionGrace { get; set; } = TimeSpan.FromSeconds(1.6);
+        public TimeSpan TransitionGrace { get; set; }
 
-        // SHORTENED buffers (you requested this)
-        public TimeSpan CommonProtectedStartupBufferDuration { get; set; } = TimeSpan.FromSeconds(1.5);
-        public TimeSpan CommonIgnoreNegativeEventsDuration { get; set; } = TimeSpan.FromSeconds(1.5);
+        public TimeSpan CommonProtectedStartupBufferDuration { get; set; }
+        public TimeSpan CommonIgnoreNegativeEventsDuration { get; set; }
 
-        // Main measured window (Speedify baseline)
-        public TimeSpan BaseMeasuredDuration { get; set; } = TimeSpan.FromSeconds(12.0);
+        public TimeSpan BaseMeasuredDuration { get; set; }
+        public TimeSpan RawMeasuredDuration { get; set; }
+        public TimeSpan MinimumPostBufferMeasuredDuration { get; set; }
 
-        // RAW must always be longer
-        public TimeSpan RawMeasuredDuration { get; set; } = TimeSpan.FromSeconds(15.0);
+        public TimeSpan PromisingCandidateExtensionDuration { get; set; }
 
-        // GUARANTEE: at least this much REAL measurement after buffers
-        public TimeSpan MinimumPostBufferMeasuredDuration { get; set; } = TimeSpan.FromSeconds(7.0);
+        public TimeSpan SpeedifyWarmupTolerance { get; set; }
+        public TimeSpan SpeedifyWarmupPollInterval { get; set; }
 
-        // Optional extension
-        public TimeSpan PromisingCandidateExtensionDuration { get; set; } = TimeSpan.FromSeconds(4.0);
-
-        // Warmup
-        public TimeSpan SpeedifyWarmupTolerance { get; set; } = TimeSpan.FromSeconds(6.0);
-        public TimeSpan SpeedifyWarmupPollInterval { get; set; } = TimeSpan.FromMilliseconds(250);
-
-        public TimeSpan ObserveDuration { get; set; } = TimeSpan.Zero;
-
-        public static StartupProbeTimingConfig Default { get; } = new StartupProbeTimingConfig();
+        public TimeSpan ObserveDuration { get; set; }
     }
 }

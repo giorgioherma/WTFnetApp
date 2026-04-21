@@ -175,12 +175,18 @@ namespace WTFnetApp
             public bool HasGoodBias { get; set; }
             public bool HasBadBias { get; set; }
             public string Reason { get; set; }
+
+            // Direct freshness signal for startup ordering.
+            // 0=fresh, 1=aging, 2=stale, 3=very-stale
+            public int FreshnessRank { get; set; } = 3;
+            public string FreshnessLabel { get; set; } = "very-stale";
         }
 
         public sealed class LearningAgeInfo
         {
             public double InfluenceFactor { get; set; } = 1.0;
             public string AgeLabel { get; set; } = "fresh";
+            public int FreshnessRank { get; set; } = 0;
         }
 
         public enum LearningStoreLoadStatus
@@ -286,69 +292,312 @@ namespace WTFnetApp
             string routeKey,
             string timeBucketKey)
         {
-            LearnedProbeStateProfile profile = GetExactProfileIfExists(routeKey, timeBucketKey);
+            LearnedProbeStateProfile exact = GetExactProfileIfExists(routeKey, timeBucketKey);
+            LearnedProbeStateProfile wildcard = GetExactProfileIfExists("*", timeBucketKey);
 
-            if (profile == null || !profile.IsTrustedLearning)
+            LearnedProbeStateProfile primary = exact ?? wildcard;
+            if (primary == null)
             {
                 return new HistoricalRouteOrderingScore
                 {
                     Score = 1000.0,
                     IsTrusted = false,
-                    Reason = "default order | untrusted profile"
+                    HasGoodBias = false,
+                    HasBadBias = false,
+                    Reason = "no profile | neutral default",
+                    FreshnessRank = 3,
+                    FreshnessLabel = "very-stale"
                 };
             }
 
-            LearningAgeInfo age = GetLearningAgeInfo(profile.LastUpdatedUtc);
+            LearningAgeInfo exactAge = exact != null
+                ? GetLearningAgeInfo(exact.LastUpdatedUtc)
+                : null;
 
-            int goodSamples = profile.SampleCountGood;
-            int badSamples = profile.SampleCountBad;
+            LearningAgeInfo wildcardAge = wildcard != null
+                ? GetLearningAgeInfo(wildcard.LastUpdatedUtc)
+                : null;
+
+            bool exactTrusted = exact != null && exact.IsTrustedLearning;
+            bool wildcardTrusted = wildcard != null && wildcard.IsTrustedLearning;
+
+            // Prefer exact trusted learning.
+            // If exact exists but is weak/untrusted, blend lightly with wildcard if available.
+            double exactWeight = exact != null ? 1.0 : 0.0;
+            double wildcardWeight = wildcard != null ? 1.0 : 0.0;
+
+            if (exact != null && wildcard != null)
+            {
+                if (exactTrusted && !wildcardTrusted)
+                {
+                    exactWeight = 0.82;
+                    wildcardWeight = 0.18;
+                }
+                else if (!exactTrusted && wildcardTrusted)
+                {
+                    exactWeight = 0.40;
+                    wildcardWeight = 0.60;
+                }
+                else
+                {
+                    exactWeight = 0.68;
+                    wildcardWeight = 0.32;
+                }
+            }
+
+            double exactScore = exact != null
+                ? ComputeProfileOrderingScore(exact)
+                : 1000.0;
+
+            double wildcardScore = wildcard != null
+                ? ComputeProfileOrderingScore(wildcard)
+                : 1000.0;
+
+            double blendedRawScore;
+            if (exact != null && wildcard != null)
+            {
+                blendedRawScore =
+                    (exactScore * exactWeight) +
+                    (wildcardScore * wildcardWeight);
+            }
+            else
+            {
+                blendedRawScore = exact != null ? exactScore : wildcardScore;
+            }
+
+            int goodSamples = 0;
+            int badSamples = 0;
+
+            if (exact != null)
+            {
+                goodSamples += exact.SampleCountGood;
+                badSamples += exact.SampleCountBad;
+            }
+
+            if (wildcard != null && !ReferenceEquals(wildcard, exact))
+            {
+                goodSamples += (int)Math.Round(wildcard.SampleCountGood * 0.35);
+                badSamples += (int)Math.Round(wildcard.SampleCountBad * 0.35);
+            }
 
             bool goodBias = goodSamples >= badSamples + 2;
             bool badBias = badSamples >= goodSamples + 2;
 
-            double avgJitterGoodMax = profile.AvgJitterMs.HasGoodBand ? profile.AvgJitterMs.GoodMax : 14.0;
-            double jitterRangeGoodMax = profile.JitterRangeMs.HasGoodBand ? profile.JitterRangeMs.GoodMax : 16.0;
-            double p95GoodMax = profile.P95PingMs.HasGoodBand ? profile.P95PingMs.GoodMax : 110.0;
-            double spikeGoodMax = profile.SpikeDensityPerMinute.HasGoodBand ? profile.SpikeDensityPerMinute.GoodMax : 7.0;
+            double sampleBalanceAdjustment = 0.0;
+            if (goodBias)
+                sampleBalanceAdjustment -= Math.Min(8.0, (goodSamples - badSamples) * 0.85);
+            else if (badBias)
+                sampleBalanceAdjustment += Math.Min(10.0, (badSamples - goodSamples) * 0.95);
 
-            double score =
-                (avgJitterGoodMax * 1.80) +
-                (jitterRangeGoodMax * 1.20) +
-                (p95GoodMax * 0.12) +
-                (spikeGoodMax * 4.00);
+            bool isTrusted = exactTrusted || wildcardTrusted;
 
-            score += Math.Min(16.0, badSamples * 0.90);
-            score -= Math.Min(10.0, goodSamples * 0.65);
+            LearningAgeInfo effectiveAge =
+                exactTrusted ? exactAge :
+                wildcardTrusted ? wildcardAge :
+                exactAge ?? wildcardAge ?? new LearningAgeInfo
+                {
+                    InfluenceFactor = 0.34,
+                    AgeLabel = "very-stale",
+                    FreshnessRank = 3
+                };
 
-            if (badBias)
-                score += 10.0;
-            else if (goodBias)
-                score -= 5.0;
+            double ageNeutralScore = 56.0;
+            double scoreWithBias = blendedRawScore + sampleBalanceAdjustment;
 
-            // Conservative aging: move old learning toward neutral ordering pressure.
-            const double neutralScore = 56.0;
-            score = (score * age.InfluenceFactor) + (neutralScore * (1.0 - age.InfluenceFactor));
+            double finalScore =
+                (scoreWithBias * effectiveAge.InfluenceFactor) +
+                (ageNeutralScore * (1.0 - effectiveAge.InfluenceFactor));
 
-            score = Math.Max(0.0, score);
+            finalScore = Math.Max(0.0, finalScore);
 
-            string reason =
-                badBias ? "trusted bad profile" :
-                goodBias ? "trusted good profile" :
-                "trusted mixed profile";
+            string sourceLabel =
+                exact != null && wildcard != null ? "exact+bucket-blend" :
+                exact != null ? "exact" :
+                "bucket-default";
 
-            if (age.AgeLabel != "fresh")
-                reason += " | " + age.AgeLabel + " influence reduced";
-            else
-                reason += " | fresh";
+            string trustLabel =
+                isTrusted ? "trusted" : "untrusted";
+
+            string biasLabel =
+                badBias ? "bad-bias" :
+                goodBias ? "good-bias" :
+                "mixed-bias";
 
             return new HistoricalRouteOrderingScore
             {
-                Score = score,
-                IsTrusted = true,
+                Score = finalScore,
+                IsTrusted = isTrusted,
                 HasGoodBias = goodBias,
                 HasBadBias = badBias,
-                Reason = reason
+                Reason =
+                    sourceLabel +
+                    " | " + trustLabel +
+                    " | " + biasLabel +
+                    " | " + effectiveAge.AgeLabel,
+                FreshnessRank = effectiveAge.FreshnessRank,
+                FreshnessLabel = effectiveAge.AgeLabel
             };
+        }
+
+        private static double ComputeProfileOrderingScore(LearnedProbeStateProfile profile)
+        {
+            if (profile == null)
+                return 1000.0;
+
+            // Build a robust central estimate from learned bands.
+            // This is NOT an all-time average.
+            // It approximates expected startup quality from the good/bad envelopes.
+
+            double avgJitterScore = ComputeMetricOrderingScore(
+                profile.AvgJitterMs,
+                fallbackGoodCenter: 13.0,
+                fallbackBadCenter: 22.0,
+                goodWeight: 1.85,
+                badWeight: 1.10);
+
+            double jitterRangeScore = ComputeMetricOrderingScore(
+                profile.JitterRangeMs,
+                fallbackGoodCenter: 14.0,
+                fallbackBadCenter: 24.0,
+                goodWeight: 1.35,
+                badWeight: 0.95);
+
+            double p95PingScore = ComputeMetricOrderingScore(
+                profile.P95PingMs,
+                fallbackGoodCenter: 95.0,
+                fallbackBadCenter: 145.0,
+                goodWeight: 0.16,
+                badWeight: 0.10);
+
+            double spikeScore = ComputeMetricOrderingScore(
+                profile.SpikeDensityPerMinute,
+                fallbackGoodCenter: 5.0,
+                fallbackBadCenter: 10.0,
+                goodWeight: 4.20,
+                badWeight: 2.40);
+
+            double sampleConfidenceAdjustment = ComputeSampleConfidenceAdjustment(profile);
+            double bandWidthAdjustment = ComputeBandWidthAdjustment(profile);
+
+            double total =
+                avgJitterScore +
+                jitterRangeScore +
+                p95PingScore +
+                spikeScore +
+                sampleConfidenceAdjustment +
+                bandWidthAdjustment;
+
+            return Math.Max(0.0, total);
+        }
+
+        private static double ComputeMetricOrderingScore(
+            LearnedMetricBand band,
+            double fallbackGoodCenter,
+            double fallbackBadCenter,
+            double goodWeight,
+            double badWeight)
+        {
+            if (band == null)
+                return (fallbackGoodCenter * goodWeight);
+
+            double goodCenter = GetGoodCenter(band, fallbackGoodCenter);
+            double badCenter = GetBadCenter(band, fallbackBadCenter);
+
+            bool hasGood = band.HasGoodBand;
+            bool hasBad = band.HasBadBand;
+
+            if (hasGood && hasBad)
+            {
+                // Robust central estimate:
+                // mostly anchored on good center,
+                // but pulled toward bad pressure if bad band is close/strong.
+                return (goodCenter * goodWeight) + (badCenter * badWeight * 0.40);
+            }
+
+            if (hasGood)
+            {
+                return goodCenter * goodWeight;
+            }
+
+            if (hasBad)
+            {
+                // If only bad learning exists, be conservative.
+                return (fallbackGoodCenter * goodWeight * 0.75) + (badCenter * badWeight * 0.85);
+            }
+
+            return fallbackGoodCenter * goodWeight;
+        }
+
+        private static double ComputeSampleConfidenceAdjustment(LearnedProbeStateProfile profile)
+        {
+            if (profile == null)
+                return 0.0;
+
+            int totalSamples = profile.SampleCountGood + profile.SampleCountBad;
+
+            if (totalSamples >= 16)
+                return -4.5;
+            if (totalSamples >= 10)
+                return -2.5;
+            if (totalSamples >= 6)
+                return -1.0;
+            if (totalSamples >= 3)
+                return 1.0;
+
+            return 3.0;
+        }
+
+        private static double ComputeBandWidthAdjustment(LearnedProbeStateProfile profile)
+        {
+            if (profile == null)
+                return 0.0;
+
+            double penalty = 0.0;
+
+            penalty += ComputeSingleBandWidthPenalty(profile.AvgJitterMs, 0.18);
+            penalty += ComputeSingleBandWidthPenalty(profile.JitterRangeMs, 0.14);
+            penalty += ComputeSingleBandWidthPenalty(profile.P95PingMs, 0.03);
+            penalty += ComputeSingleBandWidthPenalty(profile.SpikeDensityPerMinute, 0.50);
+
+            return penalty;
+        }
+
+        private static double ComputeSingleBandWidthPenalty(LearnedMetricBand band, double weight)
+        {
+            if (band == null || !band.HasGoodBand)
+                return 0.0;
+
+            double width = Math.Max(0.0, band.GoodMax - band.GoodMin);
+            return width * weight;
+        }
+
+        private static double GetGoodCenter(LearnedMetricBand band, double fallback)
+        {
+            if (band == null || !band.HasGoodBand)
+                return fallback;
+
+            return MedianLikeCenter(band.GoodMin, band.GoodMax);
+        }
+
+        private static double GetBadCenter(LearnedMetricBand band, double fallback)
+        {
+            if (band == null || !band.HasBadBand)
+                return fallback;
+
+            return MedianLikeCenter(band.BadMin, band.BadMax);
+        }
+
+        private static double MedianLikeCenter(double min, double max)
+        {
+            if (min < 0 && max < 0)
+                return -1;
+            if (min < 0)
+                return max;
+            if (max < 0)
+                return min;
+
+            // Robust center, not a global average.
+            return (min + max) * 0.5;
         }
 
         public static LearningAgeInfo GetLearningAgeInfo(DateTime lastUpdatedUtc)
@@ -358,7 +607,8 @@ namespace WTFnetApp
                 return new LearningAgeInfo
                 {
                     InfluenceFactor = 1.0,
-                    AgeLabel = "fresh"
+                    AgeLabel = "fresh",
+                    FreshnessRank = 0
                 };
             }
 
@@ -369,7 +619,8 @@ namespace WTFnetApp
                 return new LearningAgeInfo
                 {
                     InfluenceFactor = 1.0,
-                    AgeLabel = "fresh"
+                    AgeLabel = "fresh",
+                    FreshnessRank = 0
                 };
             }
 
@@ -377,8 +628,9 @@ namespace WTFnetApp
             {
                 return new LearningAgeInfo
                 {
-                    InfluenceFactor = 0.75,
-                    AgeLabel = "aging"
+                    InfluenceFactor = 0.78,
+                    AgeLabel = "aging",
+                    FreshnessRank = 1
                 };
             }
 
@@ -386,15 +638,17 @@ namespace WTFnetApp
             {
                 return new LearningAgeInfo
                 {
-                    InfluenceFactor = 0.55,
-                    AgeLabel = "stale"
+                    InfluenceFactor = 0.56,
+                    AgeLabel = "stale",
+                    FreshnessRank = 2
                 };
             }
 
             return new LearningAgeInfo
             {
-                InfluenceFactor = 0.35,
-                AgeLabel = "very-stale"
+                InfluenceFactor = 0.34,
+                AgeLabel = "very-stale",
+                FreshnessRank = 3
             };
         }
 

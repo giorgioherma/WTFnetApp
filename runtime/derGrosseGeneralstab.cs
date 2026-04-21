@@ -80,13 +80,16 @@ namespace WTFnetApp
             SpeedifyWarmupTolerance = TimeSpan.FromSeconds(6.0),
             SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
 
-            CommonProtectedStartupBufferDuration = TimeSpan.FromSeconds(3.0),
-            CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(3.0),
+            CommonProtectedStartupBufferDuration = TimeSpan.FromSeconds(4.0),
+            CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(6.0),
 
-            BaseMeasuredDuration = TimeSpan.FromSeconds(10.0),
+            BaseMeasuredDuration = TimeSpan.FromSeconds(13.0),
+            RawMeasuredDuration = TimeSpan.FromSeconds(18no no...thats complitely wrong...it should be .0),
+            MinimumPostBufferMeasuredDuration = TimeSpan.FromSeconds(7.0),
+
             PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
 
-            ObserveDuration = TimeSpan.Zero // ✅ correct
+            ObserveDuration = TimeSpan.Zero
         };
 
         // =========================
