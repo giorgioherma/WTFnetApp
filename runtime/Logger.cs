@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 
@@ -21,6 +22,14 @@ namespace WTFnetApp
         private static DateTime lastOperationalLog = DateTime.MinValue;
         private static DateTime lastUnifiedCsvLog = DateTime.MinValue;
         private static bool isShuttingDown;
+        private static bool speedifyParserDeepDebugEnabled;
+        private static readonly object speedifyDebugFilterLockObj = new object();
+        private static readonly Dictionary<string, string> lastSpeedifyCategoryFingerprint =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        private static readonly Dictionary<string, DateTime> lastSpeedifyCategoryLogUtc =
+            new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static readonly HashSet<string> downgradedLinkKeysAwaitingRecovery =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         private static string lastLogRoute = string.Empty;
         private static string lastLogSource = string.Empty;
@@ -166,16 +175,46 @@ namespace WTFnetApp
             }
         }
 
+        public static void SetSpeedifyParserDeepDebug(bool enabled)
+        {
+            lock (speedifyDebugFilterLockObj)
+            {
+                speedifyParserDeepDebugEnabled = enabled;
+            }
+        }
+
+        public static bool IsSpeedifyParserDeepDebugEnabled()
+        {
+            lock (speedifyDebugFilterLockObj)
+            {
+                return speedifyParserDeepDebugEnabled;
+            }
+        }
+
         // =========================================================
         // BASIC LOG
         // =========================================================
 
         public static void Log(string category, string message)
         {
+            string normalizedCategory = category?.Trim() ?? string.Empty;
+
+            if (!IsSpeedifyParserDeepDebugEnabled() &&
+                IsSpeedifyDeepDebugOnlyCategory(normalizedCategory))
+            {
+                return;
+            }
+
+            if (IsSpeedifyDebugCategory(normalizedCategory) &&
+                !ShouldWriteSpeedifyDebug(normalizedCategory, message))
+            {
+                return;
+            }
+
             string line =
                 $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [{category}] {message}";
 
-            if (IsSpeedifyDebugCategory(category))
+            if (IsSpeedifyDebugCategory(normalizedCategory))
             {
                 WriteSpeedifyDebugLine(line);
                 return;
@@ -814,6 +853,150 @@ namespace WTFnetApp
                 default:
                     return false;
             }
+        }
+
+        private static bool IsSpeedifyDeepDebugOnlyCategory(string category)
+        {
+            if (string.IsNullOrWhiteSpace(category))
+                return false;
+
+            switch (category.Trim().ToLowerInvariant())
+            {
+                case "speedify-conn-row":
+                case "speedify-parsed":
+                case "speedify-net-row":
+                case "speedify-new-event":
+                case "speedify-snapshot-event":
+                case "speedify-snapshot-skip":
+                    return true;
+
+                default:
+                    return false;
+            }
+        }
+
+        private static bool ShouldWriteSpeedifyDebug(string category, string message)
+        {
+            lock (speedifyDebugFilterLockObj)
+            {
+                if (ShouldSuppressDuplicateDowngrade(category, message))
+                    return false;
+
+                if (string.Equals(category, "speedify-check", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(category, "speedify-snapshot", StringComparison.OrdinalIgnoreCase))
+                {
+                    return ShouldWriteByChangeOrHeartbeat(
+                        category,
+                        BuildSpeedifyFingerprint(category, message));
+                }
+            }
+
+            return true;
+        }
+
+        private static bool ShouldSuppressDuplicateDowngrade(string category, string message)
+        {
+            if (!string.Equals(category, "speedify-link", StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            string key = ExtractPipeValue(message, "key");
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            bool isDowngrade = message.IndexOf("downgraded", StringComparison.OrdinalIgnoreCase) >= 0;
+            if (isDowngrade)
+            {
+                if (downgradedLinkKeysAwaitingRecovery.Contains(key))
+                    return true;
+
+                downgradedLinkKeysAwaitingRecovery.Add(key);
+                return false;
+            }
+
+            string connectedValue = ExtractPipeValue(message, "connected");
+            bool recovered = string.Equals(connectedValue, "true", StringComparison.OrdinalIgnoreCase);
+            if (recovered)
+                downgradedLinkKeysAwaitingRecovery.Remove(key);
+
+            return false;
+        }
+
+        private static bool ShouldWriteByChangeOrHeartbeat(string category, string fingerprint)
+        {
+            DateTime nowUtc = DateTime.UtcNow;
+            DateTime lastUtc;
+            lastSpeedifyCategoryLogUtc.TryGetValue(category, out lastUtc);
+
+            bool heartbeatDue = (nowUtc - lastUtc).TotalSeconds >= 5.0;
+            string previousFingerprint;
+            bool hadPrevious = lastSpeedifyCategoryFingerprint.TryGetValue(category, out previousFingerprint);
+            bool changed = !hadPrevious || !string.Equals(previousFingerprint, fingerprint, StringComparison.Ordinal);
+
+            if (!changed && !heartbeatDue)
+                return false;
+
+            lastSpeedifyCategoryFingerprint[category] = fingerprint ?? string.Empty;
+            lastSpeedifyCategoryLogUtc[category] = nowUtc;
+            return true;
+        }
+
+        private static string BuildSpeedifyFingerprint(string category, string message)
+        {
+            if (string.IsNullOrWhiteSpace(message))
+                return string.Empty;
+
+            if (string.Equals(category, "speedify-check", StringComparison.OrdinalIgnoreCase))
+            {
+                return
+                    "fresh=" + ExtractPipeValue(message, "fresh") +
+                    "|connected=" + ExtractPipeValue(message, "connected") +
+                    "|active=" + ExtractPipeValue(message, "active") +
+                    "|valid=" + ExtractPipeValue(message, "valid") +
+                    "|reason=" + ExtractPipeValue(message, "reason") +
+                    "|structuredCore=" + ExtractPipeValue(message, "structuredCore") +
+                    "|warnings=" + ExtractPipeValue(message, "warnings");
+            }
+
+            if (string.Equals(category, "speedify-snapshot", StringComparison.OrdinalIgnoreCase))
+            {
+                return
+                    "connected=" + ExtractPipeValue(message, "connected") +
+                    "|server=" + ExtractPipeValue(message, "server") +
+                    "|pubIp=" + ExtractPipeValue(message, "pubIp") +
+                    "|links=" + ExtractPipeValue(message, "links") +
+                    "|warnings=" + ExtractPipeValue(message, "warnings");
+            }
+
+            return message;
+        }
+
+        private static string ExtractPipeValue(string message, string key)
+        {
+            if (string.IsNullOrWhiteSpace(message) || string.IsNullOrWhiteSpace(key))
+                return string.Empty;
+
+            string[] parts = message.Split('|');
+            for (int i = 0; i < parts.Length; i++)
+            {
+                string part = parts[i]?.Trim();
+                if (string.IsNullOrWhiteSpace(part))
+                    continue;
+
+                int equalsIndex = part.IndexOf('=');
+                if (equalsIndex <= 0)
+                    continue;
+
+                string partKey = part.Substring(0, equalsIndex).Trim();
+                if (!string.Equals(partKey, key, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                return part.Substring(equalsIndex + 1).Trim();
+            }
+
+            return string.Empty;
         }
 
         private static bool IsStartupDebugCategory(string category)
