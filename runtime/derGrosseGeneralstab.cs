@@ -76,19 +76,14 @@ namespace WTFnetApp
         private static readonly StartupProbeTimingConfig StartupProbeTiming = new StartupProbeTimingConfig
         {
             TransitionGrace = TimeSpan.FromSeconds(2.0),
-
             SpeedifyWarmupTolerance = TimeSpan.FromSeconds(6.0),
             SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
-
             CommonProtectedStartupBufferDuration = TimeSpan.FromSeconds(4.0),
             CommonIgnoreNegativeEventsDuration = TimeSpan.FromSeconds(6.0),
-
             BaseMeasuredDuration = TimeSpan.FromSeconds(13.0),
-            RawMeasuredDuration = TimeSpan.FromSeconds(18no no...thats complitely wrong...it should be .0),
+            RawMeasuredDuration = TimeSpan.FromSeconds(18.0),
             MinimumPostBufferMeasuredDuration = TimeSpan.FromSeconds(7.0),
-
             PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
-
             ObserveDuration = TimeSpan.Zero
         };
 
@@ -506,10 +501,7 @@ namespace WTFnetApp
                 return;
             }
 
-            string timeBucket = ProbeScoring.GetCurrentTimeBucketKey(DateTime.Now);
-            List<ProbeCandidateDefinition> orderedCandidates = OrderStartupCandidatesByLearning(candidates, timeBucket);
-
-            lastStartupProbeResult = await startupProbeCoordinator.RunAsync(orderedCandidates, CancellationToken.None);
+            lastStartupProbeResult = await startupProbeCoordinator.RunAsync(candidates, CancellationToken.None);
 
             if (lastStartupProbeResult == null)
             {
@@ -529,7 +521,6 @@ namespace WTFnetApp
 
             if (applyDecision.Kind == StartupApplyDecisionKind.ApplyWinner)
             {
-                // Coordinator restore status is reported above; policy step remains explicit no-op/apply confirmation.
                 await ApplyWinnerAfterStartupProbeAsync(lastStartupProbeResult.Winner);
             }
             else if (applyDecision.Kind == StartupApplyDecisionKind.KeepRaw)
@@ -538,7 +529,6 @@ namespace WTFnetApp
             }
             else
             {
-                // KeepCurrent preserves current route state; coordinator restore status is logged above.
                 Logger.Log("startup", "keeping existing best route (no winner apply)");
             }
 
@@ -574,97 +564,13 @@ namespace WTFnetApp
             return list;
         }
 
-        private List<ProbeCandidateDefinition> OrderStartupCandidatesByLearning(
-            List<ProbeCandidateDefinition> candidates,
-            string timeBucketKey)
-        {
-            if (candidates == null || candidates.Count == 0)
-                return candidates ?? new List<ProbeCandidateDefinition>();
+        
 
-            List<HistoricalCandidateOrderingEntry> entries = new List<HistoricalCandidateOrderingEntry>();
+        
 
-            for (int i = 0; i < candidates.Count; i++)
-            {
-                ProbeCandidateDefinition candidate = candidates[i];
-                if (candidate == null)
-                    continue;
+        
 
-                ServerProbeLearningStore.HistoricalRouteOrderingScore historical =
-                    probeLearningStore.EvaluateHistoricalOrderingScore(candidate.RouteKey, timeBucketKey);
-
-                entries.Add(new HistoricalCandidateOrderingEntry
-                {
-                    Candidate = candidate,
-                    OriginalIndex = i,
-                    HistoricalScore = historical?.Score ?? 1000.0,
-                    Trusted = historical != null && historical.IsTrusted,
-                    BadBias = historical != null && historical.HasBadBias,
-                    Reason = historical?.Reason ?? "default order | no profile"
-                });
-            }
-
-            LogCandidateOrdering(entries, "original");
-
-            bool hasTrusted = entries.Any(x => x.Trusted);
-            if (!hasTrusted)
-            {
-                Logger.Log("startup", "startup ordering | trusted learning unavailable | using catalog default order");
-                return entries
-                    .OrderBy(x => x.OriginalIndex)
-                    .Select(x => x.Candidate)
-                    .ToList();
-            }
-
-            List<HistoricalCandidateOrderingEntry> ordered = entries
-                .OrderBy(x => ComputeOrderingGroup(x))
-                .ThenBy(x => x.Trusted ? x.HistoricalScore : x.OriginalIndex)
-                .ThenBy(x => x.OriginalIndex)
-                .ToList();
-
-            LogCandidateOrdering(ordered, "reordered");
-
-            return ordered.Select(x => x.Candidate).ToList();
-        }
-
-        private static int ComputeOrderingGroup(HistoricalCandidateOrderingEntry entry)
-        {
-            if (entry == null)
-                return 3;
-
-            if (!entry.Trusted)
-                return 1;
-
-            if (entry.BadBias)
-                return 2;
-
-            return 0;
-        }
-
-        private void LogCandidateOrdering(
-            List<HistoricalCandidateOrderingEntry> entries,
-            string label)
-        {
-            if (entries == null || entries.Count == 0)
-                return;
-
-            string text = string.Join(" | ", entries.Select(x =>
-                (x.Candidate?.RouteKey ?? "unknown") +
-                " => histScore=" + x.HistoricalScore.ToString("0.0") +
-                " | " + (x.Trusted ? "trusted" : "untrusted") +
-                " | " + x.Reason));
-
-            Logger.Log("startup", "startup ordering | " + label + " | " + text);
-        }
-
-        private sealed class HistoricalCandidateOrderingEntry
-        {
-            public ProbeCandidateDefinition Candidate { get; set; }
-            public int OriginalIndex { get; set; }
-            public double HistoricalScore { get; set; }
-            public bool Trusted { get; set; }
-            public bool BadBias { get; set; }
-            public string Reason { get; set; }
-        }
+        
 
         private void ApplyLearningFromStartupProbe(StartupProbeResult result)
         {
