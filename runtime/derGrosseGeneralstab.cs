@@ -77,7 +77,7 @@ namespace WTFnetApp
         {
             TransitionGrace = TimeSpan.FromSeconds(2.0),
             RoutedFixedSettleDuration = TimeSpan.FromSeconds(6.0),
-            SpeedifyWarmupPollInterval = TimeSpan.FromMilliseconds(250),
+            SpeedifyTelemetryCheckInterval = TimeSpan.FromMilliseconds(250),
             
             RoutedStableGateCheck1 = TimeSpan.FromSeconds(4.0),
             RoutedStableGateCheck2 = TimeSpan.FromSeconds(6.0),
@@ -85,6 +85,8 @@ namespace WTFnetApp
             
             BaseMeasuredDuration = TimeSpan.FromSeconds(13.0),
             RawMeasuredDuration = TimeSpan.FromSeconds(18.0),
+            MaxStabilizationObserveDuration = TimeSpan.FromSeconds(30.0),
+            PostStableMeasuredDuration = TimeSpan.FromSeconds(12.0),
             PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
         };
 
@@ -1194,7 +1196,7 @@ namespace WTFnetApp
                     varianceSum += delta * delta;
                 }
 
-                double variance = varianceSum / values.Count;
+                double variance = varianceSum / (values.Count - 1);
                 return Math.Sqrt(Math.Max(0, variance));
             }
         }
@@ -1595,6 +1597,7 @@ namespace WTFnetApp
                 Notes = source.Notes,
                 StabilizationReached = source.StabilizationReached,
                 StabilizationTimedOut = source.StabilizationTimedOut,
+                StabilizationReason = source.StabilizationReason,
                 ReadinessKind = source.ReadinessKind,
                 ReadinessReason = source.ReadinessReason,
                 ReachedUsableState = source.ReachedUsableState,

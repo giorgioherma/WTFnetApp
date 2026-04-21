@@ -108,6 +108,7 @@ namespace WTFnetApp
 
         public bool StabilizationReached { get; set; }
         public bool StabilizationTimedOut { get; set; }
+        public string StabilizationReason { get; set; }
 
         public ProbeReadinessKind ReadinessKind { get; set; } = ProbeReadinessKind.NotReady;
         public string ReadinessReason { get; set; }
