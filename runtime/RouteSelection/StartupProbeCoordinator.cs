@@ -208,6 +208,10 @@ namespace WTFnetApp
                 }
 
                 await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
+                StartupDecisionSnapshot firstFreshPostSwitchStats = await CaptureFirstFreshPostSwitchStatsAsync(
+                    candidate,
+                    activationRequestedUtc,
+                    cancellationToken);
 
                 StartupSpeedifyTunnelProbe.SpeedifyProbeLifecycleResult lifecycle = await routedProbe.RunLifecycleAsync(
                     candidate,
@@ -264,6 +268,7 @@ namespace WTFnetApp
                     lifecycle.WarmupTelemetryTrusted
                         ? "startup-speedify-telemetry-trusted"
                         : "startup-speedify-telemetry-untrusted");
+                ApplyFirstFreshPostSwitchContext(runtime, firstFreshPostSwitchStats);
 
                 Log("startup-probe | warmup telemetry trust | " + candidate +
                     " | trusted=" + (lifecycle.WarmupTelemetryTrusted ? "yes" : "no"));
@@ -315,6 +320,63 @@ namespace WTFnetApp
                 " | " + timing.TransitionGrace.TotalMilliseconds.ToString("0") + "ms");
 
             await Task.Delay(timing.TransitionGrace, cancellationToken);
+        }
+
+        private async Task<StartupDecisionSnapshot> CaptureFirstFreshPostSwitchStatsAsync(
+            ProbeCandidateDefinition candidate,
+            DateTime activationRequestedUtc,
+            CancellationToken cancellationToken)
+        {
+            TimeSpan pollInterval = timing.SpeedifyTelemetryCheckInterval > TimeSpan.Zero
+                ? timing.SpeedifyTelemetryCheckInterval
+                : TimeSpan.FromMilliseconds(250);
+            DateTime deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(4);
+
+            while (DateTime.UtcNow <= deadlineUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                StartupDecisionSnapshot telemetry = getWarmupTelemetry?.Invoke();
+                if (telemetry != null &&
+                    telemetry.HasFreshTelemetry &&
+                    telemetry.TimeUtc != DateTime.MinValue &&
+                    telemetry.TimeUtc > activationRequestedUtc)
+                {
+                    Log("startup-probe | first fresh post-switch stats | " + candidate +
+                        " | source=startup-decision-snapshot" +
+                        " | ts=" + telemetry.TimeUtc.ToString("O") +
+                        " | aggLat=" + telemetry.AggregateLatencyMs.ToString("0.0") +
+                        " | aggJit=" + telemetry.AggregateJitterMs.ToString("0.0") +
+                        " | lat=" + telemetry.ReportedLatencyMs.ToString("0.0") +
+                        " | links=" + telemetry.ActiveConnectionCount +
+                        " | congested=" + (telemetry.AggregateCongested ? "yes" : "no"));
+                    return telemetry;
+                }
+
+                await Task.Delay(pollInterval, cancellationToken);
+            }
+
+            Log("startup-probe | first fresh post-switch stats | " + candidate + " | not-captured");
+            return null;
+        }
+
+        private static void ApplyFirstFreshPostSwitchContext(
+            ProbeCandidateRuntimeData runtime,
+            StartupDecisionSnapshot snapshot)
+        {
+            if (runtime == null || snapshot == null)
+                return;
+
+            runtime.FirstFreshPostSwitchStatsUtc = snapshot.TimeUtc;
+            runtime.FirstFreshPostSwitchAggLatencyMs = snapshot.AggregateLatencyMs;
+            runtime.FirstFreshPostSwitchAggJitterMs = snapshot.AggregateJitterMs;
+            runtime.FirstFreshPostSwitchReportedLatencyMs = snapshot.ReportedLatencyMs;
+            runtime.FirstFreshPostSwitchActiveConnectionCount = snapshot.ActiveConnectionCount;
+            runtime.FirstFreshPostSwitchAggregateCongested = snapshot.AggregateCongested;
+            if (string.IsNullOrWhiteSpace(runtime.Notes) ||
+                runtime.Notes.IndexOf("first-fresh-post-switch-stats-captured", StringComparison.OrdinalIgnoreCase) < 0)
+            {
+                runtime.Notes = AppendNote(runtime.Notes, "first-fresh-post-switch-stats-captured");
+            }
         }
 
         private bool IsCandidateUsableForMeasurement(

@@ -102,6 +102,7 @@
     <Compile Include="runtime\Data\SpeedifyTelemetryData\MetricsSnapshot.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </Compile>
+    <Compile Include="runtime\Data\SpeedifyTelemetryData\MiniSpeedifyMiniSnap.cs" />
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\FastPingTelemetrySnapshot.cs" />
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\SpeedifyTelemetrySnapshot.cs" />
     <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\StartupDecisionSnapshot.cs" />

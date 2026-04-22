@@ -247,6 +247,8 @@ namespace WTFnetApp
         private readonly StartupLogger startupLogger;
         private readonly Func<string, string, string> appendNote;
         private readonly Action<string> log;
+        private const int StartupRequiredConsecutiveUsableReadings = 3;
+        private static readonly TimeSpan StartupTunnelHardBuffer = TimeSpan.FromSeconds(10);
 
         public StartupSpeedifyWarmup(
             StartupProbeTimingConfig timing,
@@ -306,6 +308,10 @@ namespace WTFnetApp
             DateTime gateStartUtc = fixedSettleEndUtc;
             DateTime gateCheck1Utc = gateStartUtc + check1;
             DateTime gateCheck2Utc = gateStartUtc + check2;
+            TimeSpan hardBuffer = StartupTunnelHardBuffer;
+            if (forceStart < hardBuffer)
+                forceStart = hardBuffer;
+
             DateTime gateForceUtc = gateStartUtc + forceStart;
             DateTime nextWarmupLogUtc = warmupStartUtc;
 
@@ -344,6 +350,8 @@ namespace WTFnetApp
 
             bool check1Done = false;
             bool check2Done = false;
+            int consecutiveUsableReadings = 0;
+            int bestConsecutiveUsableReadings = 0;
 
             while (DateTime.UtcNow < gateForceUtc)
             {
@@ -353,10 +361,16 @@ namespace WTFnetApp
 
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
                 buffer.AddIfFresh(telemetry, usableNow, out _);
+                consecutiveUsableReadings = usableNow ? consecutiveUsableReadings + 1 : 0;
+                if (consecutiveUsableReadings > bestConsecutiveUsableReadings)
+                    bestConsecutiveUsableReadings = consecutiveUsableReadings;
 
                 DateTime nowUtc = DateTime.UtcNow;
+                bool hardBufferComplete = (nowUtc - warmupStartUtc) >= StartupTunnelHardBuffer;
                 bool stableNow =
+                    hardBufferComplete &&
                     usableNow &&
+                    consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings &&
                     buffer.MeetsMinimum &&
                     buffer.HasGoodTimeSpread &&
                     buffer.StableEnough;
@@ -367,7 +381,9 @@ namespace WTFnetApp
 
                     if (stableNow)
                     {
-                        string warmupTag = "fixed-settle-6s | stable-start-4s";
+                        string warmupTag =
+                            "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-" +
+                            Math.Max(StartupTunnelHardBuffer.TotalSeconds, check1.TotalSeconds).ToString("0.#") + "s";
                         startupLogger?.LogEvent(candidate, "WARMUP_TRUST_ESTABLISHED");
                         return new StartupSpeedifyWarmupResult(
                             true,
@@ -384,7 +400,9 @@ namespace WTFnetApp
 
                     if (stableNow)
                     {
-                        string warmupTag = "fixed-settle-6s | stable-start-6s";
+                        string warmupTag =
+                            "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-" +
+                            Math.Max(StartupTunnelHardBuffer.TotalSeconds, check2.TotalSeconds).ToString("0.#") + "s";
                         startupLogger?.LogEvent(candidate, "WARMUP_TRUST_ESTABLISHED");
                         return new StartupSpeedifyWarmupResult(
                             true,
@@ -398,13 +416,16 @@ namespace WTFnetApp
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
                     ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot();
+                    string warmupReason = reasonNow == "usable"
+                        ? (consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings ? "-" : "usable-streak-" + consecutiveUsableReadings + "/" + StartupRequiredConsecutiveUsableReadings)
+                        : reasonNow;
                     startupLogger?.LogProbeRow(
                         candidate,
                         "warmup",
                         warmupSnapshot,
                         buffer,
                         minimumFreshSamples,
-                        reasonNow == "usable" ? "-" : reasonNow);
+                        warmupReason);
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
@@ -412,6 +433,11 @@ namespace WTFnetApp
             }
 
             bool finalUsable = isCandidateUsableForMeasurement(candidate, out string finalReason);
+            if (finalUsable && bestConsecutiveUsableReadings < StartupRequiredConsecutiveUsableReadings)
+            {
+                finalUsable = false;
+                finalReason = "insufficient-consecutive-usable-" + bestConsecutiveUsableReadings + "/" + StartupRequiredConsecutiveUsableReadings;
+            }
             bool warmupTelemetryTrusted = buffer.MeetsMinimum && buffer.HasGoodTimeSpread && buffer.StableEnough;
 
             string finalTag =
@@ -836,7 +862,6 @@ namespace WTFnetApp
                         minimumFreshSpeedifySnapshots, true, true);
                 }
             }
-
             bool promising = IsPromisingForExtension(aggregateRuntime, rawScore, leaderScore);
             if (promising && timing.PromisingCandidateExtensionDuration > TimeSpan.Zero)
             {
@@ -1142,11 +1167,12 @@ namespace WTFnetApp
         }
 
         private readonly Action<string> log;
+
         private readonly HashSet<string> printedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CandidateSummarySnapshot> candidateSnapshots = new Dictionary<string, CandidateSummarySnapshot>(StringComparer.OrdinalIgnoreCase);
-        private const string TableHeader = "time         phase          loss%   avgPing  p95Ping  avgJit  p95Jit  spikeD  conf   spLat  spAgg  qDelay  spSnap  note";
-        private const string TableDivider = "--------------------------------------------------------------------------------------------------------------------------";
+        private const string TableHeader = "time         phase          loss%   avgPing  p95Ping  avgJit  p95Jit  spikeD  conf   note";
+        private const string TableDivider = "---------------------------------------------------------------------------------------";
 
         public StartupLogger(Action<string> log)
         {
@@ -1181,25 +1207,8 @@ namespace WTFnetApp
             string note)
         {
             EnsureCandidateTable(candidate);
-            string snap = requiredSnapshots > 0 && telemetryWindow != null
-                ? telemetryWindow.FreshSampleCount + "/" + requiredSnapshots
-                : "--";
-
-            // p95Jit comes from the live FastPing-oriented row snapshot/runtime when available.
-            // spLat prefers direct Speedify-side latency (reported latency), then aggregate-latency fallbacks.
-            // spAgg is a single aggregate latency-style value (never aggregate jitter).
-            // qDelay is derived from telemetry queue delay when available.
-            double spLatValue =
-                runtime?.SpeedifyReportedLatencyMs >= 0 ? runtime.SpeedifyReportedLatencyMs :
-                runtime?.SpeedifyAggregateLatencyMs >= 0 ? runtime.SpeedifyAggregateLatencyMs :
-                telemetryWindow?.AverageAggregateLatencyMs ?? -1;
-            double spAggValue =
-                runtime?.SpeedifyAggregateLatencyMs >= 0 ? runtime.SpeedifyAggregateLatencyMs :
-                telemetryWindow?.AverageAggregateLatencyMs ?? -1;
-            double qDelayValue = telemetryWindow?.AverageQueueDelayMs ?? -1;
-
             string line = string.Format(
-                "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9,-6} {10,-6} {11,-7} {12,-7} {13}",
+                "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9}",
                 DateTime.Now.ToString("HH:mm:ss.fff"),
                 phase ?? "--",
                 FormatPercent((double)(runtime?.AvgLossRate ?? -1)),
@@ -1209,27 +1218,36 @@ namespace WTFnetApp
                 FormatNumber((double)(runtime?.P95JitterMs ?? -1)),
                 FormatNumber((double)(runtime?.SpikeDensityPerMinute ?? -1)),
                 FormatConf((double)(runtime?.AvgConfidence ?? -1)),
-                FormatNumber(spLatValue),
-                FormatNumber(spAggValue),
-                FormatNumber(qDelayValue),
-                snap,
                 string.IsNullOrWhiteSpace(note) ? "-" : note);
             log?.Invoke(line);
+
+            string snap = requiredSnapshots > 0 && telemetryWindow != null
+                ? telemetryWindow.FreshSampleCount + "/" + requiredSnapshots
+                : "--";
+            string serverIdentity = !string.IsNullOrWhiteSpace(candidate?.DisplayName)
+                ? candidate.DisplayName
+                : !string.IsNullOrWhiteSpace(candidate?.RouteKey)
+                    ? candidate.RouteKey
+                    : "--";
+            string speedifyLine =
+                "speedify | fresh=" + snap +
+                " | target=" + serverIdentity +
+                " | aggLat=" + FormatNumber(runtime?.SpeedifyAggregateLatencyMs ?? telemetryWindow?.AverageAggregateLatencyMs ?? -1) +
+                " | aggJit=" + FormatNumber(runtime?.SpeedifyAggregateJitterMs ?? telemetryWindow?.AverageAggregateJitterMs ?? -1) +
+                " | lat=" + FormatNumber(runtime?.SpeedifyReportedLatencyMs ?? -1) +
+                " | links=" + FormatCount(runtime?.ActiveConnectionCount ?? -1) +
+                " | backup=" + FormatCount(runtime?.BackupConnectionCount ?? -1) +
+                " | congested=" + ((runtime?.AggregateCongested ?? telemetryWindow?.AnyCongestion == true) ? "yes" : "no");
+            log?.Invoke(speedifyLine);
         }
 
         public void LogEvent(ProbeCandidateDefinition candidate, string eventText)
         {
             EnsureCandidateTable(candidate);
             string line = string.Format(
-                "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9,-6} {10,-6} {11,-7} {12,-7} {13}",
+                "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9}",
                 DateTime.Now.ToString("HH:mm:ss.fff"),
                 "EVENT",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
                 "-----",
                 "-----",
                 "-----",
@@ -1411,6 +1429,11 @@ namespace WTFnetApp
         private static string FormatConf(double value)
         {
             return value >= 0 ? value.ToString("0.00") : "--";
+        }
+
+        private static string FormatCount(int value)
+        {
+            return value >= 0 ? value.ToString() : "--";
         }
 
     }

@@ -102,6 +102,12 @@ namespace WTFnetApp
         public int SpeedifyFreshSampleCount { get; set; }
         public double SpeedifyExpectedSampleCount { get; set; } = -1;
         public double SpeedifyAggregateLatencyStdDevMs { get; set; } = -1;
+        public DateTime FirstFreshPostSwitchStatsUtc { get; set; } = DateTime.MinValue;
+        public double FirstFreshPostSwitchAggLatencyMs { get; set; } = -1;
+        public double FirstFreshPostSwitchAggJitterMs { get; set; } = -1;
+        public double FirstFreshPostSwitchReportedLatencyMs { get; set; } = -1;
+        public int FirstFreshPostSwitchActiveConnectionCount { get; set; } = -1;
+        public bool FirstFreshPostSwitchAggregateCongested { get; set; }
 
         public bool IsValid { get; set; } = true;
         public string Notes { get; set; }

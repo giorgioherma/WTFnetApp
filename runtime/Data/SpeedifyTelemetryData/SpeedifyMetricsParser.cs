@@ -18,10 +18,17 @@ namespace WTFnetApp
         private const int LatencyWindowSize = 8;
 
         private readonly SpeedifyStructuredState structuredState = new SpeedifyStructuredState();
+        private MiniSpeedifyMiniSnap lastMiniConnectionStatsSnapshot;
+        private bool lastConnectionStatsHadAggregate;
 
         public SpeedifyStructuredState CurrentStructuredState
         {
             get { return structuredState; }
+        }
+
+        public MiniSpeedifyMiniSnap LastMiniConnectionStatsSnapshot
+        {
+            get { return lastMiniConnectionStatsSnapshot; }
         }
 
         public MetricsSnapshot ParseEvent(string eventName, string json)
@@ -39,6 +46,7 @@ namespace WTFnetApp
                     {
                         case "report_connection_stats":
                             ParseConnectionStatsIntoStructured(root);
+                            lastMiniConnectionStatsSnapshot = BuildMiniSnapshotFromConnectionStats();
 
                             Logger.Log("speedify-parsed",
                                 "event=report_connection_stats" +
@@ -259,11 +267,52 @@ namespace WTFnetApp
             }
 
             RemoveLinksNotSeenInGeneration(generation, keepAggregateRows: false);
+            lastConnectionStatsHadAggregate = hasAggregate;
 
             if (!hasAggregate)
+            {
+                structuredState.Tunnel.Congested = false;
+                structuredState.Tunnel.DownloadCongested = false;
+                structuredState.Tunnel.UploadCongested = false;
+                structuredState.Tunnel.LatencyMs = -1;
+                structuredState.Tunnel.JitterMs = -1;
                 AddWarningOnce("connection_stats_missing_aggregate");
+            }
 
             ValidateStructuredCompleteness();
+        }
+
+        private MiniSpeedifyMiniSnap BuildMiniSnapshotFromConnectionStats()
+        {
+            double aggregateLatency = structuredState.Tunnel.LatencyMs >= 0 ? structuredState.Tunnel.LatencyMs : -1;
+            double aggregateJitter = structuredState.Tunnel.JitterMs >= 0 ? structuredState.Tunnel.JitterMs : -1;
+
+            SpeedifyLinkState bestLink = GetBestLinkByJitterStability();
+            double reportedLatency = aggregateLatency >= 0
+                ? aggregateLatency
+                : (bestLink != null && bestLink.LatencyMs >= 0 ? bestLink.LatencyMs : -1);
+
+            if (reportedLatency >= 0 && (dynamicBase == 0 || reportedLatency < dynamicBase))
+                dynamicBase = reportedLatency;
+
+            double baseLatency = dynamicBase > 0 ? dynamicBase : -1;
+
+            return new MiniSpeedifyMiniSnap
+            {
+                TimeUtc = structuredState.TimeUtc != DateTime.MinValue ? structuredState.TimeUtc : DateTime.UtcNow,
+                HasConnectionStats = structuredState.HasConnectionStats,
+                TunnelAggregatePresent = lastConnectionStatsHadAggregate,
+                AggregateLatencyMs = aggregateLatency,
+                AggregateJitterMs = aggregateJitter,
+                ReportedLatencyMs = reportedLatency,
+                BaseLatencyMs = baseLatency,
+                DynamicBaseMs = baseLatency,
+                AggregateCongested = structuredState.Tunnel.Congested,
+                ActiveConnectionCount = structuredState.Tunnel.ActiveConnectionCount,
+                BackupConnectionCount = structuredState.Tunnel.BackupConnectionCount,
+                IsFresh = true,
+                ParseWarningCount = structuredState.ParseWarnings != null ? structuredState.ParseWarnings.Count : 0
+            };
         }
 
         private void ParseAggregateTunnelRow(JsonElement row)

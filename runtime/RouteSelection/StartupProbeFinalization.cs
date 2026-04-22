@@ -646,6 +646,12 @@ namespace WTFnetApp
                 SpeedifyFreshSampleCount = Math.Max(0, first.SpeedifyFreshSampleCount) + Math.Max(0, second.SpeedifyFreshSampleCount),
                 SpeedifyExpectedSampleCount = WeightedAverageKnown(first.SpeedifyExpectedSampleCount, second.SpeedifyExpectedSampleCount, w1, w2),
                 SpeedifyAggregateLatencyStdDevMs = WeightedAverageKnown(first.SpeedifyAggregateLatencyStdDevMs, second.SpeedifyAggregateLatencyStdDevMs, w1, w2),
+                FirstFreshPostSwitchStatsUtc = ChooseEarliestKnown(first.FirstFreshPostSwitchStatsUtc, second.FirstFreshPostSwitchStatsUtc),
+                FirstFreshPostSwitchAggLatencyMs = WeightedAverageKnown(first.FirstFreshPostSwitchAggLatencyMs, second.FirstFreshPostSwitchAggLatencyMs, w1, w2),
+                FirstFreshPostSwitchAggJitterMs = WeightedAverageKnown(first.FirstFreshPostSwitchAggJitterMs, second.FirstFreshPostSwitchAggJitterMs, w1, w2),
+                FirstFreshPostSwitchReportedLatencyMs = WeightedAverageKnown(first.FirstFreshPostSwitchReportedLatencyMs, second.FirstFreshPostSwitchReportedLatencyMs, w1, w2),
+                FirstFreshPostSwitchActiveConnectionCount = Math.Max(first.FirstFreshPostSwitchActiveConnectionCount, second.FirstFreshPostSwitchActiveConnectionCount),
+                FirstFreshPostSwitchAggregateCongested = first.FirstFreshPostSwitchAggregateCongested || second.FirstFreshPostSwitchAggregateCongested,
 
                 IsValid = first.IsValid || second.IsValid,
                 Notes = appendNote(first.Notes, second.Notes),
@@ -695,6 +701,19 @@ namespace WTFnetApp
             if (a < 0) return b;
             if (b < 0) return a;
             return Math.Min(a, b);
+        }
+
+        private static DateTime ChooseEarliestKnown(DateTime a, DateTime b)
+        {
+            bool hasA = a != DateTime.MinValue;
+            bool hasB = b != DateTime.MinValue;
+            if (!hasA && !hasB)
+                return DateTime.MinValue;
+            if (!hasA)
+                return b;
+            if (!hasB)
+                return a;
+            return a <= b ? a : b;
         }
     }
 }
