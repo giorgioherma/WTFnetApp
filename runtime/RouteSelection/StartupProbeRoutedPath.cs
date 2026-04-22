@@ -1378,6 +1378,9 @@ namespace WTFnetApp
             if (miniSnap == null)
                 return;
 
+            if (!miniSnap.IsFresh)
+                return;
+
             if (miniSnap.ActiveConnectionCount <= 0)
                 return;
 

@@ -1,24 +1,26 @@
-﻿using System.Collections.Generic;
+﻿using System;
 
-namespace WTFnetApp
+internal sealed class MiniSpeedifyMiniSnap
 {
-    internal sealed class MiniSpeedifyMinisnap
-    {
-        // Core tunnel metrics (aggregate "speedify" row)
-        public double TunnelLatencyMs { get; set; } = -1;
-        public double AvgSpeedifyJitterMs { get; set; } = -1;
+    public DateTime TimeUtc { get; set; }
+    public bool IsFresh { get; set; }
 
-        // Transport stats (best-effort / optional)
-        public double PacketLossPercent { get; set; } = -1;
-        public double RetransmitRate { get; set; } = -1;
-        public bool IsCongested { get; set; }
+    // 🔹 Tunnel state
+    public bool TunnelConnected { get; set; }
+    public int ActiveConnectionCount { get; set; }
+    public int BackupConnectionCount { get; set; }
 
-        // Per-link rows
-        public List<SpeedifyLinkRow> Links { get; } = new List<SpeedifyLinkRow>();
-    }
+    // 🔹 Latency (FastPing-aligned)
+    public double TunnelAvgPingMs { get; set; }
+    public double TunnelReportedPingMs { get; set; }
 
-    internal sealed class SpeedifyLinkRow
-    {
-        public double LatencyMs { get; set; } = -1;
-    }
+    // 🔹 Jitter
+    public double TunnelAvgJitterMs { get; set; }
+
+    // 🔹 Congestion
+    public bool IsCongested { get; set; }
+
+    // 🔹 Base / queue (advanced)
+    public double BasePingMs { get; set; }
+    public double DynamicBasePingMs { get; set; }
 }
