@@ -161,7 +161,6 @@ namespace WTFnetApp
                 activateSpeedifyAsync: ActivateSpeedifyTargetAsync,
                 getFastPingState: () => fastPing.GetState(),
                 getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
-                getWarmupTelemetry: GetStartupDecisionSnapshot,
                 getMiniSpeedifyMiniSnap: GetFreshMiniSpeedifyMiniSnapForStartup,
                 captureProbeAsync: CaptureProbeRuntimeAsync,
                 learningStore: probeLearningStore,
@@ -498,17 +497,7 @@ namespace WTFnetApp
             if (ageMs < 0 || ageMs > 3000)
                 return null;
 
-            if (!snap.HasConnectionStats)
-                return null;
-
-            if (snap.ActiveConnectionCount <= 0)
-                return null;
-
-            bool hasUsableLatency =
-                snap.ReportedLatencyMs > 0 ||
-                snap.AggregateLatencyMs > 0;
-
-            if (!hasUsableLatency)
+            if (!snap.HasConnectionStats && !snap.TunnelAggregatePresent)
                 return null;
 
             return new MiniSpeedifyMiniSnap
@@ -886,37 +875,6 @@ namespace WTFnetApp
             return ageMs >= 0 && ageMs <= 3000;
         }
 
-        private StartupDecisionSnapshot GetStartupDecisionSnapshot()
-        {
-            UnifiedNetworkState unified = GetLastUnifiedState();
-            if (unified == null)
-                return new StartupDecisionSnapshot();
-
-            StartupDecisionSnapshot startup = unified.StartupDecision;
-            if (startup == null)
-                return new StartupDecisionSnapshot();
-
-            StartupDecisionSnapshot snapshot = new StartupDecisionSnapshot
-            {
-                TunnelConnected = startup.TunnelConnected,
-                HasFreshTelemetry = startup.HasFreshTelemetry,
-                ActiveConnectionCount = startup.ActiveConnectionCount,
-                TimeUtc = startup.TimeUtc,
-                AggregateLatencyMs = startup.AggregateLatencyMs,
-                AggregateJitterMs = startup.AggregateJitterMs,
-                QueueDelayMs = startup.QueueDelayMs,
-                ReportedLatencyMs = startup.ReportedLatencyMs,
-                AggregateCongested = startup.AggregateCongested,
-                DownloadCongested = startup.DownloadCongested,
-                UploadCongested = startup.UploadCongested
-            };
-
-            if (!IsFreshSpeedifyState(unified))
-                snapshot.HasFreshTelemetry = false;
-
-            return snapshot;
-        }
-
         // =========================
         // ROUTE SELECTION GLUE
         // =========================
@@ -1100,95 +1058,6 @@ namespace WTFnetApp
                    state.IndexOf("disconnect", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        private sealed class SpeedifyWindowAccumulator
-        {
-            private int freshSampleCount;
-            private int activeConnectionMax;
-            private int backupConnectionMax;
-            private bool tunnelConnected;
-            private bool aggregateCongested;
-            private DateTime lastAcceptedUtc = DateTime.MinValue;
-
-            private double aggregateLatencySum;
-            private int aggregateLatencyCount;
-
-            private double aggregateJitterSum;
-            private int aggregateJitterCount;
-
-            private double reportedLatencySum;
-            private int reportedLatencyCount;
-            private readonly List<double> aggregateLatencySamples = new List<double>();
-
-            public int FreshSampleCount => freshSampleCount;
-            public bool TunnelConnected => tunnelConnected;
-            public bool AggregateCongested => aggregateCongested;
-            public int ActiveConnectionCount => activeConnectionMax;
-            public int BackupConnectionCount => backupConnectionMax;
-
-            public double AverageAggregateLatencyMs => aggregateLatencyCount > 0 ? aggregateLatencySum / aggregateLatencyCount : -1;
-            public double AverageAggregateJitterMs => aggregateJitterCount > 0 ? aggregateJitterSum / aggregateJitterCount : -1;
-            public double AverageReportedLatencyMs => reportedLatencyCount > 0 ? reportedLatencySum / reportedLatencyCount : -1;
-            public double AggregateLatencyStdDevMs => ComputeStdDev(aggregateLatencySamples);
-
-            public void Add(UnifiedNetworkState state)
-            {
-                if (!IsFreshSpeedifyState(state))
-                    return;
-
-                SpeedifyTelemetrySnapshot speedify = state.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
-
-                if (lastAcceptedUtc != DateTime.MinValue &&
-                    state.TimeUtc <= lastAcceptedUtc)
-                {
-                    return;
-                }
-
-                freshSampleCount++;
-                lastAcceptedUtc = state.TimeUtc;
-                tunnelConnected = tunnelConnected || speedify.TunnelConnected;
-                aggregateCongested = aggregateCongested || speedify.AggregateCongested || speedify.DownloadCongested || speedify.UploadCongested;
-                activeConnectionMax = Math.Max(activeConnectionMax, speedify.ActiveConnectionCount);
-                backupConnectionMax = Math.Max(backupConnectionMax, speedify.BackupConnectionCount);
-
-                if (speedify.AggregateLatencyMs > 0)
-                {
-                    aggregateLatencySum += speedify.AggregateLatencyMs;
-                    aggregateLatencyCount++;
-                    aggregateLatencySamples.Add(speedify.AggregateLatencyMs);
-                }
-
-                if (speedify.AggregateJitterMs > 0)
-                {
-                    aggregateJitterSum += speedify.AggregateJitterMs;
-                    aggregateJitterCount++;
-                }
-
-                if (speedify.LatencyMs > 0)
-                {
-                    reportedLatencySum += speedify.LatencyMs;
-                    reportedLatencyCount++;
-                }
-            }
-
-            private static double ComputeStdDev(List<double> values)
-            {
-                if (values == null || values.Count < 2)
-                    return -1;
-
-                double mean = values.Average();
-                double varianceSum = 0;
-
-                for (int i = 0; i < values.Count; i++)
-                {
-                    double delta = values[i] - mean;
-                    varianceSum += delta * delta;
-                }
-
-                double variance = varianceSum / (values.Count - 1);
-                return Math.Sqrt(Math.Max(0, variance));
-            }
-        }
-
         private async Task<ProbeCandidateRuntimeData> CaptureProbeRuntimeAsync(
             ProbeCandidateDefinition candidate,
             TimeSpan settle,
@@ -1200,15 +1069,9 @@ namespace WTFnetApp
             if (settle > TimeSpan.Zero)
                 await Task.Delay(settle);
 
-            bool isSpeedifyCandidate = candidate.Kind == ProbeCandidateKind.Speedify;
-            SpeedifyWindowAccumulator speedifyWindow = null;
-
             if (observe > TimeSpan.Zero)
             {
-                if (isSpeedifyCandidate)
-                    speedifyWindow = await SampleSpeedifyWindowAsync(observe, TimeSpan.Zero);
-                else
-                    await Task.Delay(observe);
+                await Task.Delay(observe);
             }
 
             FastPingSignalAnalyzer.FastPingAggregateSnapshot window =
@@ -1218,12 +1081,6 @@ namespace WTFnetApp
 
             FastPingState fastPingState = fastPing.GetState();
             UnifiedNetworkState unified = GetLastUnifiedState();
-            SpeedifyTelemetrySnapshot speedify = unified?.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
-            MetricsSnapshot snapshot;
-            lock (publishSync)
-            {
-                snapshot = lastSnapshot;
-            }
 
             ProbeCandidateRuntimeData runtime = new ProbeCandidateRuntimeData
             {
@@ -1246,63 +1103,23 @@ namespace WTFnetApp
                 SpikeDensityPerMinute = window != null ? window.SpikeDensityPerMinute : -1,
                 StaleRate = window != null ? window.StaleRate : -1,
 
-                TunnelConnected = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.TunnelConnected
-                    : (unified != null ? speedify.TunnelConnected : snapshot != null && snapshot.TunnelConnected),
-                AggregateCongested = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.AggregateCongested
-                    : (unified != null ? (speedify.AggregateCongested || speedify.DownloadCongested || speedify.UploadCongested) : snapshot != null && snapshot.AggregateCongested),
-                ActiveConnectionCount = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.ActiveConnectionCount
-                    : (unified != null ? speedify.ActiveConnectionCount : snapshot != null ? snapshot.ActiveConnectionCount : 0),
-                BackupConnectionCount = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.BackupConnectionCount
-                    : (unified != null ? speedify.BackupConnectionCount : snapshot != null ? snapshot.BackupConnectionCount : 0),
-                SpeedifyAggregateLatencyMs = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.AverageAggregateLatencyMs
-                    : (unified != null ? speedify.AggregateLatencyMs : snapshot != null ? snapshot.AggregateLatencyMs : -1),
-                SpeedifyAggregateJitterMs = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.AverageAggregateJitterMs
-                    : (unified != null ? speedify.AggregateJitterMs : snapshot != null ? snapshot.AggregateJitterMs : -1),
-                SpeedifyReportedLatencyMs = speedifyWindow != null && speedifyWindow.FreshSampleCount > 0
-                    ? speedifyWindow.AverageReportedLatencyMs
-                    : (unified != null ? speedify.LatencyMs : snapshot != null ? snapshot.LatencyMs : -1),
-                SpeedifyFreshSampleCount = speedifyWindow != null ? speedifyWindow.FreshSampleCount : 0,
-                SpeedifyExpectedSampleCount = speedifyWindow != null ? Math.Max(1.0, Math.Round(observe.TotalMilliseconds / (observe <= TimeSpan.FromSeconds(5) ? 200.0 : 300.0))) : -1,
-                SpeedifyAggregateLatencyStdDevMs = speedifyWindow != null ? speedifyWindow.AggregateLatencyStdDevMs : -1,
+                TunnelConnected = false,
+                AggregateCongested = false,
+                ActiveConnectionCount = 0,
+                BackupConnectionCount = 0,
+                SpeedifyAggregateLatencyMs = -1,
+                SpeedifyAggregateJitterMs = -1,
+                SpeedifyReportedLatencyMs = -1,
+                SpeedifyFreshSampleCount = 0,
+                SpeedifyExpectedSampleCount = -1,
+                SpeedifyAggregateLatencyStdDevMs = -1,
 
                 IsValid = window != null && window.IsValid,
                 Notes = unified != null ? unified.HealthReason : null
             };
 
             if (candidate.Kind == ProbeCandidateKind.Raw)
-            {
-                runtime.TunnelConnected = false;
-                runtime.AggregateCongested = false;
-                runtime.ActiveConnectionCount = 0;
-                runtime.BackupConnectionCount = 0;
-                runtime.SpeedifyAggregateLatencyMs = -1;
-                runtime.SpeedifyAggregateJitterMs = -1;
-                runtime.SpeedifyReportedLatencyMs = -1;
-                runtime.SpeedifyFreshSampleCount = 0;
-                runtime.SpeedifyExpectedSampleCount = -1;
-                runtime.SpeedifyAggregateLatencyStdDevMs = -1;
                 runtime.Notes = "Raw baseline capture";
-            }
-            else if (speedifyWindow != null && speedifyWindow.FreshSampleCount < 4)
-            {
-                runtime.Notes = string.IsNullOrWhiteSpace(runtime.Notes)
-                    ? "Speedify low-confidence window"
-                    : runtime.Notes + " | Speedify low-confidence window";
-            }
-
-            if (speedifyWindow != null && speedifyWindow.AggregateLatencyStdDevMs >= 0)
-            {
-                string stdDevNote = "Speedify latency stdev " + speedifyWindow.AggregateLatencyStdDevMs.ToString("0.0") + "ms";
-                runtime.Notes = string.IsNullOrWhiteSpace(runtime.Notes)
-                    ? stdDevNote
-                    : runtime.Notes + " | " + stdDevNote;
-            }
 
             Logger.Log("startup",
                 "capture probe | " + candidate +
@@ -1313,10 +1130,10 @@ namespace WTFnetApp
                 " | loss=" + FormatProbePercent(runtime.AvgLossRate) +
                 " | conf=" + FormatProbeMetric(runtime.AvgConfidence) +
                 " | spkD=" + FormatProbeMetric(runtime.SpikeDensityPerMinute) +
-                " | spFresh=" + (speedifyWindow != null ? speedifyWindow.FreshSampleCount.ToString() : "0") +
+                " | spFresh=" + runtime.SpeedifyFreshSampleCount +
                 " | spAggLat=" + FormatProbeMetric(runtime.SpeedifyAggregateLatencyMs) +
                 " | spAggJit=" + FormatProbeMetric(runtime.SpeedifyAggregateJitterMs) +
-                " | spLatStd=" + (speedifyWindow != null ? FormatProbeMetric(speedifyWindow.AggregateLatencyStdDevMs) : "--"));
+                " | spLatStd=--");
 
             Logger.Log("runtime",
                 "capture | " + candidate +
@@ -1330,50 +1147,6 @@ namespace WTFnetApp
                 " | fpJit=" + FormatProbeMetric(runtime.AvgJitterMs));
 
             return runtime;
-        }
-
-        private async Task<SpeedifyWindowAccumulator> SampleSpeedifyWindowAsync(TimeSpan duration, TimeSpan pollInterval)
-        {
-            SpeedifyWindowAccumulator accumulator = new SpeedifyWindowAccumulator();
-            if (duration <= TimeSpan.Zero)
-                return accumulator;
-
-            TimeSpan effectivePollInterval;
-            if (pollInterval > TimeSpan.Zero)
-            {
-                effectivePollInterval = pollInterval;
-            }
-            else
-            {
-                effectivePollInterval = duration <= TimeSpan.FromSeconds(5)
-                    ? TimeSpan.FromMilliseconds(200)
-                    : TimeSpan.FromMilliseconds(300);
-            }
-
-            DateTime deadlineUtc = DateTime.UtcNow + duration;
-            while (DateTime.UtcNow < deadlineUtc)
-            {
-                UnifiedNetworkState unified = GetLastUnifiedState();
-                accumulator.Add(unified);
-                await Task.Delay(effectivePollInterval);
-            }
-
-            return accumulator;
-        }
-
-        private static bool IsFreshSpeedifyState(UnifiedNetworkState state)
-        {
-            if (state == null)
-                return false;
-
-            if (!state.SpeedifyTelemetryFresh)
-                return false;
-
-            if (state.TimeUtc == DateTime.MinValue)
-                return false;
-
-            double ageMs = (DateTime.UtcNow - state.TimeUtc).TotalMilliseconds;
-            return ageMs >= 0 && ageMs <= 3000;
         }
 
         private static string FormatProbeMetric(double value)
@@ -1542,7 +1315,16 @@ namespace WTFnetApp
                 SpeedifySpikeModifier = source.SpeedifySpikeModifier,
                 SpeedifyLossStaleModifier = source.SpeedifyLossStaleModifier,
                 SpeedifyHealthLabel = source.SpeedifyHealthLabel,
-                ConfidenceModifier = source.ConfidenceModifier
+                ConfidenceModifier = source.ConfidenceModifier,
+                StartupSpeedifyAdjustment = source.StartupSpeedifyAdjustment,
+                StartupSpeedifyTieBreakAdjustment = source.StartupSpeedifyTieBreakAdjustment,
+                StartupSpeedifyConfidenceScore = source.StartupSpeedifyConfidenceScore,
+                StartupSpeedifyConfidenceLabel = source.StartupSpeedifyConfidenceLabel,
+                StartupSpeedifyPositiveComponent = source.StartupSpeedifyPositiveComponent,
+                StartupSpeedifyNegativeComponent = source.StartupSpeedifyNegativeComponent,
+                StartupSpeedifyBondedBonusReducedByLoss = source.StartupSpeedifyBondedBonusReducedByLoss,
+                StartupSpeedifyBondedBonusReducedByRisk = source.StartupSpeedifyBondedBonusReducedByRisk,
+                StartupSpeedifyAdjustmentReason = source.StartupSpeedifyAdjustmentReason
             };
 
             scoreMap[source] = cloned;
@@ -1603,6 +1385,12 @@ namespace WTFnetApp
                 MeasurementStopReason = source.MeasurementStopReason,
                 DiscardReason = source.DiscardReason,
                 StartupSpeedifyTrusted = source.StartupSpeedifyTrusted,
+                StartupSpeedifyConfidenceScore = source.StartupSpeedifyConfidenceScore,
+                StartupSpeedifyConfidenceLabel = source.StartupSpeedifyConfidenceLabel,
+                StartupSpeedifyFastPingAgreementDeltaMs = source.StartupSpeedifyFastPingAgreementDeltaMs,
+                StartupSpeedifyBondedEvidence = source.StartupSpeedifyBondedEvidence,
+                StartupSpeedifyFastPingAgreementGood = source.StartupSpeedifyFastPingAgreementGood,
+                StartupSpeedifyCongestedEvidence = source.StartupSpeedifyCongestedEvidence,
             };
         }
 
