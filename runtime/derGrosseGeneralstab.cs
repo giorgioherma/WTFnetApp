@@ -651,7 +651,7 @@ namespace WTFnetApp
 
         private StartupApplyDecision BuildStartupApplyDecision(StartupProbeResult result)
         {
-            if (result == null || result.Winner == null)
+            if (result == null || result.Winner == null || result.Winner.Candidate == null)
             {
                 return new StartupApplyDecision
                 {
@@ -660,25 +660,18 @@ namespace WTFnetApp
                 };
             }
 
-            ProbeWinnerConfidenceKind confidenceKind = result.WinnerConfidence != null
-                ? result.WinnerConfidence.Kind
-                : ProbeWinnerConfidenceKind.NoClearWinner;
+            bool winnerIsRaw = result.Winner.Candidate.Kind == ProbeCandidateKind.Raw;
 
-            if (confidenceKind == ProbeWinnerConfidenceKind.HighConfidence)
+            if (result.Winner.IsDiscardedEarly)
             {
                 return new StartupApplyDecision
                 {
-                    Kind = StartupApplyDecisionKind.ApplyWinner,
-                    Reason = "high confidence winner"
+                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "winner discarded early"
                 };
             }
 
-            bool winnerRisky = result.Winner.WarningLevel == ProbeWarningLevel.Risky;
-            bool winnerBorderline = result.Winner.WarningLevel == ProbeWarningLevel.Borderline;
-            bool winnerIsRaw = result.Winner.Candidate != null &&
-                               result.Winner.Candidate.Kind == ProbeCandidateKind.Raw;
-
-            if (winnerRisky)
+            if (result.Winner.WarningLevel == ProbeWarningLevel.Risky)
             {
                 return new StartupApplyDecision
                 {
@@ -687,57 +680,10 @@ namespace WTFnetApp
                 };
             }
 
-            if (confidenceKind == ProbeWinnerConfidenceKind.NoClearWinner)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = result.Baseline != null ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "no clear winner"
-                };
-            }
-
-            if (confidenceKind == ProbeWinnerConfidenceKind.Tentative)
-            {
-                double baselineGap = result.Baseline != null
-                    ? result.Baseline.OverallStabilityScore - result.Winner.OverallStabilityScore
-                    : 0.0;
-
-                bool meaningfulAdvantage =
-                    result.WinnerConfidence != null &&
-                    result.WinnerConfidence.GapToRunnerUpScore >= 12.0 &&
-                    baselineGap >= 8.0;
-
-                if (meaningfulAdvantage &&
-                    result.Winner.WarningLevel == ProbeWarningLevel.None &&
-                    !result.Winner.IsDiscardedEarly)
-                {
-                    return new StartupApplyDecision
-                    {
-                        Kind = StartupApplyDecisionKind.ApplyWinner,
-                        Reason = "tentative but meaningful clean advantage"
-                    };
-                }
-
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "tentative winner without strong safe advantage"
-                };
-            }
-
-            if (winnerBorderline)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "borderline winner held back"
-                };
-            }
-
             return new StartupApplyDecision
             {
-                Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                Reason = "conservative default hold"
+                Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.ApplyWinner,
+                Reason = "best score wins"
             };
         }
 
