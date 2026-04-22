@@ -660,29 +660,20 @@ namespace WTFnetApp
                 };
             }
 
-            bool winnerIsRaw = result.Winner.Candidate.Kind == ProbeCandidateKind.Raw;
-
+            // Only hard stop: completely unusable
             if (result.Winner.IsDiscardedEarly)
             {
                 return new StartupApplyDecision
                 {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "winner discarded early"
+                    Kind = StartupApplyDecisionKind.KeepCurrent,
+                    Reason = "winner unusable"
                 };
             }
 
-            if (result.Winner.WarningLevel == ProbeWarningLevel.Risky)
-            {
-                return new StartupApplyDecision
-                {
-                    Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.KeepCurrent,
-                    Reason = "winner marked risky"
-                };
-            }
-
+            // ALWAYS apply best score
             return new StartupApplyDecision
             {
-                Kind = winnerIsRaw ? StartupApplyDecisionKind.KeepRaw : StartupApplyDecisionKind.ApplyWinner,
+                Kind = StartupApplyDecisionKind.ApplyWinner,
                 Reason = "best score wins"
             };
         }
