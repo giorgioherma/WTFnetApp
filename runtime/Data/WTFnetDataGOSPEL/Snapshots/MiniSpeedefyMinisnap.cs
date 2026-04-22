@@ -2,7 +2,7 @@
 
 namespace WTFnetApp
 {
-    internal sealed class StartupSpeedifySnapshot
+    internal sealed class MiniSpeedifyMinisnap
     {
         // Core tunnel metrics (aggregate "speedify" row)
         public double TunnelLatencyMs { get; set; } = -1;

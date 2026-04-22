@@ -85,7 +85,7 @@
     <None Include="legacy\DataSet.cs">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\StartupSpeedifySnapshot.cs" />
+    <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\MiniSpeedefyMinisnap.cs" />
     <Compile Include="runtime\RouteSelection\ProbeScoring.cs" />
     <Compile Include="runtime\RouteSelection\ServerProbeLearningStore.cs" />
     <Compile Include="runtime\RouteSelection\SpeedifyServerRegionCatalog.cs" />
