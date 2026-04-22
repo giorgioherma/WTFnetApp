@@ -162,7 +162,7 @@ namespace WTFnetApp
                 getFastPingState: () => fastPing.GetState(),
                 getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
                 getWarmupTelemetry: GetStartupDecisionSnapshot,
-                getMiniSpeedifyMiniSnap: () => speedifyReader != null ? speedifyReader.CurrentMiniConnectionStatsSnapshot : null,
+                getMiniSpeedifyMiniSnap: GetFreshMiniSpeedifyMiniSnapForStartup,
                 captureProbeAsync: CaptureProbeRuntimeAsync,
                 learningStore: probeLearningStore,
                 timing: StartupProbeTiming,
@@ -480,6 +480,53 @@ namespace WTFnetApp
                     startupEvaluationRunning = false;
                 }
             });
+        }
+
+        private MiniSpeedifyMiniSnap GetFreshMiniSpeedifyMiniSnapForStartup()
+        {
+            MiniSpeedifyMiniSnap snap = speedifyReader != null
+                ? speedifyReader.CurrentMiniConnectionStatsSnapshot
+                : null;
+
+            if (snap == null)
+                return null;
+
+            if (snap.TimeUtc == DateTime.MinValue)
+                return null;
+
+            double ageMs = (DateTime.UtcNow - snap.TimeUtc).TotalMilliseconds;
+            if (ageMs < 0 || ageMs > 3000)
+                return null;
+
+            if (!snap.HasConnectionStats)
+                return null;
+
+            if (snap.ActiveConnectionCount <= 0)
+                return null;
+
+            bool hasUsableLatency =
+                snap.ReportedLatencyMs > 0 ||
+                snap.AggregateLatencyMs > 0;
+
+            if (!hasUsableLatency)
+                return null;
+
+            return new MiniSpeedifyMiniSnap
+            {
+                TimeUtc = snap.TimeUtc,
+                HasConnectionStats = snap.HasConnectionStats,
+                TunnelAggregatePresent = snap.TunnelAggregatePresent,
+                AggregateLatencyMs = snap.AggregateLatencyMs,
+                AggregateJitterMs = snap.AggregateJitterMs,
+                ReportedLatencyMs = snap.ReportedLatencyMs,
+                BaseLatencyMs = snap.BaseLatencyMs,
+                DynamicBaseMs = snap.DynamicBaseMs,
+                AggregateCongested = snap.AggregateCongested,
+                ActiveConnectionCount = snap.ActiveConnectionCount,
+                BackupConnectionCount = snap.BackupConnectionCount,
+                IsFresh = snap.IsFresh,
+                ParseWarningCount = snap.ParseWarningCount
+            };
         }
 
         private bool IsSpeedifyInstalled()

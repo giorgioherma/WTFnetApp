@@ -1350,45 +1350,7 @@ namespace WTFnetApp
             string note,
             MiniSpeedifyMiniSnap miniSnap)
         {
-            string key = candidate?.RouteKey ?? candidate?.DisplayName ?? "unknown";
-            bool firstForCandidate = !printedCandidates.Contains(key);
-
-            string snap = requiredSnapshots > 0 && telemetryWindow != null
-                ? telemetryWindow.FreshSampleCount + "/" + requiredSnapshots
-                : "--";
-
-            string serverIdentity = !string.IsNullOrWhiteSpace(candidate?.DisplayName)
-                ? candidate.DisplayName
-                : !string.IsNullOrWhiteSpace(candidate?.RouteKey)
-                    ? candidate.RouteKey
-                    : "--";
-
-            string speedifyLine =
-                "speedify | fresh=" + snap +
-                " | target=" + serverIdentity +
-                " | lat=" + FormatNumber(miniSnap?.ReportedLatencyMs ?? -1) +
-                " | aggLat=" + FormatNumber(miniSnap?.AggregateLatencyMs ?? -1) +
-                " | aggJit=" + FormatNumber(miniSnap?.AggregateJitterMs ?? -1) +
-                " | base=" + FormatNumber(miniSnap?.BaseLatencyMs ?? -1) +
-                " | dynBase=" + FormatNumber(miniSnap?.DynamicBaseMs ?? -1) +
-                " | links=" + FormatCount(miniSnap?.ActiveConnectionCount ?? -1) +
-                " | backup=" + FormatCount(miniSnap?.BackupConnectionCount ?? -1) +
-                " | congested=" + ((miniSnap?.AggregateCongested ?? false) ? "yes" : "no") +
-                " | freshSnap=" + ((miniSnap?.IsFresh ?? false) ? "yes" : "no") +
-                " | warnings=" + (miniSnap != null ? miniSnap.ParseWarningCount.ToString() : "--");
-
-            if (firstForCandidate)
-            {
-                printedCandidates.Add(key);
-                log?.Invoke((candidate?.DisplayName ?? "Unknown").ToUpperInvariant());
-                log?.Invoke(speedifyLine);
-                log?.Invoke(TableHeader);
-                log?.Invoke(TableDivider);
-            }
-            else
-            {
-                log?.Invoke(speedifyLine);
-            }
+            EnsureCandidateTable(candidate);
 
             string line = string.Format(
                 "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9}",
@@ -1404,6 +1366,48 @@ namespace WTFnetApp
                 string.IsNullOrWhiteSpace(note) ? "-" : note);
 
             log?.Invoke(line);
+        }
+
+        public void LogMiniSpeedifySnapshot(
+            ProbeCandidateDefinition candidate,
+            string phase,
+            SpeedifyWarmupWindowBuffer telemetryWindow,
+            int requiredSnapshots,
+            MiniSpeedifyMiniSnap miniSnap)
+        {
+            if (miniSnap == null)
+                return;
+
+            if (miniSnap.ActiveConnectionCount <= 0)
+                return;
+
+            if (miniSnap.ReportedLatencyMs <= 0 && miniSnap.AggregateLatencyMs <= 0)
+                return;
+
+            string snap = requiredSnapshots > 0 && telemetryWindow != null
+                ? telemetryWindow.FreshSampleCount + "/" + requiredSnapshots
+                : "--";
+
+            string serverIdentity = !string.IsNullOrWhiteSpace(candidate?.DisplayName)
+                ? candidate.DisplayName
+                : !string.IsNullOrWhiteSpace(candidate?.RouteKey)
+                    ? candidate.RouteKey
+                    : "--";
+
+            log?.Invoke(
+                "speedify-mini | phase=" + (phase ?? "--") +
+                " | target=" + serverIdentity +
+                " | fresh=" + snap +
+                " | lat=" + FormatNumber(miniSnap.ReportedLatencyMs) +
+                " | aggLat=" + FormatNumber(miniSnap.AggregateLatencyMs) +
+                " | aggJit=" + FormatNumber(miniSnap.AggregateJitterMs) +
+                " | base=" + FormatNumber(miniSnap.BaseLatencyMs) +
+                " | dynBase=" + FormatNumber(miniSnap.DynamicBaseMs) +
+                " | links=" + FormatCount(miniSnap.ActiveConnectionCount) +
+                " | backup=" + FormatCount(miniSnap.BackupConnectionCount) +
+                " | congested=" + (miniSnap.AggregateCongested ? "yes" : "no") +
+                " | freshSnap=" + (miniSnap.IsFresh ? "yes" : "no") +
+                " | warnings=" + miniSnap.ParseWarningCount.ToString());
         }
 
         public void LogEvent(ProbeCandidateDefinition candidate, string eventText)
