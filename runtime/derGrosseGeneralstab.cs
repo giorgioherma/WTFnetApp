@@ -162,6 +162,7 @@ namespace WTFnetApp
                 getFastPingState: () => fastPing.GetState(),
                 getShortWindowSnapshot: () => fastPingSignalAnalyzer.Last10sSnapshot,
                 getWarmupTelemetry: GetStartupDecisionSnapshot,
+                getMiniSpeedifyMiniSnap: () => speedifyReader != null ? speedifyReader.CurrentMiniConnectionStatsSnapshot : null,
                 captureProbeAsync: CaptureProbeRuntimeAsync,
                 learningStore: probeLearningStore,
                 timing: StartupProbeTiming,
@@ -1533,6 +1534,14 @@ namespace WTFnetApp
                 SpeedifyFreshSampleCount = source.SpeedifyFreshSampleCount,
                 SpeedifyExpectedSampleCount = source.SpeedifyExpectedSampleCount,
                 SpeedifyAggregateLatencyStdDevMs = source.SpeedifyAggregateLatencyStdDevMs,
+
+                FirstFreshPostSwitchStatsUtc = source.FirstFreshPostSwitchStatsUtc,
+                FirstFreshPostSwitchAggLatencyMs = source.FirstFreshPostSwitchAggLatencyMs,
+                FirstFreshPostSwitchAggJitterMs = source.FirstFreshPostSwitchAggJitterMs,
+                FirstFreshPostSwitchReportedLatencyMs = source.FirstFreshPostSwitchReportedLatencyMs,
+                FirstFreshPostSwitchActiveConnectionCount = source.FirstFreshPostSwitchActiveConnectionCount,
+                FirstFreshPostSwitchAggregateCongested = source.FirstFreshPostSwitchAggregateCongested,
+
                 IsValid = source.IsValid,
                 Notes = source.Notes,
                 StabilizationReached = source.StabilizationReached,

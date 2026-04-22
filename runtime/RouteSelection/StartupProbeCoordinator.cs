@@ -31,6 +31,7 @@ namespace WTFnetApp
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
             Func<StartupDecisionSnapshot> getWarmupTelemetry,
+            Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             ServerProbeLearningStore learningStore,
             StartupProbeTimingConfig timing = null,
@@ -68,17 +69,18 @@ namespace WTFnetApp
                 Log);
 
             routedProbe = new StartupSpeedifyTunnelProbe(
-                this.getFastPingState,
-                this.getShortWindowSnapshot,
-                this.getWarmupTelemetry,
-                IsCandidateUsableForMeasurement,
-                this.captureProbeAsync,
-                this.timing,
-                startupLogger,
-                (first, second, firstDuration, secondDuration) =>
+                getFastPingState: this.getFastPingState,
+                getShortWindowSnapshot: this.getShortWindowSnapshot,
+                getWarmupTelemetry: this.getWarmupTelemetry,
+                getMiniSpeedifyMiniSnap: getMiniSpeedifyMiniSnap,
+                isCandidateUsableForMeasurement: IsCandidateUsableForMeasurement,
+                captureProbeAsync: this.captureProbeAsync,
+                timing: this.timing,
+                startupLogger: startupLogger,
+                mergeMeasuredRuntime: (first, second, firstDuration, secondDuration) =>
                     StartupProbeRuntimeMerge.MergeMeasuredRuntime(first, second, firstDuration, secondDuration, AppendNote),
-                AppendNote,
-                Log);
+                appendNote: AppendNote,
+                log: Log);
         }
 
         public async Task<StartupProbeResult> RunAsync(
