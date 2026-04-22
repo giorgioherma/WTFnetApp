@@ -32,6 +32,11 @@ namespace WTFnetApp
             get { return parser.CurrentStructuredState; }
         }
 
+        public MiniSpeedifyMiniSnap CurrentMiniConnectionStatsSnapshot
+        {
+            get { return parser.LastMiniConnectionStatsSnapshot; }
+        }
+
         public SpeedifyTelemetryReader(Action<MetricsSnapshot> handler)
         {
             onSnapshot = handler;
