@@ -18,7 +18,7 @@ namespace WTFnetApp
 
         private readonly WtfFastPing fastPing = new WtfFastPing();
         private readonly FastPingSignalAnalyzer fastPingSignalAnalyzer = new FastPingSignalAnalyzer();
-        private readonly NetworkSignalResolver networkSignalResolver = new NetworkSignalResolver();
+        private readonly NetworkSignalResolver networkSignalResolver;
         private readonly ServerProbeLearningStore probeLearningStore = new ServerProbeLearningStore();
 
         private StartupProbeCoordinator startupProbeCoordinator;
@@ -96,6 +96,7 @@ namespace WTFnetApp
 
         public DerGrosseGeneralstab()
         {
+            networkSignalResolver = new NetworkSignalResolver(fastPingSignalAnalyzer);
             Logger.StartSession();
             Logger.StartDeviationSession();
             Logger.StartUnifiedMetricsSession();
@@ -104,6 +105,8 @@ namespace WTFnetApp
 
             Logger.Log("system", "application starting");
             Logger.Log("engine", "initializing core");
+
+            
 
             InitializeOverlay();
             InitializeNat();
