@@ -4,7 +4,10 @@ namespace WTFnetApp
 {
     public static class NetworkMetricsCalculator
     {
-        public static void ResolveFromFastPing(UnifiedNetworkState state, FastPingState fastPing)
+        public static void ResolveFromFastPing(
+            UnifiedNetworkState state,
+            FastPingState fastPing,
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot fastPingsnapshot)
         {
             double resolvedPing = ChoosePositive(
                 fastPing.StablePingMs,
@@ -15,6 +18,24 @@ namespace WTFnetApp
             state.JitterMs = fastPing.JitterMs;
             state.BaselineLatencyMs = fastPing.BaselinePingMs;
             state.FloorLatencyMs = fastPing.FloorPingMs;
+
+            // Queue (FastPing derived)
+            if (fastPingsnapshot != null && fastPingsnapshot.ValidQueueCount > 0)
+            {
+                state.QueueDelayMs = fastPingsnapshot.AvgQueueDelayMs;
+                state.QueueGrowthMsPerSec = fastPingsnapshot.QueueGrowthMsPerSec;
+                state.QueueTrendConfidence = fastPingsnapshot.QueueTrendConfidence;
+                state.QueueBuilding = fastPingsnapshot.QueueBuilding;
+                state.QueueDraining = fastPingsnapshot.QueueDraining;
+            }
+            else
+            {
+                state.QueueDelayMs = -1;
+                state.QueueGrowthMsPerSec = 0;
+                state.QueueTrendConfidence = 0;
+                state.QueueBuilding = false;
+                state.QueueDraining = false;
+            }
 
             state.DisplayedPingMs = ChoosePositive(
                 fastPing.DisplayedPingMs,
@@ -44,6 +65,7 @@ namespace WTFnetApp
                 snapshot.AggregateJitterMs,
                 snapshot.Jitter,
                 snapshot.MicroJitter);
+
 
             state.BaselineLatencyMs = ChoosePositive(
                 snapshot.BaseLatencyMs,

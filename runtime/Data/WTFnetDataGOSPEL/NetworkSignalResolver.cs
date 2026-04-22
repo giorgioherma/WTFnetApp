@@ -9,6 +9,7 @@ namespace WTFnetApp
         private int consecutiveStableSpeedifySnapshots = 0;
         private DateTime lastStableSpeedifySnapshotUtc = DateTime.MinValue;
         private static readonly TimeSpan StableSnapshotGapReset = TimeSpan.FromSeconds(2);
+        private readonly FastPingSignalAnalyzer fastPingSignalAnalyzer;
 
         public UnifiedNetworkState Resolve(MetricsSnapshot snapshot, FastPingState fastPing, NatState natState)
         {
@@ -64,30 +65,39 @@ namespace WTFnetApp
                     ? UnifiedNetworkSourceKind.FastPingWithSpeedify
                     : UnifiedNetworkSourceKind.FastPing;
 
-                NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing);
-                NetworkQualityEvaluator.ClassifyFastPing(state);
+                if (hasFastPing)
+                {
+                    state.SourceKind = speedifyUsable
+                        ? UnifiedNetworkSourceKind.FastPingWithSpeedify
+                        : UnifiedNetworkSourceKind.FastPing;
 
-                state.HealthReason = "Resolved from FastPing";
-                state.Notes = speedifyUsable
-                    ? "Primary source: FastPing probes; Speedify telemetry attached as context."
-                    : "Speedify telemetry unavailable or stale; using probe-derived metrics.";
+                    var fastPingSnapshot = fastPingSignalAnalyzer.Last10sSnapshot;
 
-                if (speedifyUsable)
-                    ApplySpeedifyContextOnly(state, snapshot, fastPing);
-            }
-            else if (speedifyUsable)
-            {
-                state.SourceKind = UnifiedNetworkSourceKind.Speedify;
+                    NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing, fastPingSnapshot);
+                    NetworkQualityEvaluator.ClassifyFastPing(state);
 
-                NetworkMetricsCalculator.ResolveFromSpeedify(state, snapshot);
-                NetworkQualityEvaluator.ClassifySpeedify(state, snapshot);
+                    state.HealthReason = "Resolved from FastPing";
+                    state.Notes = speedifyUsable
+                        ? "Primary source: FastPing probes; Speedify telemetry attached as context."
+                        : "Speedify telemetry unavailable or stale; using probe-derived metrics.";
 
-                state.HealthReason = "Resolved from Speedify fallback";
-                state.Notes = "FastPing unavailable; using fresh Speedify telemetry as fallback.";
-            }
-            else
-            {
-                ResolveEmpty(state);
+                    if (speedifyUsable)
+                        ApplySpeedifyContextOnly(state, snapshot, fastPing);
+                }
+                else if (speedifyUsable)
+                {
+                    state.SourceKind = UnifiedNetworkSourceKind.Speedify;
+
+                    NetworkMetricsCalculator.ResolveFromSpeedify(state, snapshot);
+                    NetworkQualityEvaluator.ClassifySpeedify(state, snapshot);
+
+                    state.HealthReason = "Resolved from Speedify fallback";
+                    state.Notes = "FastPing unavailable; using fresh Speedify telemetry as fallback.";
+                }
+                else
+                {
+                    ResolveEmpty(state);
+                }
             }
 
             state.JitterPressure = Math.Max(

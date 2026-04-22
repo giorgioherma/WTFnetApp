@@ -80,7 +80,7 @@ namespace WTFnetApp
 
             Last10sSnapshot = shortWindow.BuildSnapshot();
             Last30sSnapshot = longWindow.BuildSnapshot();
-
+            
             MaybeLogAggregatedSummary();
 
             TrackerState observedState = ClassifyState(state);
@@ -280,9 +280,12 @@ namespace WTFnetApp
             double conf = s10.IsValid ? s10.AvgConfidence : s30.AvgConfidence;
 
             Logger.Log("fastping-agg",
-                $"avg={avg:0} max={max:0} p95={p95:0} j={jitter:0} loss={loss:0.00} " +
-                $"bad={bad:0.00} conf={conf:0.00} " +
-                $"spkD10={s10.SpikeDensityPerMinute:0.0} spkD30={s30.SpikeDensityPerMinute:0.0}");
+    $"avg={avg:0} max={max:0} p95={p95:0} j={jitter:0} loss={loss:0.00} " +
+    $"bad={bad:0.00} conf={conf:0.00} " +
+    $"q={s10.AvgQueueDelayMs:0.0} q95={s10.P95QueueDelayMs:0.0} " +
+    $"qg={s10.QueueGrowthMsPerSec:+0.0;-0.0;0.0} qa={s10.QueueAccelerationMsPerSec2:+0.0;-0.0;0.0} " +
+    $"qt={s10.QueueTrendConfidence:0.00} qb={(s10.QueueBuilding ? 1 : 0)} qd={(s10.QueueDraining ? 1 : 0)} " +
+    $"spkD10={s10.SpikeDensityPerMinute:0.0} spkD30={s30.SpikeDensityPerMinute:0.0}");
 
             lastAggregatedLogUtc = nowUtc;
         }
@@ -426,8 +429,23 @@ namespace WTFnetApp
         {
             public int SampleCount;
             public int ValidPingCount;
+            public int ValidQueueCount;
             public int SpikeCount;
             public int StaleCount;
+
+            public double AvgQueueDelayMs = -1;
+            public double MinQueueDelayMs = -1;
+            public double MaxQueueDelayMs = -1;
+            public double P95QueueDelayMs = -1;
+            public double QueueRangeMs = -1;
+
+            public double InstantQueueDelayMs = -1;
+            public double QueueGrowthMsPerSec = 0;
+            public double QueueAccelerationMsPerSec2 = 0;
+
+            public double QueueTrendConfidence = 0;
+            public bool QueueBuilding;
+            public bool QueueDraining;
 
             public double AvgPingMs = -1;
             public double MaxPingMs = -1;
@@ -448,6 +466,17 @@ namespace WTFnetApp
             public bool IsValid
             {
                 get { return ValidPingCount >= 5; }
+            }
+            
+            public bool HasUsableQueueTrend
+            {
+                get
+                {
+                    return
+                        ValidQueueCount >= 5 &&
+                        QueueTrendConfidence >= 0.45 &&
+                        AvgQueueDelayMs >= 1.5; // <-- important
+                }
             }
         }
 
@@ -588,12 +617,23 @@ namespace WTFnetApp
                 if (state == null)
                     return;
 
+                double stablePingMs = state.StablePingMs > 0 ? state.StablePingMs : -1;
+                double baselinePingMs = state.BaselinePingMs > 0 ? state.BaselinePingMs : -1;
+
+                double queueDelayMs =
+                    stablePingMs > 0 && baselinePingMs > 0
+                        ? Math.Max(0.0, stablePingMs - baselinePingMs)
+                        : -1;
+
                 samples[nextIndex] = new Sample
                 {
                     TimeUtc = timeUtc,
-                    PingMs = state.InstantPingMs > 0
-                        ? state.InstantPingMs
-                        : (state.StablePingMs > 0 ? state.StablePingMs : -1),
+                    PingMs = state.StablePingMs > 0
+                        ? state.StablePingMs
+                        : (state.InstantPingMs > 0 ? state.InstantPingMs : -1),
+                    StablePingMs = stablePingMs,
+                    BaselinePingMs = baselinePingMs,
+                    QueueDelayMs = queueDelayMs,
                     JitterMs = state.JitterMs,
                     LossRate = state.LossRate,
                     BadQualityRate = state.BadQualityRate,
@@ -618,12 +658,16 @@ namespace WTFnetApp
 
                 double[] pingValues = new double[count];
                 double[] jitterValues = new double[count];
+                double[] queueValues = new double[count];
 
                 int pingCount = 0;
                 int jitterCount = 0;
+                int queueCount = 0;
 
                 double pingSum = 0;
                 double jitterSum = 0;
+                double queueSum = 0;
+
                 double lossSum = 0;
                 double badSum = 0;
                 double confidenceSum = 0;
@@ -631,9 +675,16 @@ namespace WTFnetApp
                 int considered = 0;
                 int spikeCount = 0;
                 int staleCount = 0;
+
                 double maxPing = -1;
                 double minJitter = -1;
                 double maxJitter = -1;
+
+                double minQueue = -1;
+                double maxQueue = -1;
+
+                double latestQueue = -1;
+                DateTime latestQueueTimeUtc = DateTime.MinValue;
 
                 for (int i = 0; i < count; i++)
                 {
@@ -669,6 +720,25 @@ namespace WTFnetApp
                             maxJitter = s.JitterMs;
                     }
 
+                    if (s.QueueDelayMs >= 0)
+                    {
+                        queueValues[queueCount] = s.QueueDelayMs;
+                        queueCount++;
+                        queueSum += s.QueueDelayMs;
+
+                        if (minQueue < 0 || s.QueueDelayMs < minQueue)
+                            minQueue = s.QueueDelayMs;
+
+                        if (maxQueue < 0 || s.QueueDelayMs > maxQueue)
+                            maxQueue = s.QueueDelayMs;
+
+                        if (latestQueueTimeUtc == DateTime.MinValue || s.TimeUtc > latestQueueTimeUtc)
+                        {
+                            latestQueue = s.QueueDelayMs;
+                            latestQueueTimeUtc = s.TimeUtc;
+                        }
+                    }
+
                     if (s.LossRate >= 0)
                         lossSum += s.LossRate;
 
@@ -687,6 +757,7 @@ namespace WTFnetApp
 
                 snapshot.SampleCount = considered;
                 snapshot.ValidPingCount = pingCount;
+                snapshot.ValidQueueCount = queueCount;
                 snapshot.SpikeCount = spikeCount;
                 snapshot.StaleCount = staleCount;
 
@@ -699,6 +770,16 @@ namespace WTFnetApp
                 snapshot.MaxJitterMs = maxJitter;
                 snapshot.P95JitterMs = ComputePercentile(jitterValues, jitterCount, 0.95);
 
+                snapshot.AvgQueueDelayMs = queueCount > 0 ? queueSum / queueCount : -1;
+                snapshot.MinQueueDelayMs = minQueue;
+                snapshot.MaxQueueDelayMs = maxQueue;
+                snapshot.P95QueueDelayMs = ComputePercentile(queueValues, queueCount, 0.95);
+                snapshot.QueueRangeMs =
+                    (minQueue >= 0 && maxQueue >= 0)
+                        ? (maxQueue - minQueue)
+                        : -1;
+                snapshot.InstantQueueDelayMs = latestQueue;
+
                 snapshot.AvgLossRate = considered > 0 ? lossSum / considered : -1;
                 snapshot.AvgBadQualityRate = considered > 0 ? badSum / considered : -1;
                 snapshot.AvgConfidence = considered > 0 ? confidenceSum / considered : -1;
@@ -707,7 +788,168 @@ namespace WTFnetApp
                 double windowMinutes = windowDuration.TotalMinutes;
                 snapshot.SpikeDensityPerMinute = windowMinutes > 0 ? spikeCount / windowMinutes : -1;
 
+                snapshot.QueueGrowthMsPerSec = ComputeQueueSlopeMsPerSec(cutoff);
+                snapshot.QueueAccelerationMsPerSec2 = ComputeQueueAccelerationMsPerSec2(cutoff);
+
+                snapshot.QueueTrendConfidence = ComputeQueueTrendConfidence(
+                    considered,
+                    queueCount,
+                    snapshot.AvgConfidence,
+                    snapshot.StaleRate,
+                    snapshot.AvgLossRate,
+                    snapshot.AvgQueueDelayMs);
+
+                if (snapshot.QueueTrendConfidence > 0)
+                {
+                    double trustScale = Math.Max(0.20, snapshot.QueueTrendConfidence);
+                    snapshot.QueueGrowthMsPerSec *= trustScale;
+                    snapshot.QueueAccelerationMsPerSec2 *= trustScale;
+                }
+
+                snapshot.QueueBuilding =
+                    snapshot.HasUsableQueueTrend &&
+                    snapshot.QueueGrowthMsPerSec >= 3.0;
+
+                snapshot.QueueDraining =
+                    snapshot.HasUsableQueueTrend &&
+                    snapshot.QueueGrowthMsPerSec <= -4.0 &&
+                    snapshot.AvgJitterMs >= 0 &&
+                    snapshot.AvgJitterMs < 12.0 &&
+                    snapshot.AvgLossRate >= 0 &&
+                    snapshot.AvgLossRate < 0.10;
+
                 return snapshot;
+            }
+
+            private double ComputeQueueSlopeMsPerSec(DateTime cutoff)
+            {
+                double sumX = 0;
+                double sumY = 0;
+                double sumXY = 0;
+                double sumX2 = 0;
+                int n = 0;
+
+                DateTime firstTimeUtc = DateTime.MinValue;
+
+                for (int i = 0; i < count; i++)
+                {
+                    Sample s = samples[i];
+                    if (s == null || s.TimeUtc < cutoff || s.QueueDelayMs < 0)
+                        continue;
+
+                    if (firstTimeUtc == DateTime.MinValue)
+                        firstTimeUtc = s.TimeUtc;
+
+                    double x = (s.TimeUtc - firstTimeUtc).TotalSeconds;
+                    double y = s.QueueDelayMs;
+
+                    sumX += x;
+                    sumY += y;
+                    sumXY += x * y;
+                    sumX2 += x * x;
+                    n++;
+                }
+
+                if (n < 4)
+                    return 0;
+
+                double denominator = (n * sumX2) - (sumX * sumX);
+                if (Math.Abs(denominator) < 0.0001)
+                    return 0;
+
+                return ((n * sumXY) - (sumX * sumY)) / denominator;
+            }
+
+            private double ComputeQueueAccelerationMsPerSec2(DateTime cutoff)
+            {
+                double sumX = 0;
+                double sumY = 0;
+                double sumXY = 0;
+                double sumX2 = 0;
+                int n = 0;
+
+                DateTime firstTimeUtc = DateTime.MinValue;
+                double lastQueue = -1;
+                double lastTimeSec = 0;
+
+                for (int i = 0; i < count; i++)
+                {
+                    Sample s = samples[i];
+                    if (s == null || s.TimeUtc < cutoff || s.QueueDelayMs < 0)
+                        continue;
+
+                    if (firstTimeUtc == DateTime.MinValue)
+                        firstTimeUtc = s.TimeUtc;
+
+                    double t = (s.TimeUtc - firstTimeUtc).TotalSeconds;
+
+                    if (lastQueue >= 0)
+                    {
+                        double dt = t - lastTimeSec;
+                        if (dt > 0.0001)
+                        {
+                            double slope = (s.QueueDelayMs - lastQueue) / dt;
+
+                            sumX += t;
+                            sumY += slope;
+                            sumXY += t * slope;
+                            sumX2 += t * t;
+                            n++;
+                        }
+                    }
+
+                    lastQueue = s.QueueDelayMs;
+                    lastTimeSec = t;
+                }
+
+                if (n < 4)
+                    return 0;
+
+                double denominator = (n * sumX2) - (sumX * sumX);
+                if (Math.Abs(denominator) < 0.0001)
+                    return 0;
+
+                return ((n * sumXY) - (sumX * sumY)) / denominator;
+            }
+
+            private static double ComputeQueueTrendConfidence(
+                int sampleCount,
+                int queueCount,
+                double avgConfidence,
+                double staleRate,
+                double avgLossRate,
+                double avgQueueDelayMs)
+            {
+                if (sampleCount <= 0 || queueCount < 4)
+                    return 0;
+
+                double confidence = 1.0;
+
+                if (queueCount < 6)
+                    confidence *= 0.70;
+                else if (queueCount < 10)
+                    confidence *= 0.85;
+
+                if (avgConfidence >= 0)
+                    confidence *= Math.Max(0.25, avgConfidence);
+
+                if (staleRate >= 0)
+                    confidence *= Math.Max(0.20, 1.0 - (staleRate * 0.85));
+
+                if (avgLossRate >= 0)
+                    confidence *= Math.Max(0.35, 1.0 - (avgLossRate * 1.2));
+
+                if (avgQueueDelayMs >= 0 && avgQueueDelayMs < 1.5)
+                    confidence *= 0.35;
+                else if (avgQueueDelayMs >= 0 && avgQueueDelayMs < 3.0)
+                    confidence *= 0.70;
+
+                if (confidence < 0)
+                    confidence = 0;
+                if (confidence > 1)
+                    confidence = 1;
+
+                return confidence;
             }
 
             private static double ComputePercentile(double[] values, int count, double percentile)
@@ -737,6 +979,9 @@ namespace WTFnetApp
             {
                 public DateTime TimeUtc;
                 public double PingMs;
+                public double StablePingMs;
+                public double BaselinePingMs;
+                public double QueueDelayMs;
                 public double JitterMs;
                 public double LossRate;
                 public double BadQualityRate;

@@ -115,8 +115,12 @@ namespace WTFnetApp
         public UnifiedNetworkHealthState HealthState = UnifiedNetworkHealthState.Unknown;
         public string HealthReason;
 
-        // minimal combined context still consumed
+        public double QueueGrowthMsPerSec = 0;
+        public double QueueTrendConfidence = 0;
+        public bool QueueBuilding;
+        public bool QueueDraining;
         public double QueueDelayMs = -1;
+        
         public double LatencyDriftMs = 0;
         public double RecentLatencyMs = -1;
         public double AverageLatencyMs = -1;
