@@ -12,7 +12,6 @@ namespace WTFnetApp
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
-        private readonly Func<StartupDecisionSnapshot> getWarmupTelemetry;
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
@@ -30,7 +29,6 @@ namespace WTFnetApp
             Func<string, Task<bool>> activateSpeedifyAsync,
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
-            Func<StartupDecisionSnapshot> getWarmupTelemetry,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             ServerProbeLearningStore learningStore,
@@ -41,7 +39,6 @@ namespace WTFnetApp
             this.activateSpeedifyAsync = activateSpeedifyAsync ?? throw new ArgumentNullException(nameof(activateSpeedifyAsync));
             this.getFastPingState = getFastPingState ?? throw new ArgumentNullException(nameof(getFastPingState));
             this.getShortWindowSnapshot = getShortWindowSnapshot ?? throw new ArgumentNullException(nameof(getShortWindowSnapshot));
-            this.getWarmupTelemetry = getWarmupTelemetry;
             this.captureProbeAsync = captureProbeAsync ?? throw new ArgumentNullException(nameof(captureProbeAsync));
             this.learningStore = learningStore ?? throw new ArgumentNullException(nameof(learningStore));
             this.timing = timing ?? throw new ArgumentNullException(nameof(timing));
@@ -71,7 +68,6 @@ namespace WTFnetApp
             routedProbe = new StartupSpeedifyTunnelProbe(
                 getFastPingState: this.getFastPingState,
                 getShortWindowSnapshot: this.getShortWindowSnapshot,
-                getWarmupTelemetry: this.getWarmupTelemetry,
                 getMiniSpeedifyMiniSnap: getMiniSpeedifyMiniSnap,
                 isCandidateUsableForMeasurement: IsCandidateUsableForMeasurement,
                 captureProbeAsync: this.captureProbeAsync,
@@ -170,8 +166,9 @@ namespace WTFnetApp
             rawRuntime.MeasurementCompleted = !rawRuntime.MeasurementStoppedEarly;
             rawRuntime.ReadinessKind = readiness.Kind;
             rawRuntime.ReadinessReason = readiness.Reason;
+            NeutralizeRawStartupSpeedifyFields(rawRuntime);
 
-            ProbeScoreResult rawScore = ProbeScoring.ScoreCandidate(rawRuntime);
+            ProbeScoreResult rawScore = ProbeScoring.ScoreCandidate(StartupScoreRuntimeSanitizer.BuildScoreRuntimeWithoutSpeedify(rawRuntime));
             LogLossRiskIfNeeded(rawCandidate, rawRuntime, rawScore);
 
             LearnedProbeStateProfile rawLearned = learningStore.GetProfile(rawCandidate.RouteKey, timeBucket);
@@ -210,11 +207,6 @@ namespace WTFnetApp
                 }
 
                 await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
-                StartupDecisionSnapshot firstFreshPostSwitchStats = await CaptureFirstFreshPostSwitchStatsAsync(
-                    candidate,
-                    activationRequestedUtc,
-                    cancellationToken);
-
                 StartupSpeedifyTunnelProbe.SpeedifyProbeLifecycleResult lifecycle = await routedProbe.RunLifecycleAsync(
                     candidate,
                     activationRequestedUtc,
@@ -263,19 +255,12 @@ namespace WTFnetApp
                 runtime.TimeBucketKey = timeBucket;
                 runtime.ReadinessKind = candidateReadiness.Kind;
                 runtime.ReadinessReason = candidateReadiness.Reason;
-                runtime.StartupSpeedifyTrusted = lifecycle.WarmupTelemetryTrusted;
                 runtime.Notes = AppendNote(runtime.Notes, lifecycle.WarmupTag);
                 runtime.Notes = AppendNote(
                     runtime.Notes,
-                    lifecycle.WarmupTelemetryTrusted
-                        ? "startup-speedify-telemetry-trusted"
-                        : "startup-speedify-telemetry-untrusted");
-                ApplyFirstFreshPostSwitchContext(runtime, firstFreshPostSwitchStats);
+                    lifecycle.WarmupMiniTrusted ? "startup-mini-trusted" : "startup-mini-untrusted");
 
-                Log("startup-probe | warmup telemetry trust | " + candidate +
-                    " | trusted=" + (lifecycle.WarmupTelemetryTrusted ? "yes" : "no"));
-
-                ProbeScoreResult score = ProbeScoring.ScoreCandidate(runtime);
+                ProbeScoreResult score = ProbeScoring.ScoreCandidate(StartupScoreRuntimeSanitizer.BuildScoreRuntimeWithoutSpeedify(runtime));
                 LogLossRiskIfNeeded(candidate, runtime, score);
 
                 LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
@@ -322,63 +307,6 @@ namespace WTFnetApp
                 " | " + timing.TransitionGrace.TotalMilliseconds.ToString("0") + "ms");
 
             await Task.Delay(timing.TransitionGrace, cancellationToken);
-        }
-
-        private async Task<StartupDecisionSnapshot> CaptureFirstFreshPostSwitchStatsAsync(
-            ProbeCandidateDefinition candidate,
-            DateTime activationRequestedUtc,
-            CancellationToken cancellationToken)
-        {
-            TimeSpan pollInterval = timing.SpeedifyTelemetryCheckInterval > TimeSpan.Zero
-                ? timing.SpeedifyTelemetryCheckInterval
-                : TimeSpan.FromMilliseconds(250);
-            DateTime deadlineUtc = DateTime.UtcNow + TimeSpan.FromSeconds(4);
-
-            while (DateTime.UtcNow <= deadlineUtc)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                StartupDecisionSnapshot telemetry = getWarmupTelemetry?.Invoke();
-                if (telemetry != null &&
-                    telemetry.HasFreshTelemetry &&
-                    telemetry.TimeUtc != DateTime.MinValue &&
-                    telemetry.TimeUtc > activationRequestedUtc)
-                {
-                    Log("startup-probe | first fresh post-switch stats | " + candidate +
-                        " | source=startup-decision-snapshot" +
-                        " | ts=" + telemetry.TimeUtc.ToString("O") +
-                        " | aggLat=" + telemetry.AggregateLatencyMs.ToString("0.0") +
-                        " | aggJit=" + telemetry.AggregateJitterMs.ToString("0.0") +
-                        " | lat=" + telemetry.ReportedLatencyMs.ToString("0.0") +
-                        " | links=" + telemetry.ActiveConnectionCount +
-                        " | congested=" + (telemetry.AggregateCongested ? "yes" : "no"));
-                    return telemetry;
-                }
-
-                await Task.Delay(pollInterval, cancellationToken);
-            }
-
-            Log("startup-probe | first fresh post-switch stats | " + candidate + " | not-captured");
-            return null;
-        }
-
-        private static void ApplyFirstFreshPostSwitchContext(
-            ProbeCandidateRuntimeData runtime,
-            StartupDecisionSnapshot snapshot)
-        {
-            if (runtime == null || snapshot == null)
-                return;
-
-            runtime.FirstFreshPostSwitchStatsUtc = snapshot.TimeUtc;
-            runtime.FirstFreshPostSwitchAggLatencyMs = snapshot.AggregateLatencyMs;
-            runtime.FirstFreshPostSwitchAggJitterMs = snapshot.AggregateJitterMs;
-            runtime.FirstFreshPostSwitchReportedLatencyMs = snapshot.ReportedLatencyMs;
-            runtime.FirstFreshPostSwitchActiveConnectionCount = snapshot.ActiveConnectionCount;
-            runtime.FirstFreshPostSwitchAggregateCongested = snapshot.AggregateCongested;
-            if (string.IsNullOrWhiteSpace(runtime.Notes) ||
-                runtime.Notes.IndexOf("first-fresh-post-switch-stats-captured", StringComparison.OrdinalIgnoreCase) < 0)
-            {
-                runtime.Notes = AppendNote(runtime.Notes, "first-fresh-post-switch-stats-captured");
-            }
         }
 
         private bool IsCandidateUsableForMeasurement(
@@ -443,6 +371,37 @@ namespace WTFnetApp
             }
 
             return true;
+        }
+
+        private static void NeutralizeRawStartupSpeedifyFields(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null)
+                return;
+
+            runtime.StartupSpeedifyTrusted = false;
+            runtime.TunnelConnected = false;
+            runtime.AggregateCongested = false;
+            runtime.ActiveConnectionCount = 0;
+            runtime.BackupConnectionCount = 0;
+            runtime.SpeedifyAggregateLatencyMs = -1;
+            runtime.SpeedifyAggregateJitterMs = -1;
+            runtime.SpeedifyReportedLatencyMs = -1;
+            runtime.SpeedifyFreshSampleCount = 0;
+
+            runtime.SpeedifyExpectedSampleCount = -1;
+            runtime.SpeedifyAggregateLatencyStdDevMs = -1;
+            runtime.FirstFreshPostSwitchStatsUtc = DateTime.MinValue;
+            runtime.FirstFreshPostSwitchAggLatencyMs = -1;
+            runtime.FirstFreshPostSwitchAggJitterMs = -1;
+            runtime.FirstFreshPostSwitchReportedLatencyMs = -1;
+            runtime.FirstFreshPostSwitchActiveConnectionCount = -1;
+            runtime.FirstFreshPostSwitchAggregateCongested = false;
+            runtime.StartupSpeedifyConfidenceScore = -1;
+            runtime.StartupSpeedifyConfidenceLabel = null;
+            runtime.StartupSpeedifyFastPingAgreementDeltaMs = -1;
+            runtime.StartupSpeedifyBondedEvidence = false;
+            runtime.StartupSpeedifyFastPingAgreementGood = false;
+            runtime.StartupSpeedifyCongestedEvidence = false;
         }
 
         private void Log(string message)

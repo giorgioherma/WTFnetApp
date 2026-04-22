@@ -14,14 +14,14 @@ namespace WTFnetApp
                 bool isUsable,
                 string reason,
                 double waitedMs,
-                bool warmupTelemetryTrusted,
+                bool warmupMiniTrusted,
                 string warmupTag,
                 ProbeCandidateRuntimeData runtime)
             {
                 IsUsable = isUsable;
                 Reason = reason;
                 WaitedMs = waitedMs;
-                WarmupTelemetryTrusted = warmupTelemetryTrusted;
+                WarmupMiniTrusted = warmupMiniTrusted;
                 WarmupTag = warmupTag;
                 Runtime = runtime;
             }
@@ -29,7 +29,7 @@ namespace WTFnetApp
             public bool IsUsable { get; }
             public string Reason { get; }
             public double WaitedMs { get; }
-            public bool WarmupTelemetryTrusted { get; }
+            public bool WarmupMiniTrusted { get; }
             public string WarmupTag { get; }
             public ProbeCandidateRuntimeData Runtime { get; }
         }
@@ -41,7 +41,6 @@ namespace WTFnetApp
         public StartupSpeedifyTunnelProbe(
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
-            Func<StartupDecisionSnapshot> getWarmupTelemetry,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
             CandidateUsableEvaluator isCandidateUsableForMeasurement,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
@@ -55,19 +54,13 @@ namespace WTFnetApp
                 timing,
                 getFastPingState,
                 getShortWindowSnapshot,
-                getWarmupTelemetry,
                 getMiniSpeedifyMiniSnap,
                 isCandidateUsableForMeasurement,
-                startupLogger,
-                appendNote,
-                log);
+                startupLogger);
 
             measurement = new StartupSpeedifyMeasurement(
-                getFastPingState,
                 getShortWindowSnapshot,
-                getWarmupTelemetry,
                 getMiniSpeedifyMiniSnap,
-                isCandidateUsableForMeasurement,
                 captureProbeAsync,
                 timing,
                 startupLogger,
@@ -95,13 +88,14 @@ namespace WTFnetApp
                     false,
                     warmupResult.Reason,
                     warmupResult.WaitedMs,
-                    warmupResult.WarmupTelemetryTrusted,
+                    warmupResult.WarmupMiniTrusted,
                     warmupResult.WarmupTag,
                     null);
             }
 
             ProbeCandidateRuntimeData runtime = await measurement.RunAsync(
                 candidate,
+                activationRequestedUtc,
                 rawScore,
                 leaderScore,
                 timeBucketKey,
@@ -111,7 +105,7 @@ namespace WTFnetApp
                 true,
                 warmupResult.Reason,
                 warmupResult.WaitedMs,
-                warmupResult.WarmupTelemetryTrusted,
+                warmupResult.WarmupMiniTrusted,
                 warmupResult.WarmupTag,
                 runtime);
         }
@@ -123,158 +117,161 @@ namespace WTFnetApp
             bool isUsable,
             string reason,
             double waitedMs,
-            bool warmupTelemetryTrusted,
+            bool warmupMiniTrusted,
             string warmupTag)
         {
             IsUsable = isUsable;
             Reason = reason;
             WaitedMs = waitedMs;
-            WarmupTelemetryTrusted = warmupTelemetryTrusted;
+            WarmupMiniTrusted = warmupMiniTrusted;
             WarmupTag = warmupTag;
         }
 
         public bool IsUsable { get; }
         public string Reason { get; }
         public double WaitedMs { get; }
-        public bool WarmupTelemetryTrusted { get; }
+        public bool WarmupMiniTrusted { get; }
         public string WarmupTag { get; }
     }
 
-    internal sealed class SpeedifyWarmupWindowBuffer
+    internal sealed class StartupMiniSnapBuffer
     {
-        private readonly List<StartupDecisionSnapshot> samples = new List<StartupDecisionSnapshot>();
-        private readonly int minimumSamples;
+        private readonly int minimumFreshSamples;
         private readonly double minimumSpreadMs;
+        private readonly DateTime activationRequestedUtc;
+        private readonly List<MiniSpeedifyMiniSnap> samples = new List<MiniSpeedifyMiniSnap>();
         private DateTime firstAcceptedUtc = DateTime.MinValue;
         private DateTime lastAcceptedUtc = DateTime.MinValue;
-        private int usableSampleCount;
+        private bool sawConnectedEvidence;
+        private int connectedEvidenceCount;
+        private bool sawDualLinkEvidence;
+        private bool sawCongestion;
+        private double tunnelLatencySum;
+        private int tunnelLatencyCount;
+        private double aggLatencySum;
+        private int aggLatencyCount;
+        private double aggJitterSum;
+        private int aggJitterCount;
 
-        public SpeedifyWarmupWindowBuffer(int minimumSamples, double minimumSpreadMs)
+        public StartupMiniSnapBuffer(int minimumFreshSamples, double minimumSpreadMs, DateTime activationRequestedUtc)
         {
-            this.minimumSamples = Math.Max(1, minimumSamples);
+            this.minimumFreshSamples = Math.Max(1, minimumFreshSamples);
             this.minimumSpreadMs = Math.Max(0.0, minimumSpreadMs);
+            this.activationRequestedUtc = activationRequestedUtc;
         }
 
-        public int FreshSampleCount => samples.Count;
-        public bool MeetsMinimum => samples.Count >= minimumSamples;
-        public int UsableSampleCount => usableSampleCount;
-        public double SampleDurationMs =>
+        public int SampleCount => samples.Count;
+        public DateTime FirstAcceptedUtc => firstAcceptedUtc;
+        public DateTime LastAcceptedUtc => lastAcceptedUtc;
+        public double SampleSpreadMs =>
             firstAcceptedUtc != DateTime.MinValue &&
             lastAcceptedUtc != DateTime.MinValue &&
             lastAcceptedUtc > firstAcceptedUtc
                 ? (lastAcceptedUtc - firstAcceptedUtc).TotalMilliseconds
                 : 0.0;
-        public bool HasGoodTimeSpread => SampleDurationMs >= minimumSpreadMs;
-        public bool StableEnough => samples.Count > 0 && usableSampleCount >= (samples.Count * 0.60);
-        public double AverageAggregateLatencyMs => Average(s => s.AggregateLatencyMs);
-        public double AverageAggregateJitterMs => Average(s => s.AggregateJitterMs);
-        public double AverageQueueDelayMs => Average(s => s.QueueDelayMs);
-        public bool AnyCongestion => samples.Any(s => s.AggregateCongested || s.DownloadCongested || s.UploadCongested);
-
-        public bool AddIfFresh(StartupDecisionSnapshot snapshot, bool isUsable, out string ignoredReason)
+        public bool HasConnectedEvidence => sawConnectedEvidence;
+        public bool HasDualLinkEvidence => sawDualLinkEvidence;
+        public bool HasCongestionEvidence => sawCongestion;
+        public double AverageTunnelLatencyMs => tunnelLatencyCount > 0 ? tunnelLatencySum / tunnelLatencyCount : -1;
+        public double AverageAggLatencyMs => aggLatencyCount > 0 ? aggLatencySum / aggLatencyCount : -1;
+        public double AverageAggJitterMs => aggJitterCount > 0 ? aggJitterSum / aggJitterCount : -1;
+        public bool HasMeaningfulSignal => sawConnectedEvidence || AverageTunnelLatencyMs > 0 || AverageAggLatencyMs > 0;
+        public bool HasMinimumSamples => SampleCount >= minimumFreshSamples;
+        public bool HasMinimumSpread => SampleSpreadMs >= minimumSpreadMs;
+        public bool IsSufficientForStartupTrust
         {
-            ignoredReason = null;
-
-            if (snapshot == null || !snapshot.HasFreshTelemetry)
+            get
             {
-                ignoredReason = "missing-or-not-fresh";
-                return false;
+                bool strongLatencySignal =
+                    AverageTunnelLatencyMs > 0 ||
+                    AverageAggLatencyMs > 0;
+
+                bool repeatedConnectedEvidence = connectedEvidenceCount >= 2;
+
+                return HasMinimumSamples &&
+                       HasMinimumSpread &&
+                       HasMeaningfulSignal &&
+                       (repeatedConnectedEvidence || strongLatencySignal);
             }
-
-            if (snapshot.TimeUtc == DateTime.MinValue)
-            {
-                ignoredReason = "missing-snapshot-time";
-                return false;
-            }
-
-            if (lastAcceptedUtc != DateTime.MinValue && snapshot.TimeUtc == lastAcceptedUtc)
-            {
-                ignoredReason = "sticky-same-timestamp";
-                return false;
-            }
-
-            if (lastAcceptedUtc != DateTime.MinValue && snapshot.TimeUtc < lastAcceptedUtc)
-            {
-                ignoredReason = "older-timestamp";
-                return false;
-            }
-
-            if (firstAcceptedUtc == DateTime.MinValue)
-                firstAcceptedUtc = snapshot.TimeUtc;
-
-            lastAcceptedUtc = snapshot.TimeUtc;
-            samples.Add(snapshot);
-
-            if (isUsable)
-                usableSampleCount++;
-
-            return true;
         }
 
-        private double Average(Func<StartupDecisionSnapshot, double> selector)
+        public bool TryAdd(MiniSpeedifyMiniSnap miniSnap)
         {
-            if (samples.Count == 0)
-                return -1;
+            if (miniSnap == null || !miniSnap.IsFresh || miniSnap.TimeUtc == DateTime.MinValue)
+                return false;
 
-            double sum = 0;
-            int count = 0;
-            for (int i = 0; i < samples.Count; i++)
+            if (activationRequestedUtc != DateTime.MinValue && miniSnap.TimeUtc <= activationRequestedUtc)
+                return false;
+
+            if (lastAcceptedUtc != DateTime.MinValue && miniSnap.TimeUtc <= lastAcceptedUtc)
+                return false;
+
+            if (firstAcceptedUtc == DateTime.MinValue)
+                firstAcceptedUtc = miniSnap.TimeUtc;
+            lastAcceptedUtc = miniSnap.TimeUtc;
+            samples.Add(miniSnap);
+
+            bool connectedEvidence =
+                miniSnap.ActiveConnectionCount > 0 ||
+                miniSnap.ReportedLatencyMs > 0 ||
+                miniSnap.AggregateLatencyMs > 0 ||
+                miniSnap.TunnelAggregatePresent;
+
+            sawConnectedEvidence = sawConnectedEvidence || connectedEvidence;
+            if (connectedEvidence)
+                connectedEvidenceCount++;
+            sawDualLinkEvidence = sawDualLinkEvidence || miniSnap.ActiveConnectionCount >= 2;
+            sawCongestion = sawCongestion || miniSnap.AggregateCongested;
+
+            if (miniSnap.ReportedLatencyMs > 0)
             {
-                double value = selector(samples[i]);
-                if (value >= 0)
-                {
-                    sum += value;
-                    count++;
-                }
+                tunnelLatencySum += miniSnap.ReportedLatencyMs;
+                tunnelLatencyCount++;
             }
 
-            return count > 0 ? sum / count : -1;
+            if (miniSnap.AggregateLatencyMs > 0)
+            {
+                aggLatencySum += miniSnap.AggregateLatencyMs;
+                aggLatencyCount++;
+            }
+
+            if (miniSnap.AggregateJitterMs > 0)
+            {
+                aggJitterSum += miniSnap.AggregateJitterMs;
+                aggJitterCount++;
+            }
+
+            return true;
         }
     }
 
     internal sealed class StartupSpeedifyWarmup
     {
-        private static readonly HashSet<string> SpeedifyWarmupSoftReasons =
-            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-            {
-                "stale route state",
-                "missing measurement telemetry",
-                "no fresh measurement telemetry",
-                "confidence too low"
-            };
-
         private readonly StartupProbeTimingConfig timing;
         private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
-        private readonly Func<StartupDecisionSnapshot> getWarmupTelemetry;
         private readonly Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap;
         private readonly CandidateUsableEvaluator isCandidateUsableForMeasurement;
         private readonly StartupLogger startupLogger;
-        private readonly Func<string, string, string> appendNote;
-        private readonly Action<string> log;
         private const int StartupRequiredConsecutiveUsableReadings = 3;
-        private static readonly TimeSpan StartupTunnelHardBuffer = TimeSpan.FromSeconds(10);
+        private static readonly TimeSpan StartupTunnelHardBuffer = TimeSpan.FromSeconds(4);
+        private const int WarmupMiniMinimumFreshSamples = 3;
+        private const double WarmupMiniMinimumSpreadMs = 1200.0;
 
         public StartupSpeedifyWarmup(
             StartupProbeTimingConfig timing,
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
-            Func<StartupDecisionSnapshot> getWarmupTelemetry,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
             CandidateUsableEvaluator isCandidateUsableForMeasurement,
-            StartupLogger startupLogger,
-            Func<string, string, string> appendNote,
-            Action<string> log)
+            StartupLogger startupLogger)
         {
             this.timing = timing;
             this.getFastPingState = getFastPingState;
             this.getShortWindowSnapshot = getShortWindowSnapshot;
-            this.getWarmupTelemetry = getWarmupTelemetry;
             this.getMiniSpeedifyMiniSnap = getMiniSpeedifyMiniSnap;
             this.isCandidateUsableForMeasurement = isCandidateUsableForMeasurement;
             this.startupLogger = startupLogger;
-            this.appendNote = appendNote;
-            this.log = log;
         }
 
         public async Task<StartupSpeedifyWarmupResult> RunAsync(
@@ -292,68 +289,40 @@ namespace WTFnetApp
                 return new StartupSpeedifyWarmupResult(immediateUsable, immediateReason, 0.0, false, "warmup-skipped");
             }
 
-            TimeSpan fixedSettle = timing.RoutedFixedSettleDuration;
-            if (fixedSettle < TimeSpan.Zero)
-                fixedSettle = TimeSpan.Zero;
-
-            TimeSpan check1 = timing.RoutedStableGateCheck1;
-            TimeSpan check2 = timing.RoutedStableGateCheck2;
-            TimeSpan forceStart = timing.RoutedStableGateForceStart;
-
-            if (check1 < TimeSpan.Zero)
-                check1 = TimeSpan.Zero;
-            if (check2 < check1)
-                check2 = check1;
-            if (forceStart < check2)
-                forceStart = check2;
-
-            const int minimumFreshSamples = 4;
-            const double minimumSpreadMs = 1500.0;
+            TimeSpan fixedSettle = TimeSpan.FromSeconds(10);
+            TimeSpan check1 = TimeSpan.FromSeconds(4);
+            TimeSpan check2 = TimeSpan.FromSeconds(6);
+            TimeSpan forceStart = TimeSpan.FromSeconds(8);
 
             DateTime warmupStartUtc = DateTime.UtcNow;
             DateTime fixedSettleEndUtc = warmupStartUtc + fixedSettle;
             DateTime gateStartUtc = fixedSettleEndUtc;
             DateTime gateCheck1Utc = gateStartUtc + check1;
             DateTime gateCheck2Utc = gateStartUtc + check2;
-            TimeSpan hardBuffer = StartupTunnelHardBuffer;
-            if (forceStart < hardBuffer)
-                forceStart = hardBuffer;
-
             DateTime gateForceUtc = gateStartUtc + forceStart;
             DateTime nextWarmupLogUtc = warmupStartUtc;
 
             TimeSpan pollInterval = timing.SpeedifyTelemetryCheckInterval > TimeSpan.Zero
                 ? timing.SpeedifyTelemetryCheckInterval
                 : TimeSpan.FromMilliseconds(250);
-
-            SpeedifyWarmupWindowBuffer buffer = new SpeedifyWarmupWindowBuffer(minimumFreshSamples, minimumSpreadMs);
+            StartupMiniSnapBuffer miniBuffer = new StartupMiniSnapBuffer(
+                WarmupMiniMinimumFreshSamples,
+                WarmupMiniMinimumSpreadMs,
+                activationRequestedUtc);
 
             while (DateTime.UtcNow < fixedSettleEndUtc)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-
-                StartupDecisionSnapshot telemetry = getWarmupTelemetry != null
-                    ? getWarmupTelemetry()
-                    : null;
-
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
-                buffer.AddIfFresh(telemetry, usableNow, out _);
+                MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap?.Invoke();
+                bool acceptedMini = miniBuffer.TryAdd(miniSnap);
+                if (!acceptedMini)
+                    miniSnap = null;
 
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
                     ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot();
-                    MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap != null
-                        ? getMiniSpeedifyMiniSnap()
-                        : null;
-
-                    startupLogger?.LogProbeRow(
-                        candidate,
-                        "warmup",
-                        warmupSnapshot,
-                        buffer,
-                        minimumFreshSamples,
-                        reasonNow == "usable" ? "-" : reasonNow,
-                        miniSnap);
+                    startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, reasonNow == "usable" ? "-" : reasonNow, miniSnap, logMini: true);
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
@@ -370,11 +339,12 @@ namespace WTFnetApp
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                StartupDecisionSnapshot telemetry = getWarmupTelemetry?.Invoke();
-
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
-                buffer.AddIfFresh(telemetry, usableNow, out _);
                 consecutiveUsableReadings = usableNow ? consecutiveUsableReadings + 1 : 0;
+                MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap?.Invoke();
+                bool acceptedMini = miniBuffer.TryAdd(miniSnap);
+                if (!acceptedMini)
+                    miniSnap = null;
 
                 if (consecutiveUsableReadings > bestConsecutiveUsableReadings)
                     bestConsecutiveUsableReadings = consecutiveUsableReadings;
@@ -384,10 +354,7 @@ namespace WTFnetApp
                 bool stableNow =
                     hardBufferComplete &&
                     usableNow &&
-                    consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings &&
-                    buffer.MeetsMinimum &&
-                    buffer.HasGoodTimeSpread &&
-                    buffer.StableEnough;
+                    consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings;
 
                 if (!check1Done && nowUtc >= gateCheck1Utc)
                 {
@@ -399,13 +366,11 @@ namespace WTFnetApp
                             "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-" +
                             Math.Max(StartupTunnelHardBuffer.TotalSeconds, check1.TotalSeconds).ToString("0.#") + "s";
 
-                        startupLogger?.LogEvent(candidate, "WARMUP_TRUST_ESTABLISHED");
-
                         return new StartupSpeedifyWarmupResult(
                             true,
                             reasonNow,
                             Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
-                            true,
+                            miniBuffer.IsSufficientForStartupTrust,
                             warmupTag);
                     }
                 }
@@ -420,13 +385,11 @@ namespace WTFnetApp
                             "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-" +
                             Math.Max(StartupTunnelHardBuffer.TotalSeconds, check2.TotalSeconds).ToString("0.#") + "s";
 
-                        startupLogger?.LogEvent(candidate, "WARMUP_TRUST_ESTABLISHED");
-
                         return new StartupSpeedifyWarmupResult(
                             true,
                             reasonNow,
                             Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
-                            true,
+                            miniBuffer.IsSufficientForStartupTrust,
                             warmupTag);
                     }
                 }
@@ -434,24 +397,13 @@ namespace WTFnetApp
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
                     ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot();
-                    MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap != null
-                        ? getMiniSpeedifyMiniSnap()
-                        : null;
-
                     string warmupReason = reasonNow == "usable"
                         ? (consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings
                             ? "-"
                             : "usable-streak-" + consecutiveUsableReadings + "/" + StartupRequiredConsecutiveUsableReadings)
                         : reasonNow;
 
-                    startupLogger?.LogProbeRow(
-                        candidate,
-                        "warmup",
-                        warmupSnapshot,
-                        buffer,
-                        minimumFreshSamples,
-                        warmupReason,
-                        miniSnap);
+                    startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, warmupReason, miniSnap, logMini: true);
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
@@ -469,50 +421,40 @@ namespace WTFnetApp
                               StartupRequiredConsecutiveUsableReadings;
             }
 
-            bool warmupTelemetryTrusted = buffer.MeetsMinimum && buffer.HasGoodTimeSpread && buffer.StableEnough;
-
             string finalTag =
                 "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-auto-" +
                 forceStart.TotalSeconds.ToString("0.#") + "s";
+            bool warmupMiniTrusted = miniBuffer.IsSufficientForStartupTrust;
 
-            if (!buffer.MeetsMinimum)
-                finalTag = appendNote(finalTag, "speedify-low-confidence-insufficient-samples");
-            if (!buffer.HasGoodTimeSpread)
-                finalTag = appendNote(finalTag, "speedify-low-confidence-poor-time-spread");
-            if (!buffer.StableEnough)
-                finalTag = appendNote(finalTag, "speedify-unstable-window");
-            if (buffer.AnyCongestion)
-                finalTag = appendNote(finalTag, "speedify-congestion-observed");
-
-            if (!string.Equals(finalReason, "usable", StringComparison.OrdinalIgnoreCase) &&
-                !SpeedifyWarmupSoftReasons.Contains(finalReason))
-            {
-                finalTag = appendNote(
-                    finalTag,
-                    "warmup-hard-failure-" + finalReason.Replace(' ', '-'));
-            }
-
-            if (warmupTelemetryTrusted)
-            {
-                startupLogger?.LogEvent(candidate, "STABILIZATION_REACHED (warmup-stable-gate)");
-                startupLogger?.LogEvent(candidate, "WARMUP_TRUST_ESTABLISHED");
-            }
-            else
-            {
-                startupLogger?.LogEvent(candidate, "STABILIZATION_TIMEOUT");
-            }
+            if (!miniBuffer.HasMinimumSamples)
+                finalTag = AppendTag(finalTag, "mini-insufficient-samples");
+            if (!miniBuffer.HasMinimumSpread)
+                finalTag = AppendTag(finalTag, "mini-poor-time-spread");
+            if (!miniBuffer.HasMeaningfulSignal)
+                finalTag = AppendTag(finalTag, "mini-no-meaningful-signal");
+            if (miniBuffer.HasCongestionEvidence)
+                finalTag = AppendTag(finalTag, "mini-congestion-observed");
 
             return new StartupSpeedifyWarmupResult(
                 finalUsable,
                 finalReason,
                 Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
-                warmupTelemetryTrusted,
+                warmupMiniTrusted,
                 finalTag);
         }
 
-        private static string FormatMetric(double value)
+        private static string AppendTag(string existing, string tag)
         {
-            return value > 0 ? value.ToString("0.0") : "--";
+            if (string.IsNullOrWhiteSpace(tag))
+                return existing;
+
+            if (string.IsNullOrWhiteSpace(existing))
+                return tag;
+
+            if (existing.IndexOf(tag, StringComparison.OrdinalIgnoreCase) >= 0)
+                return existing;
+
+            return existing + " | " + tag;
         }
 
         private ProbeCandidateRuntimeData BuildWarmupFastPingSnapshot()
@@ -542,11 +484,8 @@ namespace WTFnetApp
 
     internal sealed class StartupSpeedifyMeasurement
     {
-        private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
-        private readonly Func<StartupDecisionSnapshot> getWarmupTelemetry;
         private readonly Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap;
-        private readonly CandidateUsableEvaluator isCandidateUsableForMeasurement;
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly StartupProbeTimingConfig timing;
         private readonly StartupLogger startupLogger;
@@ -555,21 +494,17 @@ namespace WTFnetApp
         private readonly Action<string> log;
 
         private const int MainWindowSliceCount = 10;
-        private const double SpeedifyFastPingStableGapPercentagePoints = 4.0;
-        private const double FastPingReferenceMinimumConfidence = 0.50;
-        private const double FastPingReferenceMaximumLossRate = 0.10;
         private static readonly TimeSpan StabilizationObserveSliceDuration = TimeSpan.FromMilliseconds(1500);
+        private const int PhaseMiniMinimumFreshSamples = 3;
+        private const double PhaseMiniMinimumSpreadMs = 900.0;
 
         // =========================
         // CONSTRUCTOR
         // =========================
 
         public StartupSpeedifyMeasurement(
-            Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
-            Func<StartupDecisionSnapshot> getWarmupTelemetry,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
-            CandidateUsableEvaluator isCandidateUsableForMeasurement,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             StartupProbeTimingConfig timing,
             StartupLogger startupLogger,
@@ -577,11 +512,8 @@ namespace WTFnetApp
             Func<string, string, string> appendNote,
             Action<string> log)
         {
-            this.getFastPingState = getFastPingState;
             this.getShortWindowSnapshot = getShortWindowSnapshot;
-            this.getWarmupTelemetry = getWarmupTelemetry;
             this.getMiniSpeedifyMiniSnap = getMiniSpeedifyMiniSnap;
-            this.isCandidateUsableForMeasurement = isCandidateUsableForMeasurement;
             this.captureProbeAsync = captureProbeAsync;
             this.timing = timing;
             this.startupLogger = startupLogger;
@@ -592,6 +524,7 @@ namespace WTFnetApp
 
         public async Task<ProbeCandidateRuntimeData> RunAsync(
                 ProbeCandidateDefinition candidate,
+                DateTime activationRequestedUtc,
                 ProbeScoreResult rawScore,
                 ProbeScoreResult leaderScore,
                 string timeBucketKey,
@@ -609,11 +542,15 @@ namespace WTFnetApp
             bool stabilizationReached = false;
             bool stabilizationTimedOut = false;
             string stabilizationReason = string.Empty;
-            const int minimumFreshSpeedifySnapshots = 4;
-
-            SpeedifyWarmupWindowBuffer telemetryWindow = new SpeedifyWarmupWindowBuffer(minimumFreshSpeedifySnapshots, 0.0);
-            bool isSpeedifyCandidate = candidate != null && candidate.Kind == ProbeCandidateKind.Speedify;
-            double bestFastPingLossObservedRate = -1;
+            StartupMiniSnapBuffer phaseMiniBuffer = new StartupMiniSnapBuffer(
+                PhaseMiniMinimumFreshSamples,
+                PhaseMiniMinimumSpreadMs,
+                activationRequestedUtc);
+            double previousLossRate = -1;
+            double bestValidFastPingLossRate = -1;
+            int flattenedLossConfirmations = 0;
+            int nearFastPingFloorConfirmations = 0;
+            int flatOrUpwardConfirmations = 0;
 
             for (int i = 0; i < stabilizationSlices.Count; i++)
             {
@@ -661,55 +598,70 @@ namespace WTFnetApp
                     return stabilizationRuntime;
                 }
 
-                if (isSpeedifyCandidate)
+                stabilizationTracker.Observe(sliceRuntime.AvgLossRate, out double deltaPercentagePoints);
+                bool fastPingStableQuality = MeetsStabilizationQualityGuardrails(sliceRuntime);
+                bool catastrophicSlice = ProbeScoring.TryGetMeasuredCatastrophicStopReason(sliceRuntime, out _);
+
+                if (sliceRuntime.AvgLossRate >= 0 && previousLossRate >= 0)
                 {
-                    StartupDecisionSnapshot telemetry = getWarmupTelemetry != null ? getWarmupTelemetry() : null;
-                    bool usableNow = isCandidateUsableForMeasurement(candidate, out _);
-                    bool accepted = telemetryWindow.AddIfFresh(telemetry, usableNow, out string ignoreReason);
-                    startupLogger.LogTelemetrySnapshotDecision(candidate, telemetry, accepted, ignoreReason);
+                    double lossDropPercentagePoints = (previousLossRate - sliceRuntime.AvgLossRate) * 100.0;
+                    bool flattenedLossQualified = lossDropPercentagePoints >= 0.0 && lossDropPercentagePoints < 3.0;
+                    bool flatOrUpwardQualified = lossDropPercentagePoints <= 0.5;
+
+                    flattenedLossConfirmations = (flattenedLossQualified && fastPingStableQuality && !catastrophicSlice)
+                        ? flattenedLossConfirmations + 1
+                        : 0;
+                    flatOrUpwardConfirmations = (flatOrUpwardQualified && fastPingStableQuality && !catastrophicSlice)
+                        ? flatOrUpwardConfirmations + 1
+                        : 0;
+
+                    if (bestValidFastPingLossRate >= 0 && bestValidFastPingLossRate <= 0.15)
+                    {
+                        // Both values here come from live startup-time observations:
+                        // tunnel slice loss and a rolling live FastPing floor approximation.
+                        bool nearFastPingFloorQualified =
+                            Math.Abs(sliceRuntime.AvgLossRate - bestValidFastPingLossRate) <= 0.03;
+                        nearFastPingFloorConfirmations = (nearFastPingFloorQualified && fastPingStableQuality && !catastrophicSlice)
+                            ? nearFastPingFloorConfirmations + 1
+                            : 0;
+                    }
+                    else
+                    {
+                        nearFastPingFloorConfirmations = 0;
+                    }
                 }
 
-                bool stableThisSlice = stabilizationTracker.Observe(sliceRuntime.AvgLossRate, out double deltaPercentagePoints);
-                bool closeToFastPingStable = TryIsSpeedifyLossCloseToFastPing(
-                    isSpeedifyCandidate,
-                    sliceRuntime,
-                    telemetryWindow,
-                    ref bestFastPingLossObservedRate,
-                    out double candidateLossRate,
-                    out double currentFastPingLossRate,
-                    out double bestFastPingLossRate,
-                    out double fastPingGapPercentagePoints,
-                    out double fastPingConfidence,
-                    out double fastPingSpikeDensity,
-                    out double fastPingAvgJitterMs,
-                    out bool fastPingReferenceEligible);
+                previousLossRate = sliceRuntime.AvgLossRate >= 0 ? sliceRuntime.AvgLossRate : previousLossRate;
+                UpdateBestValidFastPingLoss(ref bestValidFastPingLossRate);
 
                 string stabilizeNote = double.IsNaN(deltaPercentagePoints)
                     ? "-"
                     : "delta=" + deltaPercentagePoints.ToString("0.0") + "pp";
 
-                MiniSpeedifyMiniSnap stabilizeMiniSnap = getMiniSpeedifyMiniSnap != null
-                    ? getMiniSpeedifyMiniSnap()
-                    : null;
+                MiniSpeedifyMiniSnap stabilizeMiniSnap = getMiniSpeedifyMiniSnap?.Invoke();
+                bool acceptedStabilizeMini = phaseMiniBuffer.TryAdd(stabilizeMiniSnap);
+                if (!acceptedStabilizeMini)
+                    stabilizeMiniSnap = null;
+                ApplyStartupMiniSnapContext(sliceRuntime, stabilizeMiniSnap);
+                startupLogger?.LogStartupPhase(candidate, "stabilize", sliceRuntime, stabilizeNote, stabilizeMiniSnap, logMini: true);
 
-                startupLogger?.LogProbeRow(
-                    candidate,
-                    "stabilize",
-                    sliceRuntime,
-                    telemetryWindow,
-                    minimumFreshSpeedifySnapshots,
-                    stabilizeNote,
-                    stabilizeMiniSnap);
+                if (!fastPingStableQuality || catastrophicSlice)
+                    continue;
 
-                if (stableThisSlice || closeToFastPingStable)
+                bool flattenedPathSatisfied = flattenedLossConfirmations >= 3;
+                bool nearFastPingFloorPathSatisfied = nearFastPingFloorConfirmations >= 3;
+                bool flatOrUpwardPathSatisfied = flatOrUpwardConfirmations >= 3;
+
+                if (flattenedPathSatisfied || nearFastPingFloorPathSatisfied || flatOrUpwardPathSatisfied)
                 {
                     stabilizationReached = true;
-                    stabilizationReason = closeToFastPingStable ? "loss-close-to-fastping" : "loss-flattened";
+                    stabilizationReason = flattenedPathSatisfied
+                        ? "loss-flattened"
+                        : nearFastPingFloorPathSatisfied
+                            ? "loss-near-live-floor"
+                            : "loss-flat-or-upward";
 
-                    if (!closeToFastPingStable)
-                        startupLogger?.LogEvent(candidate, "LOSS_CURVE_FLATTENED");
                     startupLogger?.LogEvent(candidate, "STABILIZATION_REACHED (" + stabilizationReason + ")");
-
                     break;
                 }
             }
@@ -730,9 +682,8 @@ namespace WTFnetApp
             double adjustedLossWeightedSum = 0.0;
             double adjustedLossDurationSum = 0.0;
             StartupLossGateTracker startupLossGate = new StartupLossGateTracker(candidate, log);
-            SpeedifyWarmupWindowBuffer postStableTelemetryWindow = new SpeedifyWarmupWindowBuffer(minimumFreshSpeedifySnapshots, 0.0);
-            bool postStableTelemetryExtensionHappened = false;
-            double postStableTelemetryExtraWaitMs = 0.0;
+            bool postStableMiniExtensionHappened = false;
+            double postStableMiniExtraWaitMs = 0.0;
 
             for (int i = 0; i < measuredSlices.Count; i++)
             {
@@ -752,32 +703,12 @@ namespace WTFnetApp
                 sliceRuntime.MeasurementStoppedEarly = false;
                 sliceRuntime.Notes = appendNote(sliceRuntime.Notes, "measured-post-stable");
 
-                if (isSpeedifyCandidate)
-                {
-                    StartupDecisionSnapshot telemetry = getWarmupTelemetry != null ? getWarmupTelemetry() : null;
-                    bool usableNow = isCandidateUsableForMeasurement(candidate, out _);
-                    bool accepted = postStableTelemetryWindow.AddIfFresh(telemetry, usableNow, out string ignoreReason);
-                    startupLogger.LogTelemetrySnapshotDecision(candidate, telemetry, accepted, ignoreReason);
-                    startupLogger.LogPostStableTelemetryProgress(
-                        candidate,
-                        postStableTelemetryWindow.FreshSampleCount,
-                        minimumFreshSpeedifySnapshots,
-                        sliceRuntime.TunnelConnected,
-                        false);
-                }
-
-                MiniSpeedifyMiniSnap postStableMiniSnap = getMiniSpeedifyMiniSnap != null
-                    ? getMiniSpeedifyMiniSnap()
-                    : null;
-
-                startupLogger?.LogProbeRow(
-                    candidate,
-                    "post-stable",
-                    sliceRuntime,
-                    postStableTelemetryWindow,
-                    minimumFreshSpeedifySnapshots,
-                    "-",
-                    postStableMiniSnap);
+                MiniSpeedifyMiniSnap postStableMiniSnap = getMiniSpeedifyMiniSnap?.Invoke();
+                bool acceptedPostStableMini = phaseMiniBuffer.TryAdd(postStableMiniSnap);
+                if (!acceptedPostStableMini)
+                    postStableMiniSnap = null;
+                ApplyStartupMiniSnapContext(sliceRuntime, postStableMiniSnap);
+                startupLogger?.LogStartupPhase(candidate, "post-stable", sliceRuntime, "-", postStableMiniSnap, logMini: true);
 
                 startupLossGate.Observe(sliceRuntime.AvgLossRate, measuredBeforeSlice, false);
                 AccumulateStartupAdjustedLoss(
@@ -824,13 +755,13 @@ namespace WTFnetApp
                     startupLogger?.LogEvent(candidate, "DISCARDED (" + mainStopReason + ")");
                     postStableMeasurementEndUtc = DateTime.UtcNow;
                     double postStableMs = postStableMeasurementStartUtc.HasValue
-                        ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableTelemetryExtraWaitMs)
+                        ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableMiniExtraWaitMs)
                         : -1;
                     startupLogger?.RegisterCandidateEvaluation(
                         candidate,
                         -1,
                         postStableMs,
-                        postStableTelemetryExtensionHappened,
+                        postStableMiniExtensionHappened,
                         aggregateRuntime,
                         null);
                     startupLogger.LogCandidateSummaryFromMeasurement(
@@ -839,8 +770,8 @@ namespace WTFnetApp
                         stabilizationReason,
                         postStableMeasurementStartUtc,
                         postStableMeasurementEndUtc,
-                        postStableTelemetryExtensionHappened,
-                        postStableTelemetryExtraWaitMs,
+                        postStableMiniExtensionHappened,
+                        postStableMiniExtraWaitMs,
                         -1,
                         aggregateRuntime,
                         null,
@@ -849,137 +780,8 @@ namespace WTFnetApp
                 }
             }
 
-            if (aggregateRuntime != null && isSpeedifyCandidate)
-            {
-                while (aggregateRuntime.TunnelConnected && postStableTelemetryWindow.FreshSampleCount < minimumFreshSpeedifySnapshots)
-                {
-                    postStableTelemetryExtensionHappened = true;
-
-                    startupLogger?.LogEvent(candidate, "EXTENSION STARTED (TELEMETRY WAIT)");
-
-                    TimeSpan waitSlice = StabilizationObserveSliceDuration;
-                    DateTime waitSliceStartUtc = DateTime.UtcNow;
-
-                    ProbeCandidateRuntimeData waitRuntime = await captureProbeAsync(candidate, TimeSpan.Zero, waitSlice);
-                    if (waitRuntime == null)
-                        break;
-
-                    waitRuntime.Candidate = waitRuntime.Candidate ?? candidate;
-                    waitRuntime.TimeBucketKey = timeBucketKey;
-                    waitRuntime.ReachedUsableState = true;
-                    waitRuntime.MeasurementStarted = true;
-                    waitRuntime.MeasurementCompleted = false;
-                    waitRuntime.MeasurementStoppedEarly = false;
-                    waitRuntime.Notes = appendNote(waitRuntime.Notes, "measured-post-stable-telemetry-wait");
-
-                    startupLossGate.Observe(waitRuntime.AvgLossRate, accumulatedMeasured, true);
-                    AccumulateStartupAdjustedLoss(
-                        waitRuntime,
-                        waitSlice,
-                        startupLossGate.IsValidated,
-                        ref adjustedLossWeightedSum,
-                        ref adjustedLossDurationSum);
-
-                    aggregateRuntime = mergeMeasuredRuntime(aggregateRuntime, waitRuntime, accumulatedMeasured, waitSlice);
-                    accumulatedMeasured += waitSlice;
-
-                    if (aggregateRuntime != null)
-                    {
-                        aggregateRuntime.Candidate = aggregateRuntime.Candidate ?? candidate;
-                        aggregateRuntime.TimeBucketKey = timeBucketKey;
-                        aggregateRuntime.ReachedUsableState = true;
-                        aggregateRuntime.MeasurementStarted = true;
-                        aggregateRuntime.MeasurementCompleted = false;
-                        aggregateRuntime.MeasurementStoppedEarly = false;
-                        aggregateRuntime.StabilizationReached = stabilizationReached;
-                        aggregateRuntime.StabilizationTimedOut = stabilizationTimedOut;
-                        aggregateRuntime.StabilizationReason = stabilizationReason;
-                        aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, "stabilization-phase-excluded-from-score");
-                        aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, stabilizationReason);
-                        aggregateRuntime.Notes = AppendLossStabilizationNote(aggregateRuntime.Notes, stabilizationReason);
-                        ApplyStartupAdjustedLossRate(aggregateRuntime, adjustedLossWeightedSum, adjustedLossDurationSum);
-                    }
-
-                    if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(aggregateRuntime, out string waitStopReason))
-                    {
-                        aggregateRuntime.MeasurementStoppedEarly = true;
-                        aggregateRuntime.MeasurementCompleted = false;
-                        aggregateRuntime.MeasurementStopReason = waitStopReason;
-                        aggregateRuntime.DiscardReason = waitStopReason;
-                        aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, waitStopReason);
-
-                        startupLogger?.LogEvent(candidate, "DISCARDED (" + waitStopReason + ")");
-                        postStableMeasurementEndUtc = DateTime.UtcNow;
-                        postStableTelemetryExtraWaitMs += Math.Max(0.0, (DateTime.UtcNow - waitSliceStartUtc).TotalMilliseconds);
-
-                        double postStableMs = postStableMeasurementStartUtc.HasValue
-                            ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableTelemetryExtraWaitMs)
-                            : -1;
-
-                        startupLogger?.RegisterCandidateEvaluation(
-                            candidate,
-                            -1,
-                            postStableMs,
-                            postStableTelemetryExtensionHappened,
-                            aggregateRuntime,
-                            null);
-
-                        startupLogger.LogCandidateSummaryFromMeasurement(
-                            candidate,
-                            stabilizationTimedOut,
-                            stabilizationReason,
-                            postStableMeasurementStartUtc,
-                            postStableMeasurementEndUtc,
-                            postStableTelemetryExtensionHappened,
-                            postStableTelemetryExtraWaitMs,
-                            -1,
-                            aggregateRuntime,
-                            null,
-                            "discarded-after-measurement");
-                        return aggregateRuntime;
-                    }
-
-                    StartupDecisionSnapshot telemetry = getWarmupTelemetry != null ? getWarmupTelemetry() : null;
-                    bool usableNow = isCandidateUsableForMeasurement(candidate, out _);
-                    bool accepted = postStableTelemetryWindow.AddIfFresh(telemetry, usableNow, out string ignoreReason);
-                    startupLogger.LogTelemetrySnapshotDecision(candidate, telemetry, accepted, ignoreReason);
-                    postStableTelemetryExtraWaitMs += Math.Max(0.0, (DateTime.UtcNow - waitSliceStartUtc).TotalMilliseconds);
-
-                    startupLogger.LogPostStableTelemetryProgress(
-                        candidate,
-                        postStableTelemetryWindow.FreshSampleCount,
-                        minimumFreshSpeedifySnapshots,
-                        aggregateRuntime.TunnelConnected,
-                        true);
-
-                    MiniSpeedifyMiniSnap telemetryWaitMiniSnap = getMiniSpeedifyMiniSnap != null
-                        ? getMiniSpeedifyMiniSnap()
-                        : null;
-
-                    startupLogger?.LogProbeRow(
-                        candidate,
-                        "post-stable",
-                        waitRuntime,
-                        postStableTelemetryWindow,
-                        minimumFreshSpeedifySnapshots,
-                        "telemetry-wait",
-                        telemetryWaitMiniSnap);
-                }
-
-                if (aggregateRuntime.TunnelConnected && postStableTelemetryWindow.FreshSampleCount >= minimumFreshSpeedifySnapshots)
-                {
-                    startupLogger?.LogEvent(candidate, "TELEMETRY_SUFFICIENT");
-                }
-                else if (aggregateRuntime.TunnelConnected && postStableTelemetryWindow.FreshSampleCount < minimumFreshSpeedifySnapshots)
-                {
-                    startupLogger.LogPostStableTelemetryProgress(
-                        candidate,
-                        postStableTelemetryWindow.FreshSampleCount,
-                        minimumFreshSpeedifySnapshots,
-                        true,
-                        true);
-                }
-            }
+            postStableMiniExtensionHappened = false;
+            postStableMiniExtraWaitMs = 0.0;
 
             bool promising = IsPromisingForExtension(aggregateRuntime, rawScore, leaderScore);
             if (promising && timing.PromisingCandidateExtensionDuration > TimeSpan.Zero)
@@ -1009,18 +811,12 @@ namespace WTFnetApp
 
                     ApplyStartupAdjustedLossRate(extensionRuntime, adjustedLossWeightedSum, adjustedLossDurationSum);
 
-                    MiniSpeedifyMiniSnap extensionMiniSnap = getMiniSpeedifyMiniSnap != null
-                        ? getMiniSpeedifyMiniSnap()
-                        : null;
-
-                    startupLogger?.LogProbeRow(
-                        candidate,
-                        "extension",
-                        extensionRuntime,
-                        postStableTelemetryWindow,
-                        minimumFreshSpeedifySnapshots,
-                        "promising-candidate",
-                        extensionMiniSnap);
+                    MiniSpeedifyMiniSnap extensionMiniSnap = getMiniSpeedifyMiniSnap?.Invoke();
+                    bool acceptedExtensionMini = phaseMiniBuffer.TryAdd(extensionMiniSnap);
+                    if (!acceptedExtensionMini)
+                        extensionMiniSnap = null;
+                    ApplyStartupMiniSnapContext(extensionRuntime, extensionMiniSnap);
+                    startupLogger?.LogStartupPhase(candidate, "extension", extensionRuntime, "promising-candidate", extensionMiniSnap, logMini: true);
 
                     if (ProbeScoring.TryGetMeasuredCatastrophicStopReason(extensionRuntime, out string extensionStopReason))
                     {
@@ -1060,16 +856,33 @@ namespace WTFnetApp
             if (aggregateRuntime == null)
                 return null;
 
+            StartupMiniConfidenceResult miniConfidence = ComputeStartupMiniConfidence(phaseMiniBuffer);
+            string miniConfidenceTag = "startup-mini-confidence=" + miniConfidence.Label;
+            aggregateRuntime.StartupSpeedifyTrusted = miniConfidence.Score >= 0.65;
+            aggregateRuntime.StartupSpeedifyConfidenceScore = miniConfidence.Score;
+            aggregateRuntime.StartupSpeedifyConfidenceLabel = BuildStartupSpeedifyConfidenceLabel(miniConfidence.Score);
+            aggregateRuntime.StartupSpeedifyBondedEvidence = phaseMiniBuffer.HasDualLinkEvidence;
+            aggregateRuntime.StartupSpeedifyCongestedEvidence = phaseMiniBuffer.HasCongestionEvidence;
+            aggregateRuntime.StartupSpeedifyFastPingAgreementDeltaMs = ComputeStartupSpeedifyAgreementDeltaMs(
+                phaseMiniBuffer.AverageAggLatencyMs,
+                aggregateRuntime.AvgPingMs);
+            aggregateRuntime.StartupSpeedifyFastPingAgreementGood =
+                aggregateRuntime.StartupSpeedifyFastPingAgreementDeltaMs >= 0 &&
+                aggregateRuntime.StartupSpeedifyFastPingAgreementDeltaMs <= 14.0;
+            aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, miniConfidenceTag);
+            aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, "startup-mini-confidence-score=" + miniConfidence.Score.ToString("0.00"));
+            startupLogger?.LogEvent(candidate, miniConfidenceTag);
+
             postStableMeasurementEndUtc = DateTime.UtcNow;
             double measuredPostStableMs = postStableMeasurementStartUtc.HasValue
-                ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableTelemetryExtraWaitMs)
+                ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableMiniExtraWaitMs)
                 : -1;
 
             startupLogger?.RegisterCandidateEvaluation(
                 candidate,
                 -1,
                 measuredPostStableMs,
-                postStableTelemetryExtensionHappened,
+                postStableMiniExtensionHappened,
                 aggregateRuntime,
                 null);
 
@@ -1172,69 +985,153 @@ namespace WTFnetApp
                     : -1;
         }
 
-        private bool TryIsSpeedifyLossCloseToFastPing(
-            bool isSpeedifyCandidate,
+        private static void ApplyStartupMiniSnapContext(
             ProbeCandidateRuntimeData runtime,
-            SpeedifyWarmupWindowBuffer telemetryWindow,
-            ref double bestFastPingLossObservedRate,
-            out double candidateLossRate,
-            out double currentFastPingLossRate,
-            out double bestFastPingLossRate,
-            out double fastPingGapPercentagePoints,
-            out double fastPingConfidence,
-            out double fastPingSpikeDensity,
-            out double fastPingAvgJitterMs,
-            out bool fastPingReferenceEligible)
+            MiniSpeedifyMiniSnap miniSnap)
         {
-            candidateLossRate = runtime?.AvgLossRate ?? -1;
-            currentFastPingLossRate = -1;
-            bestFastPingLossRate = bestFastPingLossObservedRate;
-            fastPingGapPercentagePoints = double.NaN;
-            fastPingConfidence = -1;
-            fastPingSpikeDensity = -1;
-            fastPingAvgJitterMs = -1;
-            fastPingReferenceEligible = false;
+            if (runtime == null)
+                return;
 
-            if (!isSpeedifyCandidate || runtime == null)
+            runtime.TunnelConnected = false;
+            runtime.ActiveConnectionCount = 0;
+            runtime.BackupConnectionCount = 0;
+            runtime.SpeedifyReportedLatencyMs = -1;
+            runtime.SpeedifyAggregateLatencyMs = -1;
+            runtime.SpeedifyAggregateJitterMs = -1;
+            runtime.AggregateCongested = false;
+            runtime.SpeedifyFreshSampleCount = 0;
+            runtime.SpeedifyExpectedSampleCount = -1;
+            runtime.SpeedifyAggregateLatencyStdDevMs = -1;
+
+            if (miniSnap == null || !miniSnap.IsFresh || miniSnap.TimeUtc == DateTime.MinValue)
+                return;
+
+            bool hasSignal =
+                miniSnap.ActiveConnectionCount > 0 ||
+                miniSnap.ReportedLatencyMs > 0 ||
+                miniSnap.AggregateLatencyMs > 0 ||
+                miniSnap.TunnelAggregatePresent;
+
+            if (!hasSignal)
+                return;
+
+            runtime.TunnelConnected =
+                miniSnap.ActiveConnectionCount > 0 ||
+                miniSnap.ReportedLatencyMs > 0 ||
+                miniSnap.AggregateLatencyMs > 0 ||
+                miniSnap.TunnelAggregatePresent;
+            runtime.ActiveConnectionCount = Math.Max(0, miniSnap.ActiveConnectionCount);
+            runtime.BackupConnectionCount = Math.Max(0, miniSnap.BackupConnectionCount);
+            runtime.SpeedifyReportedLatencyMs = miniSnap.ReportedLatencyMs > 0 ? miniSnap.ReportedLatencyMs : -1;
+            runtime.SpeedifyAggregateLatencyMs = miniSnap.AggregateLatencyMs > 0 ? miniSnap.AggregateLatencyMs : -1;
+            runtime.SpeedifyAggregateJitterMs = miniSnap.AggregateJitterMs > 0 ? miniSnap.AggregateJitterMs : -1;
+            runtime.AggregateCongested = miniSnap.AggregateCongested && runtime.TunnelConnected;
+            runtime.SpeedifyFreshSampleCount = 1;
+        }
+
+        private void UpdateBestValidFastPingLoss(ref double bestValidFastPingLossRate)
+        {
+            // Live rolling approximation from the current startup FastPing window, not a
+            // dedicated historical startup-floor capture.
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot = getShortWindowSnapshot?.Invoke();
+            if (snapshot == null || !snapshot.IsValid || snapshot.AvgLossRate < 0)
+                return;
+
+            if (snapshot.AvgLossRate > 0.15)
+                return;
+
+            if (bestValidFastPingLossRate < 0 || snapshot.AvgLossRate < bestValidFastPingLossRate)
+                bestValidFastPingLossRate = snapshot.AvgLossRate;
+        }
+
+        private static StartupMiniConfidenceResult ComputeStartupMiniConfidence(StartupMiniSnapBuffer miniBuffer)
+        {
+            if (miniBuffer == null)
+                return new StartupMiniConfidenceResult(0.0, "low");
+
+            double score = 0.0;
+
+            if (miniBuffer.HasMinimumSamples)
+                score += 0.30;
+            if (miniBuffer.HasMinimumSpread)
+                score += 0.20;
+            if (miniBuffer.HasConnectedEvidence)
+                score += 0.20;
+            if (miniBuffer.HasDualLinkEvidence)
+                score += 0.10;
+            if (miniBuffer.AverageTunnelLatencyMs > 0)
+                score += 0.10;
+            if (miniBuffer.AverageAggLatencyMs > 0)
+                score += 0.10;
+            if (miniBuffer.HasCongestionEvidence)
+                score -= 0.08;
+
+            if (score < 0.0)
+                score = 0.0;
+            if (score > 1.0)
+                score = 1.0;
+
+            string label = score >= 0.75
+                ? "high"
+                : score >= 0.45
+                    ? "medium"
+                    : "low";
+
+            return new StartupMiniConfidenceResult(score, label);
+        }
+
+        private static string BuildStartupSpeedifyConfidenceLabel(double score)
+        {
+            if (score < 0.30)
+                return "weak";
+            if (score < 0.50)
+                return "low";
+            if (score < 0.75)
+                return "medium";
+            return "high";
+        }
+
+        private static double ComputeStartupSpeedifyAgreementDeltaMs(double aggLatencyMs, double fastPingMs)
+        {
+            if (aggLatencyMs <= 0 || fastPingMs <= 0)
+                return -1;
+
+            return Math.Abs(aggLatencyMs - fastPingMs);
+        }
+
+        private readonly struct StartupMiniConfidenceResult
+        {
+            public StartupMiniConfidenceResult(double score, string label)
+            {
+                Score = score;
+                Label = string.IsNullOrWhiteSpace(label) ? "low" : label;
+            }
+
+            public double Score { get; }
+            public string Label { get; }
+        }
+
+        private static bool MeetsStabilizationQualityGuardrails(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null)
                 return false;
-            if (!runtime.TunnelConnected || runtime.ActiveConnectionCount <= 0)
-                return false;
-            if (candidateLossRate < 0)
-                return false;
-            if (telemetryWindow == null || telemetryWindow.FreshSampleCount <= 0)
+
+            if (runtime.AvgLossRate >= 0.55)
                 return false;
 
-            FastPingSignalAnalyzer.FastPingAggregateSnapshot fastPingWindow = getShortWindowSnapshot();
-            FastPingState fastPingState = getFastPingState();
-
-            if (fastPingWindow == null || !fastPingWindow.IsValid)
-                return false;
-            if (fastPingState == null || fastPingState.IsStale)
+            if (runtime.P95PingMs >= 1700.0)
                 return false;
 
-            fastPingConfidence = fastPingState.Confidence;
-            currentFastPingLossRate = fastPingWindow.AvgLossRate;
-            fastPingSpikeDensity = fastPingWindow.SpikeDensityPerMinute;
-            fastPingAvgJitterMs = fastPingWindow.AvgJitterMs;
-
-            if (currentFastPingLossRate < 0)
+            if (runtime.AvgJitterMs >= 380.0)
                 return false;
 
-            if (bestFastPingLossObservedRate < 0 || currentFastPingLossRate < bestFastPingLossObservedRate)
-                bestFastPingLossObservedRate = currentFastPingLossRate;
-
-            bestFastPingLossRate = bestFastPingLossObservedRate;
-
-            fastPingReferenceEligible =
-                fastPingConfidence >= FastPingReferenceMinimumConfidence &&
-                bestFastPingLossRate >= 0 &&
-                bestFastPingLossRate <= FastPingReferenceMaximumLossRate;
-
-            if (!fastPingReferenceEligible)
+            if (runtime.SpikeDensityPerMinute >= 120.0)
                 return false;
 
-            fastPingGapPercentagePoints = Math.Abs(candidateLossRate - bestFastPingLossRate) * 100.0;
-            return fastPingGapPercentagePoints <= SpeedifyFastPingStableGapPercentagePoints;
+            if (runtime.StaleRate >= 0.80)
+                return false;
+
+            return true;
         }
 
         private TimeSpan GetMaxStabilizationObserveDuration()
@@ -1261,7 +1158,7 @@ namespace WTFnetApp
             if (runtime == null || runtime.MeasurementStoppedEarly)
                 return false;
 
-            ProbeScoreResult snapshot = ProbeScoring.ScoreCandidate(runtime);
+            ProbeScoreResult snapshot = ProbeScoring.ScoreCandidate(StartupScoreRuntimeSanitizer.BuildScoreRuntimeWithoutSpeedify(runtime));
 
             double baseline =
                 leaderScore?.StartupSelectionScore ??
@@ -1283,337 +1180,84 @@ namespace WTFnetApp
             if (string.Equals(stabilizationReason, "timeout-forced-stabilization-start", StringComparison.OrdinalIgnoreCase))
                 return appendNote(notes, "startup-loss-timeout");
 
-            if (string.Equals(stabilizationReason, "loss-close-to-fastping", StringComparison.OrdinalIgnoreCase))
-                return appendNote(notes, "startup-loss-close-to-raw");
-
             if (string.Equals(stabilizationReason, "loss-flattened", StringComparison.OrdinalIgnoreCase))
                 return appendNote(notes, "startup-loss-stabilized");
 
+            if (string.Equals(stabilizationReason, "loss-near-live-floor", StringComparison.OrdinalIgnoreCase))
+                return appendNote(notes, "startup-loss-near-live-floor");
+
+            if (string.Equals(stabilizationReason, "loss-flat-or-upward", StringComparison.OrdinalIgnoreCase))
+                return appendNote(notes, "startup-loss-flat-or-upward");
+
             return notes;
         }
+
     }
-}
 
-
-
-namespace WTFnetApp
-{
-    internal sealed class StartupLogger
+    internal static class StartupScoreRuntimeSanitizer
     {
-        private sealed class CandidateSummarySnapshot
+        public static ProbeCandidateRuntimeData BuildScoreRuntimeWithoutSpeedify(ProbeCandidateRuntimeData source)
         {
-            public double WarmupMs { get; set; } = -1;
-            public double PostStableMs { get; set; } = -1;
-            public bool Extended { get; set; }
-            public ProbeCandidateRuntimeData Runtime { get; set; }
-            public ProbeScoreResult Score { get; set; }
-        }
+            if (source == null)
+                return null;
 
-        private readonly Action<string> log;
-
-        private readonly HashSet<string> printedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string, CandidateSummarySnapshot> candidateSnapshots = new Dictionary<string, CandidateSummarySnapshot>(StringComparer.OrdinalIgnoreCase);
-        private const string TableHeader = "time         phase          loss%   avgPing  p95Ping  avgJit  p95Jit  spikeD  conf   note";
-        private const string TableDivider = "---------------------------------------------------------------------------------------";
-
-        public StartupLogger(Action<string> log)
-        {
-            this.log = log;
-        }
-
-        public void LogTelemetrySnapshotDecision(
-            ProbeCandidateDefinition candidate,
-            StartupDecisionSnapshot telemetry,
-            bool accepted,
-            string ignoreReason)
-        {
-            // Suppressed in compact table mode.
-        }
-
-        public void LogPostStableTelemetryProgress(
-            ProbeCandidateDefinition candidate,
-            int observedSnapshotCount,
-            int requiredSnapshotCount,
-            bool tunnelActive,
-            bool baseWindowEnded)
-        {
-            // Suppressed in compact table mode.
-        }
-
-        public void LogProbeRow(
-            ProbeCandidateDefinition candidate,
-            string phase,
-            ProbeCandidateRuntimeData runtime,
-            SpeedifyWarmupWindowBuffer telemetryWindow,
-            int requiredSnapshots,
-            string note,
-            MiniSpeedifyMiniSnap miniSnap)
-        {
-            EnsureCandidateTable(candidate);
-
-            string line = string.Format(
-                "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9}",
-                DateTime.Now.ToString("HH:mm:ss.fff"),
-                phase ?? "--",
-                FormatPercent((double)(runtime?.AvgLossRate ?? -1)),
-                FormatNumber((double)(runtime?.AvgPingMs ?? -1)),
-                FormatNumber((double)(runtime?.P95PingMs ?? -1)),
-                FormatNumber((double)(runtime?.AvgJitterMs ?? -1)),
-                FormatNumber((double)(runtime?.P95JitterMs ?? -1)),
-                FormatNumber((double)(runtime?.SpikeDensityPerMinute ?? -1)),
-                FormatConf((double)(runtime?.AvgConfidence ?? -1)),
-                string.IsNullOrWhiteSpace(note) ? "-" : note);
-
-            log?.Invoke(line);
-        }
-
-        public void LogMiniSpeedifySnapshot(
-            ProbeCandidateDefinition candidate,
-            string phase,
-            SpeedifyWarmupWindowBuffer telemetryWindow,
-            int requiredSnapshots,
-            MiniSpeedifyMiniSnap miniSnap)
-        {
-            if (miniSnap == null)
-                return;
-
-            if (!miniSnap.IsFresh)
-                return;
-
-            if (miniSnap.ActiveConnectionCount <= 0)
-                return;
-
-            if (miniSnap.ReportedLatencyMs <= 0 && miniSnap.AggregateLatencyMs <= 0)
-                return;
-
-            string snap = requiredSnapshots > 0 && telemetryWindow != null
-                ? telemetryWindow.FreshSampleCount + "/" + requiredSnapshots
-                : "--";
-
-            string serverIdentity = !string.IsNullOrWhiteSpace(candidate?.DisplayName)
-                ? candidate.DisplayName
-                : !string.IsNullOrWhiteSpace(candidate?.RouteKey)
-                    ? candidate.RouteKey
-                    : "--";
-
-            log?.Invoke(
-                "speedify-mini | phase=" + (phase ?? "--") +
-                " | target=" + serverIdentity +
-                " | fresh=" + snap +
-                " | lat=" + FormatNumber(miniSnap.ReportedLatencyMs) +
-                " | aggLat=" + FormatNumber(miniSnap.AggregateLatencyMs) +
-                " | aggJit=" + FormatNumber(miniSnap.AggregateJitterMs) +
-                " | base=" + FormatNumber(miniSnap.BaseLatencyMs) +
-                " | dynBase=" + FormatNumber(miniSnap.DynamicBaseMs) +
-                " | links=" + FormatCount(miniSnap.ActiveConnectionCount) +
-                " | backup=" + FormatCount(miniSnap.BackupConnectionCount) +
-                " | congested=" + (miniSnap.AggregateCongested ? "yes" : "no") +
-                " | freshSnap=" + (miniSnap.IsFresh ? "yes" : "no") +
-                " | warnings=" + miniSnap.ParseWarningCount.ToString());
-        }
-
-        public void LogEvent(ProbeCandidateDefinition candidate, string eventText)
-        {
-            EnsureCandidateTable(candidate);
-            string line = string.Format(
-                "{0,-12} {1,-14} {2,-7} {3,-8} {4,-8} {5,-7} {6,-7} {7,-7} {8,-6} {9}",
-                DateTime.Now.ToString("HH:mm:ss.fff"),
-                "EVENT",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
-                "-----",
-                (eventText ?? "-").ToUpperInvariant());
-            log?.Invoke(line);
-        }
-
-        private void EnsureCandidateTable(ProbeCandidateDefinition candidate)
-        {
-            string key = candidate?.RouteKey ?? candidate?.DisplayName ?? "unknown";
-            if (printedCandidates.Contains(key))
-                return;
-
-            printedCandidates.Add(key);
-            log?.Invoke((candidate?.DisplayName ?? "Unknown").ToUpperInvariant());
-            log?.Invoke(TableHeader);
-            log?.Invoke(TableDivider);
-        }
-
-        public void LogCandidateSummaryFromMeasurement(
-            ProbeCandidateDefinition candidate,
-            bool stabilizationTimedOut,
-            string stabilizationReason,
-            DateTime? postStableMeasurementStartUtc,
-            DateTime? postStableMeasurementEndUtc,
-            bool postStableTelemetryExtensionHappened,
-            double postStableTelemetryExtraWaitMs,
-            double warmupMs,
-            ProbeCandidateRuntimeData runtime,
-            ProbeScoreResult score,
-            string outcome)
-        {
-            ProbeScoreResult effectiveScore = score ?? (runtime != null ? ProbeScoring.ScoreCandidate(runtime) : null);
-            double postStableMs =
-                postStableMeasurementStartUtc.HasValue && postStableMeasurementEndUtc.HasValue
-                    ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableTelemetryExtraWaitMs)
-                    : 0.0;
-
-            string stabilized = (!stabilizationTimedOut && runtime?.StabilizationReached == true) ? "yes" : "no";
-            string stabilizationText = string.IsNullOrWhiteSpace(stabilizationReason) ? "--" : stabilizationReason;
-
-            LogStartupProbeSummary(
-                candidate,
-                warmupMs,
-                stabilized,
-                stabilizationText,
-                postStableMs,
-                postStableTelemetryExtensionHappened,
-                runtime,
-                effectiveScore,
-                outcome);
-        }
-
-        public void LogStartupProbeSummary(
-            ProbeCandidateDefinition candidate,
-            double warmupMs,
-            string stabilized,
-            string stabilizationReason,
-            double postStableMs,
-            bool extended,
-            ProbeCandidateRuntimeData runtime,
-            ProbeScoreResult score,
-            string outcome)
-        {
-            string key = candidate?.RouteKey ?? candidate?.DisplayName ?? "unknown";
-            if (summarizedCandidates.Contains(key))
-                return;
-            summarizedCandidates.Add(key);
-
-            if (candidateSnapshots.TryGetValue(key, out CandidateSummarySnapshot snapshot))
+            return new ProbeCandidateRuntimeData
             {
-                if (warmupMs < 0)
-                    warmupMs = snapshot.WarmupMs;
-                if (postStableMs < 0)
-                    postStableMs = snapshot.PostStableMs;
-                if (runtime == null)
-                    runtime = snapshot.Runtime;
-                if (score == null)
-                    score = snapshot.Score;
-                if (!extended)
-                    extended = snapshot.Extended;
-            }
-
-            log?.Invoke("[startup-probe-summary] " + (candidate?.DisplayName ?? "Unknown") +
-                " | warmupMs=" + (warmupMs >= 0 ? warmupMs.ToString("0") : "--") +
-                " | stabilized=" + (string.IsNullOrWhiteSpace(stabilized) ? "--" : stabilized) +
-                " | stabilizationReason=" + (string.IsNullOrWhiteSpace(stabilizationReason) ? "--" : stabilizationReason) +
-                " | postStableMs=" + (postStableMs >= 0 ? postStableMs.ToString("0") : "--") +
-                " | extended=" + (extended ? "yes" : "no") +
-                " | finalLoss=" + FormatPercent(runtime?.AvgLossRate ?? -1) +
-                " | finalAvg=" + FormatNumber(runtime?.AvgPingMs ?? -1) +
-                " | finalJit=" + FormatNumber(runtime?.AvgJitterMs ?? -1) +
-                " | finalSpk=" + FormatNumber(runtime?.SpikeDensityPerMinute ?? -1) +
-                " | composite=" + FormatNumber(score?.StartupSelectionScore ?? -1) +
-                " | overall=" + FormatNumber(score?.OverallStabilityScore ?? -1) +
-                " | warning=" + (score != null ? ProbeScoring.GetWarningLabel(score) : "--") +
-                " | outcome=" + (string.IsNullOrWhiteSpace(outcome) ? "kept-not-winner" : outcome));
+                Candidate = source.Candidate,
+                TimeBucketKey = source.TimeBucketKey,
+                AvgPingMs = source.AvgPingMs,
+                MaxPingMs = source.MaxPingMs,
+                P95PingMs = source.P95PingMs,
+                AvgJitterMs = source.AvgJitterMs,
+                MinJitterMs = source.MinJitterMs,
+                MaxJitterMs = source.MaxJitterMs,
+                P95JitterMs = source.P95JitterMs,
+                AvgLossRate = source.AvgLossRate,
+                StartupAdjustedLossRate = source.StartupAdjustedLossRate,
+                AvgBadQualityRate = source.AvgBadQualityRate,
+                AvgConfidence = source.AvgConfidence,
+                SpikeDensityPerMinute = source.SpikeDensityPerMinute,
+                StaleRate = source.StaleRate,
+                TunnelConnected = false,
+                AggregateCongested = false,
+                ActiveConnectionCount = 0,
+                BackupConnectionCount = 0,
+                SpeedifyAggregateLatencyMs = -1,
+                SpeedifyAggregateJitterMs = -1,
+                SpeedifyReportedLatencyMs = -1,
+                SpeedifyFreshSampleCount = 0,
+                SpeedifyExpectedSampleCount = -1,
+                SpeedifyAggregateLatencyStdDevMs = -1,
+                FirstFreshPostSwitchStatsUtc = DateTime.MinValue,
+                FirstFreshPostSwitchAggLatencyMs = -1,
+                FirstFreshPostSwitchAggJitterMs = -1,
+                FirstFreshPostSwitchReportedLatencyMs = -1,
+                FirstFreshPostSwitchActiveConnectionCount = -1,
+                FirstFreshPostSwitchAggregateCongested = false,
+                IsValid = source.IsValid,
+                Notes = source.Notes,
+                StabilizationReached = source.StabilizationReached,
+                StabilizationTimedOut = source.StabilizationTimedOut,
+                StabilizationReason = source.StabilizationReason,
+                ReadinessKind = source.ReadinessKind,
+                ReadinessReason = source.ReadinessReason,
+                ReachedUsableState = source.ReachedUsableState,
+                MeasurementStarted = source.MeasurementStarted,
+                MeasurementCompleted = source.MeasurementCompleted,
+                MeasurementStoppedEarly = source.MeasurementStoppedEarly,
+                MeasurementStopReason = source.MeasurementStopReason,
+                DiscardReason = source.DiscardReason,
+                StartupSpeedifyTrusted = source.StartupSpeedifyTrusted,
+                StartupSpeedifyConfidenceScore = source.StartupSpeedifyConfidenceScore,
+                StartupSpeedifyConfidenceLabel = source.StartupSpeedifyConfidenceLabel,
+                StartupSpeedifyFastPingAgreementDeltaMs = source.StartupSpeedifyFastPingAgreementDeltaMs,
+                StartupSpeedifyBondedEvidence = source.StartupSpeedifyBondedEvidence,
+                StartupSpeedifyFastPingAgreementGood = source.StartupSpeedifyFastPingAgreementGood,
+                StartupSpeedifyCongestedEvidence = source.StartupSpeedifyCongestedEvidence
+            };
         }
-
-        public void RegisterCandidateEvaluation(
-            ProbeCandidateDefinition candidate,
-            double warmupMs,
-            double postStableMs,
-            bool extended,
-            ProbeCandidateRuntimeData runtime,
-            ProbeScoreResult score)
-        {
-            string key = candidate?.RouteKey ?? candidate?.DisplayName ?? "unknown";
-            candidateSnapshots.TryGetValue(key, out CandidateSummarySnapshot existing);
-            CandidateSummarySnapshot snapshot = existing ?? new CandidateSummarySnapshot();
-
-            if (warmupMs >= 0)
-                snapshot.WarmupMs = warmupMs;
-            if (postStableMs >= 0)
-                snapshot.PostStableMs = postStableMs;
-            if (extended)
-                snapshot.Extended = true;
-            if (runtime != null)
-                snapshot.Runtime = runtime;
-            if (score != null)
-                snapshot.Score = score;
-
-            candidateSnapshots[key] = snapshot;
-        }
-
-        public void LogFinalDecisionBlock(
-            ProbeScoreResult winner,
-            ProbeScoreResult runnerUp,
-            ProbeScoreResult third,
-            ProbeWinnerConfidenceResult confidence,
-            string winnerReason,
-            string decisionPolicy,
-            bool restoreSucceeded,
-            List<ProbeScoreResult> shortlist)
-        {
-            log?.Invoke("FINAL STARTUP DECISION");
-            log?.Invoke("winner   : " + (winner?.Candidate?.DisplayName ?? "none"));
-            log?.Invoke("runner-up: " + (runnerUp?.Candidate?.DisplayName ?? "none"));
-            log?.Invoke("3rd      : " + (third?.Candidate?.DisplayName ?? "none"));
-            log?.Invoke("winnerReason    : " + (winnerReason ?? "none"));
-            log?.Invoke("runnerUpReason  : " + (runnerUp != null ? ProbeScoring.BuildRouteExplanation(runnerUp) : "none"));
-            log?.Invoke("decisionPolicy  : " + (decisionPolicy ?? "none"));
-            log?.Invoke("winnerConfidence: " +
-                (confidence != null
-                    ? confidence.Kind + " (" + confidence.ConfidenceScore.ToString("0.0") + ")"
-                    : "none"));
-            log?.Invoke("restore         : " + (restoreSucceeded ? "succeeded" : "failed"));
-            log?.Invoke("shortlist:");
-
-            if (shortlist == null || shortlist.Count == 0)
-                return;
-
-            for (int i = 0; i < shortlist.Count && i < 3; i++)
-            {
-                ProbeScoreResult item = shortlist[i];
-                log?.Invoke("  " + (i + 1).ToString() + ". " + (item?.Candidate?.DisplayName ?? "unknown") +
-                    " | composite=" + FormatNumber(item?.StartupSelectionScore ?? -1) +
-                    " | overall=" + FormatNumber(item?.OverallStabilityScore ?? -1) +
-                    " | warning=" + (item != null ? ProbeScoring.GetWarningLabel(item) : "--") +
-                    " | badge=" + (item != null ? ProbeScoring.GetBadgeLabel(item) : "--") +
-                    " | explain=" + (item != null ? ProbeScoring.BuildRouteExplanation(item) : "--"));
-            }
-        }
-
-        
-
-        private static string FormatNumber(double value)
-        {
-            return value >= 0 ? value.ToString("0.0") : "--";
-        }
-
-        private static string FormatPercent(double value)
-        {
-            return value >= 0 ? (value * 100.0).ToString("0.0") + "%" : "--";
-        }
-
-        private static string FormatConf(double value)
-        {
-            return value >= 0 ? value.ToString("0.00") : "--";
-        }
-
-        private static string FormatCount(int value)
-        {
-            return value >= 0 ? value.ToString() : "--";
-        }
-
     }
 }
-
-
 
 namespace WTFnetApp
 {
