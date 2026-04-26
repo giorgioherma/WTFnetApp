@@ -91,6 +91,9 @@ namespace WTFnetApp
 
         public double SpikeDensityPerMinute { get; set; } = -1;
         public double StaleRate { get; set; } = -1;
+        public double LossBurstDensity { get; set; } = -1;
+        public double BadTimeRatio { get; set; } = -1;
+        public double WorstSegmentLoss { get; set; } = -1;
 
         public bool TunnelConnected { get; set; }
         public bool AggregateCongested { get; set; }
@@ -481,6 +484,9 @@ namespace WTFnetApp
                 0.0;
 
             double learningAdjustment = ComputeLearningAdjustment(runtime, learned);
+            double burstPenalty = Clamp(Safe(runtime.LossBurstDensity) * 2.5, 0.0, 15.0);
+            double badTimePenalty = Safe(runtime.BadTimeRatio) * 25.0;
+            double worstSlicePenalty = Clamp(Safe(runtime.WorstSegmentLoss) * 100.0 * 1.2, 0.0, 20.0);
 
             return stabilityCore +
                    jitterStabilityPenalty +
@@ -489,6 +495,9 @@ namespace WTFnetApp
                    lossPenalty +
                    badQualityPenalty +
                    smallLatencyPenalty +
+                   burstPenalty +
+                   badTimePenalty +
+                   worstSlicePenalty +
                    warningAdjustment +
                    learningAdjustment;
         }
@@ -1693,6 +1702,10 @@ namespace WTFnetApp
             }
 
             double modifier = sampleConfidence * stabilityConfidence * noteConfidence * crossSignalConfidence;
+            if (runtime.BadTimeRatio > 0.15)
+                modifier -= 0.05;
+            if (runtime.LossBurstDensity > 1.25)
+                modifier -= 0.05;
             modifier = Clamp(modifier, 0.3, 1.15);
 
             Logger.Log("conf",

@@ -285,7 +285,8 @@ namespace WTFnetApp
     $"q={s10.AvgQueueDelayMs:0.0} q95={s10.P95QueueDelayMs:0.0} " +
     $"qg={s10.QueueGrowthMsPerSec:+0.0;-0.0;0.0} qa={s10.QueueAccelerationMsPerSec2:+0.0;-0.0;0.0} " +
     $"qt={s10.QueueTrendConfidence:0.00} qb={(s10.QueueBuilding ? 1 : 0)} qd={(s10.QueueDraining ? 1 : 0)} " +
-    $"spkD10={s10.SpikeDensityPerMinute:0.0} spkD30={s30.SpikeDensityPerMinute:0.0}");
+    $"spkD10={s10.SpikeDensityPerMinute:0.0} spkD30={s30.SpikeDensityPerMinute:0.0} " +
+    $"burstD10={s10.LossBurstDensity:0.0} badT10={s10.BadTimeRatio:0.00} wSegLoss10={s10.WorstSegmentLoss:0.00}");
 
             lastAggregatedLogUtc = nowUtc;
         }
@@ -462,6 +463,9 @@ namespace WTFnetApp
 
             public double SpikeDensityPerMinute = -1;
             public double StaleRate = -1;
+            public double LossBurstDensity = -1;
+            public double BadTimeRatio = -1;
+            public double WorstSegmentLoss = -1;
 
             public bool IsValid
             {
@@ -659,10 +663,12 @@ namespace WTFnetApp
                 double[] pingValues = new double[count];
                 double[] jitterValues = new double[count];
                 double[] queueValues = new double[count];
+                Sample[] activeSamples = new Sample[count];
 
                 int pingCount = 0;
                 int jitterCount = 0;
                 int queueCount = 0;
+                int activeCount = 0;
 
                 double pingSum = 0;
                 double jitterSum = 0;
@@ -695,6 +701,7 @@ namespace WTFnetApp
                     if (s.TimeUtc < cutoff)
                         continue;
 
+                    activeSamples[activeCount++] = s;
                     considered++;
 
                     if (s.PingMs > 0)
@@ -790,6 +797,10 @@ namespace WTFnetApp
 
                 snapshot.QueueGrowthMsPerSec = ComputeQueueSlopeMsPerSec(cutoff);
                 snapshot.QueueAccelerationMsPerSec2 = ComputeQueueAccelerationMsPerSec2(cutoff);
+                ComputeStabilityMetrics(activeSamples, activeCount, out double lossBurstDensity, out double badTimeRatio, out double worstSegmentLoss);
+                snapshot.LossBurstDensity = lossBurstDensity;
+                snapshot.BadTimeRatio = badTimeRatio;
+                snapshot.WorstSegmentLoss = worstSegmentLoss;
 
                 snapshot.QueueTrendConfidence = ComputeQueueTrendConfidence(
                     considered,
@@ -819,6 +830,106 @@ namespace WTFnetApp
                     snapshot.AvgLossRate < 0.10;
 
                 return snapshot;
+            }
+
+            private static void ComputeStabilityMetrics(
+                Sample[] activeSamples,
+                int activeCount,
+                out double lossBurstDensity,
+                out double badTimeRatio,
+                out double worstSegmentLoss)
+            {
+                lossBurstDensity = -1;
+                badTimeRatio = -1;
+                worstSegmentLoss = -1;
+
+                if (activeSamples == null || activeCount <= 0)
+                    return;
+
+                Array.Sort(activeSamples, 0, activeCount, SampleTimeComparer.Instance);
+
+                DateTime firstTime = activeSamples[0].TimeUtc;
+                DateTime lastTime = activeSamples[activeCount - 1].TimeUtc;
+                double windowMs = Math.Max(1.0, (lastTime - firstTime).TotalMilliseconds);
+                double windowSeconds = Math.Max(1.0, windowMs / 1000.0);
+
+                int burstCount = 0;
+                int lossStreak = 0;
+                bool inBurst = false;
+
+                double badTimeMs = 0.0;
+                int segmentCount = Math.Max(1, (int)Math.Ceiling(windowMs / 2000.0));
+                double[] segmentLossSum = new double[segmentCount];
+                int[] segmentLossSamples = new int[segmentCount];
+
+                for (int i = 0; i < activeCount; i++)
+                {
+                    Sample s = activeSamples[i];
+                    bool lossObserved = s.LossRate > 0.0;
+
+                    if (lossObserved)
+                    {
+                        lossStreak++;
+                        if (lossStreak >= 2 && !inBurst)
+                        {
+                            burstCount++;
+                            inBurst = true;
+                        }
+                    }
+                    else
+                    {
+                        lossStreak = 0;
+                        inBurst = false;
+                    }
+
+                    DateTime segmentEndTime = i + 1 < activeCount
+                        ? activeSamples[i + 1].TimeUtc
+                        : lastTime;
+                    double sampleSpanMs = Math.Max(0.0, (segmentEndTime - s.TimeUtc).TotalMilliseconds);
+                    if (i == activeCount - 1 && sampleSpanMs <= 0.0)
+                        sampleSpanMs = Math.Min(2000.0, windowMs);
+
+                    bool badState = (s.LossRate > 0.02) || (s.JitterMs >= WarningJitterMs);
+                    if (badState)
+                        badTimeMs += sampleSpanMs;
+
+                    if (s.LossRate >= 0)
+                    {
+                        int segmentIndex = (int)((s.TimeUtc - firstTime).TotalMilliseconds / 2000.0);
+                        if (segmentIndex < 0)
+                            segmentIndex = 0;
+                        if (segmentIndex >= segmentCount)
+                            segmentIndex = segmentCount - 1;
+
+                        segmentLossSum[segmentIndex] += s.LossRate;
+                        segmentLossSamples[segmentIndex]++;
+                    }
+                }
+
+                double worstLoss = -1;
+                for (int i = 0; i < segmentCount; i++)
+                {
+                    if (segmentLossSamples[i] <= 0)
+                        continue;
+
+                    double segmentLoss = segmentLossSum[i] / segmentLossSamples[i];
+                    if (segmentLoss > worstLoss)
+                        worstLoss = segmentLoss;
+                }
+
+                lossBurstDensity = (burstCount / windowSeconds) * 60.0;
+                badTimeRatio = Math.Max(0.0, Math.Min(1.0, badTimeMs / windowMs));
+                worstSegmentLoss = worstLoss;
+            }
+
+            private sealed class SampleTimeComparer : System.Collections.Generic.IComparer<Sample>
+            {
+                public static readonly SampleTimeComparer Instance = new SampleTimeComparer();
+
+                public int Compare(Sample x, Sample y)
+                {
+                    return x.TimeUtc.CompareTo(y.TimeUtc);
+                }
             }
 
             private double ComputeQueueSlopeMsPerSec(DateTime cutoff)

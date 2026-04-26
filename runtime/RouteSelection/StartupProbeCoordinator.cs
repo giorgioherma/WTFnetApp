@@ -75,8 +75,7 @@ namespace WTFnetApp
                 startupLogger: startupLogger,
                 mergeMeasuredRuntime: (first, second, firstDuration, secondDuration) =>
                     StartupProbeRuntimeMerge.MergeMeasuredRuntime(first, second, firstDuration, secondDuration, AppendNote),
-                appendNote: AppendNote,
-                log: Log);
+                appendNote: AppendNote);
         }
 
         public async Task<StartupProbeResult> RunAsync(
@@ -210,8 +209,6 @@ namespace WTFnetApp
                 StartupSpeedifyTunnelProbe.SpeedifyProbeLifecycleResult lifecycle = await routedProbe.RunLifecycleAsync(
                     candidate,
                     activationRequestedUtc,
-                    rawScore,
-                    leader,
                     timeBucket,
                     cancellationToken);
 

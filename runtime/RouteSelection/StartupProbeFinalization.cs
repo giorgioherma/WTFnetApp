@@ -634,6 +634,9 @@ namespace WTFnetApp
                 AvgBadQualityRate = WeightedAverageKnown(first.AvgBadQualityRate, second.AvgBadQualityRate, w1, w2),
                 AvgConfidence = WeightedAverageKnown(first.AvgConfidence, second.AvgConfidence, w1, w2),
                 SpikeDensityPerMinute = WeightedAverageKnown(first.SpikeDensityPerMinute, second.SpikeDensityPerMinute, w1, w2),
+                LossBurstDensity = WeightedAverageKnown(first.LossBurstDensity, second.LossBurstDensity, w1, w2),
+                BadTimeRatio = WeightedAverageKnown(first.BadTimeRatio, second.BadTimeRatio, w1, w2),
+                WorstSegmentLoss = MaxKnown(first.WorstSegmentLoss, second.WorstSegmentLoss),
                 StaleRate = WeightedAverageKnown(first.StaleRate, second.StaleRate, w1, w2),
 
                 TunnelConnected = first.TunnelConnected || second.TunnelConnected,
