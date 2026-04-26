@@ -69,7 +69,7 @@ namespace WTFnetApp
 
         private const string FixedPrimaryProbeTarget = "1.1.1.1";
         private const string FixedSecondaryProbeTarget = "8.8.8.8";
-        private const bool LogStartupProbeSlices = false;
+        private static readonly bool LogStartupProbeSlices = false;
 
         private string lastFastPingPrimaryTarget;
         private string lastFastPingSecondaryTarget;
