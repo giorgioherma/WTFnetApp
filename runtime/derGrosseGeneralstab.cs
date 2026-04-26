@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -1082,7 +1084,8 @@ namespace WTFnetApp
         private async Task<ProbeCandidateRuntimeData> CaptureProbeRuntimeAsync(
             ProbeCandidateDefinition candidate,
             TimeSpan settle,
-            TimeSpan observe)
+            TimeSpan observe,
+            DateTime sliceStartUtc)
         {
             if (candidate == null)
                 throw new ArgumentNullException(nameof(candidate));
@@ -1096,12 +1099,19 @@ namespace WTFnetApp
             }
 
             FastPingSignalAnalyzer.FastPingAggregateSnapshot window =
-                observe >= TimeSpan.FromSeconds(20)
-                    ? fastPingSignalAnalyzer.Last30sSnapshot
-                    : fastPingSignalAnalyzer.Last10sSnapshot;
+                sliceStartUtc != DateTime.MinValue
+                    ? fastPingSignalAnalyzer.GetSnapshotSince(observe, sliceStartUtc)
+                    : (observe >= TimeSpan.FromSeconds(20)
+                        ? fastPingSignalAnalyzer.Last30sSnapshot
+                        : fastPingSignalAnalyzer.Last10sSnapshot);
 
             FastPingState fastPingState = fastPing.GetState();
             UnifiedNetworkState unified = GetLastUnifiedState();
+            MetricsSnapshot speedifySnapshot = null;
+            lock (publishSync)
+            {
+                speedifySnapshot = lastSnapshot;
+            }
 
             ProbeCandidateRuntimeData runtime = new ProbeCandidateRuntimeData
             {
@@ -1134,10 +1144,25 @@ namespace WTFnetApp
                 SpeedifyFreshSampleCount = 0,
                 SpeedifyExpectedSampleCount = -1,
                 SpeedifyAggregateLatencyStdDevMs = -1,
+                MeasurementSliceStartUtc = sliceStartUtc,
+                MeasurementEpochMs = sliceStartUtc != DateTime.MinValue
+                    ? Math.Max(0.0, (DateTime.UtcNow - sliceStartUtc).TotalMilliseconds)
+                    : -1,
+                SliceSampleCount = window != null ? window.SampleCount : 0,
+                SliceOldestSampleAgeMs = window != null ? window.OldestSampleAgeMs : -1,
 
                 IsValid = window != null && window.IsValid,
                 Notes = unified != null ? unified.HealthReason : null
             };
+
+            if (speedifySnapshot != null)
+            {
+                runtime.MeasuredServerFriendlyName = speedifySnapshot.ConnectedServerName;
+                runtime.MeasuredServerPublicIp = speedifySnapshot.ConnectedServerPublicIp;
+                runtime.MeasuredServerIdentifier = speedifySnapshot.ConnectedServerPublicIp;
+                runtime.MeasuredRouteTarget = candidate?.ConnectTarget;
+                runtime.MeasuredServerTag = TryExtractSpeedifyServerTag(speedifySnapshot.ConnectedServerName);
+            }
 
             if (candidate.Kind == ProbeCandidateKind.Raw)
                 runtime.Notes = "Raw baseline capture";
@@ -1151,6 +1176,9 @@ namespace WTFnetApp
                 " | loss=" + FormatProbePercent(runtime.AvgLossRate) +
                 " | conf=" + FormatProbeMetric(runtime.AvgConfidence) +
                 " | spkD=" + FormatProbeMetric(runtime.SpikeDensityPerMinute) +
+                " | measurementEpochMs=" + FormatProbeMetric(runtime.MeasurementEpochMs) +
+                " | sliceSampleCount=" + runtime.SliceSampleCount +
+                " | sampleAgeMs=" + FormatProbeMetric(runtime.SliceOldestSampleAgeMs) +
                 " | spFresh=" + runtime.SpeedifyFreshSampleCount +
                 " | spAggLat=" + FormatProbeMetric(runtime.SpeedifyAggregateLatencyMs) +
                 " | spAggJit=" + FormatProbeMetric(runtime.SpeedifyAggregateJitterMs) +
@@ -1178,6 +1206,117 @@ namespace WTFnetApp
         private static string FormatProbePercent(double value)
         {
             return value >= 0 ? (value * 100.0).ToString("0.0") + "%" : "--";
+        }
+
+        private static string TryExtractSpeedifyServerTag(string connectedServerName)
+        {
+            if (string.IsNullOrWhiteSpace(connectedServerName))
+                return null;
+
+            string token = connectedServerName.Trim();
+            string rawTokenTag = TryExtractRawTokenTag(token);
+            if (!string.IsNullOrWhiteSpace(rawTokenTag))
+                return rawTokenTag;
+
+            return TryExtractFriendlyNameTag(token);
+        }
+
+        private static string TryExtractRawTokenTag(string token)
+        {
+            if (string.IsNullOrWhiteSpace(token))
+                return null;
+
+            if (token.IndexOf(' ') >= 0)
+                return null;
+
+            if (token.Length < 6 || token.IndexOf('-') < 0)
+                return null;
+
+            if (!char.IsLetter(token[0]) || !char.IsLetter(token[1]) || token[2] != '-')
+                return null;
+
+            return token.ToLowerInvariant();
+        }
+
+        private static string TryExtractFriendlyNameTag(string token)
+        {
+            int separator = token.IndexOf(" - ", StringComparison.Ordinal);
+            if (separator <= 0)
+                return null;
+
+            string countryName = token.Substring(0, separator).Trim();
+            string rightSide = token.Substring(separator + 3).Trim();
+            if (string.IsNullOrWhiteSpace(countryName) || string.IsNullOrWhiteSpace(rightSide))
+                return null;
+
+            string countryCode = MapCountryNameToStartupCode(countryName);
+            if (string.IsNullOrWhiteSpace(countryCode))
+                return null;
+
+            int serverNumber = -1;
+            int hashIndex = rightSide.LastIndexOf('#');
+            if (hashIndex >= 0)
+            {
+                string suffix = rightSide.Substring(hashIndex + 1).Trim();
+                if (int.TryParse(suffix, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedNumber) && parsedNumber > 0)
+                {
+                    serverNumber = parsedNumber;
+                    rightSide = rightSide.Substring(0, hashIndex).Trim();
+                }
+            }
+
+            string cityToken = NormalizeSpeedifyTagToken(rightSide);
+            if (string.IsNullOrWhiteSpace(cityToken))
+                return null;
+
+            return serverNumber > 0
+                ? countryCode + "-" + cityToken + "-" + serverNumber.ToString(CultureInfo.InvariantCulture)
+                : countryCode + "-" + cityToken;
+        }
+
+        private static string MapCountryNameToStartupCode(string countryName)
+        {
+            switch ((countryName ?? string.Empty).Trim().ToLowerInvariant())
+            {
+                case "germany": return "de";
+                case "slovenia": return "si";
+                case "austria": return "at";
+                case "hungary": return "hu";
+                case "italy": return "it";
+                default: return null;
+            }
+        }
+
+        private static string NormalizeSpeedifyTagToken(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+                return null;
+
+            string normalized = input.Trim().ToLowerInvariant().Normalize(NormalizationForm.FormD);
+            StringBuilder ascii = new StringBuilder(normalized.Length);
+            for (int i = 0; i < normalized.Length; i++)
+            {
+                char c = normalized[i];
+                UnicodeCategory category = CharUnicodeInfo.GetUnicodeCategory(c);
+                if (category == UnicodeCategory.NonSpacingMark)
+                    continue;
+
+                if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9'))
+                {
+                    ascii.Append(c);
+                    continue;
+                }
+
+                if (char.IsWhiteSpace(c) || c == '-' || c == '_' || c == '/')
+                    ascii.Append('-');
+            }
+
+            string token = ascii.ToString();
+            while (token.Contains("--"))
+                token = token.Replace("--", "-");
+
+            token = token.Trim('-');
+            return token.Length == 0 ? null : token;
         }
 
         // =========================
@@ -1468,6 +1607,17 @@ namespace WTFnetApp
                 StartupSpeedifyBondedEvidence = source.StartupSpeedifyBondedEvidence,
                 StartupSpeedifyFastPingAgreementGood = source.StartupSpeedifyFastPingAgreementGood,
                 StartupSpeedifyCongestedEvidence = source.StartupSpeedifyCongestedEvidence,
+                MeasurementSliceStartUtc = source.MeasurementSliceStartUtc,
+                MeasurementEpochMs = source.MeasurementEpochMs,
+                SliceSampleCount = source.SliceSampleCount,
+                SliceOldestSampleAgeMs = source.SliceOldestSampleAgeMs,
+                MeasuredServerFriendlyName = source.MeasuredServerFriendlyName,
+                MeasuredServerTag = source.MeasuredServerTag,
+                MeasuredRouteTarget = source.MeasuredRouteTarget,
+                MeasuredServerCity = source.MeasuredServerCity,
+                MeasuredServerPublicIp = source.MeasuredServerPublicIp,
+                MeasuredServerIdentifier = source.MeasuredServerIdentifier,
+                RestoredServerTarget = source.RestoredServerTarget,
             };
         }
 

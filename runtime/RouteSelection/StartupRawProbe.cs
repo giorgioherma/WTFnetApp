@@ -85,7 +85,7 @@ namespace WTFnetApp
         private readonly StartupProbeTimingConfig timing;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
         private readonly CandidateUsableEvaluator isCandidateUsableForMeasurement;
-        private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
+        private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime;
         private readonly Func<string, string, string> appendNote;
         private readonly Action<string> log;
@@ -95,7 +95,7 @@ namespace WTFnetApp
             StartupProbeTimingConfig timing,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
             CandidateUsableEvaluator isCandidateUsableForMeasurement,
-            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
+            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime,
             Func<string, string, string> appendNote,
             Action<string> log)
@@ -214,10 +214,12 @@ namespace WTFnetApp
                 cancellationToken.ThrowIfCancellationRequested();
 
                 TimeSpan slice = measuredSlices[i];
+                DateTime sliceStartUtc = DateTime.UtcNow;
                 ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(
                     candidate,
                     TimeSpan.Zero,
-                    slice);
+                    slice,
+                    sliceStartUtc);
 
                 if (sliceRuntime == null)
                     return aggregateRuntime;
