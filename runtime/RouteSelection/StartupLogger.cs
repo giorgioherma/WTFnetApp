@@ -155,6 +155,13 @@ namespace WTFnetApp
                     extended = snapshot.Extended;
             }
 
+            log?.Invoke("startup-probe | identity final-summary-source | candidate=" + (candidate?.DisplayName ?? "Unknown") +
+                " | friendly=" + (runtime?.MeasuredServerFriendlyName ?? "-") +
+                " | tag=" + (runtime?.MeasuredServerTag ?? "-") +
+                " | publicIp=" + (runtime?.MeasuredServerPublicIp ?? "-") +
+                " | routeTarget=" + (runtime?.MeasuredRouteTarget ?? "-") +
+                " | auth=" + ((runtime?.HasAuthoritativeIdentity ?? false) ? "true" : "false"));
+
             log?.Invoke("[startup-probe-summary] " + (candidate?.DisplayName ?? "Unknown") +
                 " | warmupMs=" + (warmupMs >= 0 ? warmupMs.ToString("0") : "--") +
                 " | stabilized=" + (string.IsNullOrWhiteSpace(stabilized) ? "--" : stabilized) +
@@ -204,7 +211,15 @@ namespace WTFnetApp
                         TimeSpan.Zero,
                         TimeSpan.Zero,
                         AppendNote);
+
             }
+            log?.Invoke("startup-probe | identity registered | candidate=" + (candidate?.DisplayName ?? "Unknown") +
+                " | friendly=" + (snapshot.Runtime?.MeasuredServerFriendlyName ?? "-") +
+                " | tag=" + (snapshot.Runtime?.MeasuredServerTag ?? "-") +
+                " | publicIp=" + (snapshot.Runtime?.MeasuredServerPublicIp ?? "-") +
+                " | routeTarget=" + (snapshot.Runtime?.MeasuredRouteTarget ?? "-") +
+                " | auth=" + ((snapshot.Runtime?.HasAuthoritativeIdentity ?? false) ? "true" : "false"));
+
             if (score != null)
                 snapshot.Score = score;
 
