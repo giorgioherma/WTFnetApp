@@ -1200,7 +1200,10 @@ namespace WTFnetApp
                 Notes = unified != null ? unified.HealthReason : null
             };
 
-            if (speedifySnapshot != null)
+            if (!runtime.HasAuthoritativeIdentity &&
+                speedifySnapshot != null &&
+                speedifySnapshot.ActiveConnectionCount > 0 &&
+                speedifySnapshot.LatencyMs > 0)
             {
                 runtime.MeasuredServerFriendlyName = speedifySnapshot.ConnectedServerName;
                 runtime.MeasuredServerPublicIp = speedifySnapshot.ConnectedServerPublicIp;
@@ -1475,23 +1478,26 @@ namespace WTFnetApp
             if (runtime == null || candidate == null)
                 return;
 
-            SpeedifyActivatedServerIdentity activationIdentity = GetFreshActivationIdentityForCandidate(candidate, sliceStartUtc, observe);
+            SpeedifyActivatedServerIdentity activationIdentity = GetFreshActivationIdentityForCandidate(candidate, observe);
             if (activationIdentity != null)
             {
-                runtime.MeasuredServerFriendlyName = activationIdentity.FriendlyName ?? runtime.MeasuredServerFriendlyName;
-                runtime.MeasuredServerTag = activationIdentity.Tag ?? runtime.MeasuredServerTag;
-                runtime.MeasuredServerPublicIp = activationIdentity.PublicIp ?? runtime.MeasuredServerPublicIp;
-                runtime.MeasuredServerCity = activationIdentity.City ?? runtime.MeasuredServerCity;
-                runtime.MeasuredRouteTarget = activationIdentity.RequestedTarget ?? runtime.MeasuredRouteTarget;
+                runtime.MeasuredServerFriendlyName = FirstNonEmpty(activationIdentity.FriendlyName, runtime.MeasuredServerFriendlyName);
+                runtime.MeasuredServerTag = FirstNonEmpty(activationIdentity.Tag, runtime.MeasuredServerTag);
+                runtime.MeasuredServerPublicIp = FirstNonEmpty(activationIdentity.PublicIp, runtime.MeasuredServerPublicIp);
+                runtime.MeasuredServerCity = FirstNonEmpty(activationIdentity.City, runtime.MeasuredServerCity);
+                runtime.MeasuredRouteTarget = FirstNonEmpty(activationIdentity.RequestedTarget, runtime.MeasuredRouteTarget);
                 runtime.MeasuredServerIdentifier =
                     activationIdentity.PublicIp ??
                     activationIdentity.Tag ??
-                    activationIdentity.RequestedTarget ??
-                    runtime.MeasuredServerIdentifier;
+                    activationIdentity.RequestedTarget;
+                runtime.HasAuthoritativeIdentity = true;
                 return;
             }
 
-            if (speedifySnapshot != null)
+            if (!runtime.HasAuthoritativeIdentity &&
+                speedifySnapshot != null &&
+                speedifySnapshot.ActiveConnectionCount > 0 &&
+                speedifySnapshot.LatencyMs > 0)
             {
                 runtime.MeasuredServerFriendlyName = speedifySnapshot.ConnectedServerName ?? runtime.MeasuredServerFriendlyName;
                 runtime.MeasuredServerPublicIp = speedifySnapshot.ConnectedServerPublicIp ?? runtime.MeasuredServerPublicIp;
@@ -1501,20 +1507,24 @@ namespace WTFnetApp
             }
 
             MiniSpeedifyMiniSnap miniSnap = GetFreshMiniSpeedifyMiniSnapForStartup();
-            if (miniSnap != null)
+            if (!runtime.HasAuthoritativeIdentity && miniSnap != null)
             {
                 runtime.MeasuredRouteTarget = runtime.MeasuredRouteTarget ?? candidate.ConnectTarget;
-                runtime.MeasuredServerIdentifier = runtime.MeasuredServerIdentifier ?? candidate.ConnectTarget;
+                runtime.MeasuredServerIdentifier =
+                    runtime.MeasuredServerIdentifier ??
+                    ("fallback:" + candidate.ConnectTarget);
                 return;
             }
 
-            runtime.MeasuredRouteTarget = runtime.MeasuredRouteTarget ?? candidate.ConnectTarget;
-            runtime.MeasuredServerTag = runtime.MeasuredServerTag ?? candidate.ConnectTarget;
+            if (!runtime.HasAuthoritativeIdentity)
+            {
+                runtime.MeasuredRouteTarget = runtime.MeasuredRouteTarget ?? candidate.ConnectTarget;
+                runtime.MeasuredServerTag = runtime.MeasuredServerTag ?? candidate.ConnectTarget;
+            }
         }
 
         private SpeedifyActivatedServerIdentity GetFreshActivationIdentityForCandidate(
             ProbeCandidateDefinition candidate,
-            DateTime sliceStartUtc,
             TimeSpan observe)
         {
             if (candidate == null || string.IsNullOrWhiteSpace(candidate.ConnectTarget))
@@ -1536,16 +1546,9 @@ namespace WTFnetApp
             if (identity.CapturedUtc == DateTime.MinValue || identity.CapturedUtc > nowUtc.AddSeconds(2))
                 return null;
 
-            double maxAgeMs = Math.Max(15000.0, observe.TotalMilliseconds + 12000.0);
+            double maxAgeMs = Math.Max(90000.0, observe.TotalMilliseconds + 60000.0);
             if ((nowUtc - identity.CapturedUtc).TotalMilliseconds > maxAgeMs)
                 return null;
-
-            if (sliceStartUtc != DateTime.MinValue)
-            {
-                DateTime lowerBound = sliceStartUtc - TimeSpan.FromSeconds(12);
-                if (identity.CapturedUtc < lowerBound)
-                    return null;
-            }
 
             return identity;
         }
@@ -1951,6 +1954,7 @@ namespace WTFnetApp
                 MeasuredServerCity = source.MeasuredServerCity,
                 MeasuredServerPublicIp = source.MeasuredServerPublicIp,
                 MeasuredServerIdentifier = source.MeasuredServerIdentifier,
+                HasAuthoritativeIdentity = source.HasAuthoritativeIdentity,
                 RestoredServerTarget = source.RestoredServerTarget,
             };
         }

@@ -145,6 +145,7 @@ namespace WTFnetApp
         public string MeasuredServerCity { get; set; }
         public string MeasuredServerPublicIp { get; set; }
         public string MeasuredServerIdentifier { get; set; }
+        public bool HasAuthoritativeIdentity { get; set; }
         public string RestoredServerTarget { get; set; }
     }
 

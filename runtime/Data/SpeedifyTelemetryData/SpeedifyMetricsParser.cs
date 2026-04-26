@@ -714,6 +714,10 @@ namespace WTFnetApp
             int activeLinks = snapshot != null ? snapshot.Links.Count : 0;
             string server = snapshot?.ConnectedServerName ?? string.Empty;
             string publicIp = snapshot?.ConnectedServerPublicIp ?? string.Empty;
+            bool isTransitionIdentityState = snapshot != null &&
+                (snapshot.ActiveConnectionCount <= 0 || snapshot.LatencyMs <= 0);
+            string displayServer = isTransitionIdentityState ? "-" : SafeText(snapshot.ConnectedServerName);
+            string displayPublicIp = isTransitionIdentityState ? "-" : SafeText(snapshot.ConnectedServerPublicIp);
 
             bool connectedChanged = !hasLoggedSnapshotState || lastLoggedSnapshotConnected != snapshot.TunnelConnected;
             bool linksChanged = !hasLoggedSnapshotState || lastLoggedSnapshotActiveLinks != activeLinks;
@@ -740,9 +744,10 @@ namespace WTFnetApp
                 " | lat=" + snapshot.LatencyMs +
                 " | base=" + snapshot.BaseLatencyMs +
                 " | dynBase=" + snapshot.DynamicBase +
-                " | server=" + SafeText(snapshot.ConnectedServerName) +
-                " | pubIp=" + SafeText(snapshot.ConnectedServerPublicIp) +
+                " | server=" + displayServer +
+                " | pubIp=" + displayPublicIp +
                 " | links=" + activeLinks +
+                " | transition=" + (isTransitionIdentityState ? "yes" : "no") +
                 " | warnings=" + snapshot.ParseWarningCount);
 
             hasLoggedSnapshotState = true;
