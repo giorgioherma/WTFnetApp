@@ -195,11 +195,29 @@ namespace WTFnetApp
             if (extended)
                 snapshot.Extended = true;
             if (runtime != null)
-                snapshot.Runtime = runtime;
+            {
+                snapshot.Runtime = snapshot.Runtime == null
+                    ? runtime
+                    : StartupProbeRuntimeMerge.MergeMeasuredRuntime(
+                        snapshot.Runtime,
+                        runtime,
+                        TimeSpan.Zero,
+                        TimeSpan.Zero,
+                        AppendNote);
+            }
             if (score != null)
                 snapshot.Score = score;
 
             candidateSnapshots[key] = snapshot;
+        }
+
+        private static string AppendNote(string first, string second)
+        {
+            if (string.IsNullOrWhiteSpace(first))
+                return second;
+            if (string.IsNullOrWhiteSpace(second))
+                return first;
+            return first + " | " + second;
         }
 
         public void LogFinalDecisionBlock(
