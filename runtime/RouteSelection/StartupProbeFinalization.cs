@@ -773,6 +773,7 @@ namespace WTFnetApp
                 MeasuredServerCity = ChooseFirstNonEmpty(first.MeasuredServerCity, second.MeasuredServerCity),
                 MeasuredServerPublicIp = ChooseFirstNonEmpty(first.MeasuredServerPublicIp, second.MeasuredServerPublicIp),
                 MeasuredServerIdentifier = ChooseFirstNonEmpty(first.MeasuredServerIdentifier, second.MeasuredServerIdentifier),
+                HasAuthoritativeIdentity = first.HasAuthoritativeIdentity || second.HasAuthoritativeIdentity,
                 RestoredServerTarget = second.RestoredServerTarget ?? first.RestoredServerTarget
             };
         }
