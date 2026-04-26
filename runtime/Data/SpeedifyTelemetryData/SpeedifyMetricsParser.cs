@@ -284,15 +284,27 @@ namespace WTFnetApp
 
         private MiniSpeedifyMiniSnap BuildMiniSnapshotFromConnectionStats()
         {
-            double aggregateLatency = structuredState.Tunnel.LatencyMs >= 0 ? structuredState.Tunnel.LatencyMs : -1;
-            double aggregateJitter = structuredState.Tunnel.JitterMs >= 0 ? structuredState.Tunnel.JitterMs : -1;
+            double aggregateLatency = structuredState.Tunnel.LatencyMs > 0
+                ? structuredState.Tunnel.LatencyMs
+                : -1;
+
+            double aggregateJitter = structuredState.Tunnel.JitterMs > 0
+                ? structuredState.Tunnel.JitterMs
+                : -1;
 
             SpeedifyLinkState bestLink = GetBestLinkByJitterStability();
-            double reportedLatency = aggregateLatency >= 0
-                ? aggregateLatency
-                : (bestLink != null && bestLink.LatencyMs >= 0 ? bestLink.LatencyMs : -1);
 
-            if (reportedLatency >= 0 && (dynamicBase == 0 || reportedLatency < dynamicBase))
+            double bestLinkLatency = bestLink != null && bestLink.LatencyMs > 0
+                ? bestLink.LatencyMs
+                : -1;
+
+            double reportedLatency = aggregateLatency > 0
+                ? aggregateLatency
+                : bestLinkLatency > 0
+                    ? bestLinkLatency
+                    : -1;
+
+            if (reportedLatency > 0 && (dynamicBase <= 0 || reportedLatency < dynamicBase))
                 dynamicBase = reportedLatency;
 
             double baseLatency = dynamicBase > 0 ? dynamicBase : -1;
@@ -302,9 +314,11 @@ namespace WTFnetApp
                 TimeUtc = structuredState.TimeUtc != DateTime.MinValue ? structuredState.TimeUtc : DateTime.UtcNow,
                 HasConnectionStats = structuredState.HasConnectionStats,
                 TunnelAggregatePresent = lastConnectionStatsHadAggregate,
-                AggregateLatencyMs = aggregateLatency,
+
+                AggregateLatencyMs = reportedLatency,
                 AggregateJitterMs = aggregateJitter,
                 ReportedLatencyMs = reportedLatency,
+
                 BaseLatencyMs = baseLatency,
                 DynamicBaseMs = baseLatency,
                 AggregateCongested = structuredState.Tunnel.Congested,

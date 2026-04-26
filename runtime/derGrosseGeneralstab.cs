@@ -106,7 +106,7 @@ namespace WTFnetApp
             Logger.Log("system", "application starting");
             Logger.Log("engine", "initializing core");
 
-            
+
 
             InitializeOverlay();
             InitializeNat();
@@ -166,6 +166,102 @@ namespace WTFnetApp
                 learningStore: probeLearningStore,
                 timing: StartupProbeTiming,
                 log: message => Logger.Log("startup", message));
+        }
+
+        private volatile bool _hungaryTestRunning = false;
+
+        private void StartDebugKeyListener()
+        {
+            Task.Run(async () =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        if (Console.KeyAvailable)
+                        {
+                            ConsoleKeyInfo key = Console.ReadKey(true);
+
+                            if (key.Key == ConsoleKey.H)
+                            {
+                                if (_hungaryTestRunning)
+                                {
+                                    Logger.Log("startup", "hungary-loss-test | already running");
+                                    continue;
+                                }
+
+                                _hungaryTestRunning = true;
+
+                                Logger.Log("startup", "hungary-loss-test | manual trigger");
+
+                                bool activated = await ActivateSpeedifyTargetAsync("hu");
+                                if (!activated)
+                                {
+                                    Logger.Log("startup", "hungary-loss-test | failed to activate Hungary");
+                                    _hungaryTestRunning = false;
+                                    continue;
+                                }
+
+                                Logger.Log("startup", "hungary-loss-test | Hungary activated | waiting 5000ms");
+                                await Task.Delay(5000);
+
+                                _ = Task.Run(async () =>
+                                {
+                                    try
+                                    {
+                                        await RunHungaryLossTestAsync(CancellationToken.None);
+                                    }
+                                    finally
+                                    {
+                                        _hungaryTestRunning = false;
+                                    }
+                                });
+                            }
+                        }
+
+                        await Task.Delay(100);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("startup", "hungary-loss-test | key listener error | " + ex.Message);
+                        await Task.Delay(1000);
+                    }
+                }
+            });
+        }
+
+        private async Task RunHungaryLossTestAsync(CancellationToken cancellationToken)
+        {
+            Logger.Log("startup", "hungary-loss-test | started | duration=5min");
+
+            DateTime endUtc = DateTime.UtcNow.AddMinutes(5);
+
+            while (DateTime.UtcNow < endUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var snap = fastPingSignalAnalyzer.Last10sSnapshot;
+
+                if (snap != null && snap.IsValid)
+                {
+                    Logger.Log(
+                        "startup",
+                        "hungary-loss-test | loss=" + (snap.AvgLossRate * 100.0).ToString("0.0") + "%" +
+                        " | avgPing=" + snap.AvgPingMs.ToString("0.0") +
+                        " | p95=" + snap.P95PingMs.ToString("0.0") +
+                        " | avgJit=" + snap.AvgJitterMs.ToString("0.0") +
+                        " | p95Jit=" + snap.P95JitterMs.ToString("0.0") +
+                        " | spkD=" + snap.SpikeDensityPerMinute.ToString("0.0"));
+                }
+                else
+                {
+                    Logger.Log("startup", "hungary-loss-test | no valid snapshot");
+                }
+
+                await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
+            }
+
+            Logger.Log("startup", "hungary-loss-test | finished");
         }
 
         // =========================
@@ -449,17 +545,17 @@ namespace WTFnetApp
         {
             if (startupEvaluationRunning)
             {
-                Logger.Log("startup", "startup evaluation already running | recheck ignored");
+                Logger.Log("startup", "hungary-loss-test | already running | ignored");
                 return;
             }
 
             if (!IsSpeedifyInstalled())
             {
-                Logger.Log("startup", "Speedify not installed -> skipping startup route evaluation");
+                Logger.Log("startup", "hungary-loss-test | Speedify not installed");
                 return;
             }
 
-            Logger.Log("startup", "starting startup route evaluation");
+            Logger.Log("startup", "hungary-loss-test | startup evaluation bypassed | Hungary only");
 
             startupEvaluationRunning = true;
 
@@ -467,12 +563,28 @@ namespace WTFnetApp
             {
                 try
                 {
-                    await RunStartupRouteEvaluationAsync();
+                    await EnsureSpeedifyProcessRunningAsync();
+                    await EnsureSpeedifyTelemetryAvailableAsync();
+
+                    Logger.Log("startup", "hungary-loss-test | activating Hungary");
+
+                    bool activated = await ActivateSpeedifyTargetAsync("hu");
+                    if (!activated)
+                    {
+                        Logger.Log("startup", "hungary-loss-test | failed to activate Hungary");
+                        return;
+                    }
+
+                    Logger.Log("startup", "hungary-loss-test | Hungary activated | waiting 5000ms");
+                    await Task.Delay(5000);
+
+                    await RunHungaryLossTestAsync(CancellationToken.None);
+
                     lastStartupEvaluationUtc = DateTime.UtcNow;
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log("startup", "startup route evaluation error: " + ex.Message);
+                    Logger.Log("startup", "hungary-loss-test error: " + ex.Message);
                 }
                 finally
                 {
@@ -500,13 +612,21 @@ namespace WTFnetApp
             if (!snap.HasConnectionStats && !snap.TunnelAggregatePresent)
                 return null;
 
+            double tunnelLatencyMs = snap.AggregateLatencyMs > 0
+                ? snap.AggregateLatencyMs
+                : snap.ReportedLatencyMs > 0
+                    ? snap.ReportedLatencyMs
+                    : -1;
+
             return new MiniSpeedifyMiniSnap
             {
                 TimeUtc = snap.TimeUtc,
                 HasConnectionStats = snap.HasConnectionStats,
                 TunnelAggregatePresent = snap.TunnelAggregatePresent,
-                AggregateLatencyMs = snap.AggregateLatencyMs,
+
+                AggregateLatencyMs = tunnelLatencyMs,
                 AggregateJitterMs = snap.AggregateJitterMs,
+
                 ReportedLatencyMs = snap.ReportedLatencyMs,
                 BaseLatencyMs = snap.BaseLatencyMs,
                 DynamicBaseMs = snap.DynamicBaseMs,
@@ -928,7 +1048,10 @@ namespace WTFnetApp
         private async Task<bool> ActivateSpeedifyTargetAsync(string connectTarget)
         {
             if (string.IsNullOrWhiteSpace(connectTarget))
+            {
+                Logger.Log("startup", "Speedify activation rejected | reason=empty-target");
                 return false;
+            }
 
             if (!System.IO.File.Exists(SpeedifyCliPath))
             {
@@ -936,11 +1059,19 @@ namespace WTFnetApp
                 return false;
             }
 
+            connectTarget = connectTarget.Trim();
+
             Logger.Log("startup", "activating Speedify target | " + connectTarget);
 
-            await RunSpeedifyCliAsync("connect " + connectTarget);
+            
+            int connectExit = await RunSpeedifyCliAsync("connect " + connectTarget);
+
+            Logger.Log("startup",
+                "Speedify connect result | requestedTarget=" + connectTarget +
+                " | exitCode=" + connectExit);
 
             DateTime connectWaitStartUtc = DateTime.UtcNow;
+
             bool connected = await WaitForSpeedifyConnectivityStateAsync(
                 shouldBeConnected: true,
                 connectTarget: connectTarget,
@@ -950,14 +1081,16 @@ namespace WTFnetApp
 
             if (connected)
             {
-                Logger.Log("startup", "Speedify connect transport confirmed | " + connectTarget +
+                Logger.Log("startup",
+                    "Speedify connect transport confirmed | requestedTarget=" + connectTarget +
                     " | elapsedMs=" + (DateTime.UtcNow - connectWaitStartUtc).TotalMilliseconds.ToString("0"));
+
                 Logger.Log("startup", "Speedify activation succeeded; startup readiness will wait for stable live stats");
-                Logger.Log("startup", "Speedify target active | " + connectTarget);
+                Logger.Log("startup", "Speedify target active | requestedTarget=" + connectTarget);
                 return true;
             }
 
-            Logger.Log("startup", "Speedify target did not become active in time | " + connectTarget);
+            Logger.Log("startup", "Speedify target did not become active in time | requestedTarget=" + connectTarget);
             return false;
         }
 
@@ -1165,8 +1298,13 @@ namespace WTFnetApp
 
         private async Task<int> RunSpeedifyCliAsync(string arguments)
         {
+            const int CliTimeoutMs = 8000;
+
             if (!System.IO.File.Exists(SpeedifyCliPath))
+            {
+                Logger.Log("startup", "Speedify CLI missing | path=" + SpeedifyCliPath);
                 return -1;
+            }
 
             try
             {
@@ -1177,19 +1315,70 @@ namespace WTFnetApp
                         FileName = SpeedifyCliPath,
                         Arguments = arguments,
                         UseShellExecute = false,
-                        CreateNoWindow = true
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
                     };
 
+                    Logger.Log("startup", "Speedify CLI run | args=" + arguments);
+
                     process.Start();
-                    await Task.Run(() => process.WaitForExit());
+
+                    bool exited = await Task.Run(() => process.WaitForExit(CliTimeoutMs));
+
+                    if (!exited)
+                    {
+                        try
+                        {
+                            process.Kill();
+                        }
+                        catch
+                        {
+                            // ignored
+                        }
+
+                        Logger.Log("startup",
+                            "Speedify CLI timeout/killed | timeoutMs=" + CliTimeoutMs +
+                            " | args=" + arguments);
+
+                        return -2;
+                    }
+
+                    string stdout = process.StandardOutput.ReadToEnd();
+                    string stderr = process.StandardError.ReadToEnd();
+
+                    Logger.Log("startup",
+                        "Speedify CLI exit | code=" + process.ExitCode +
+                        " | args=" + arguments +
+                        " | stdout=" + FormatCliOutput(stdout) +
+                        " | stderr=" + FormatCliOutput(stderr));
+
                     return process.ExitCode;
                 }
             }
             catch (Exception ex)
             {
-                Logger.Log("startup", "Speedify CLI error: " + ex.Message);
+                Logger.Log("startup", "Speedify CLI error | args=" + arguments + " | error=" + ex.Message);
                 return -1;
             }
+        }
+
+        private static string FormatCliOutput(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "-";
+
+            value = value.Trim();
+
+            value = value
+                .Replace("\r", " ")
+                .Replace("\n", " ")
+                .Replace("\t", " ");
+
+            while (value.Contains("  "))
+                value = value.Replace("  ", " ");
+
+            return value;
         }
 
         // =========================

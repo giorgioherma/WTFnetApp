@@ -120,10 +120,15 @@ namespace WTFnetApp
             StartupDecisionSnapshot startup = state.StartupDecision ?? new StartupDecisionSnapshot();
             SpeedifyTelemetrySnapshot speedify = state.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
 
+            double tunnelLatencyMs = speedify.AggregateLatencyMs > 0
+                ? speedify.AggregateLatencyMs
+                : speedify.LatencyMs > 0
+                    ? speedify.LatencyMs
+                    : -1;
+
             bool hasLiveTelemetrySignal =
                 speedify.ActiveConnectionCount > 0 ||
-                speedify.LatencyMs > 0 ||
-                speedify.AggregateLatencyMs > 0 ||
+                tunnelLatencyMs > 0 ||
                 speedify.AggregateJitterMs > 0 ||
                 state.QueueDelayMs > 0;
 
@@ -131,7 +136,11 @@ namespace WTFnetApp
             startup.HasFreshTelemetry = state.SpeedifyTelemetryFresh && hasLiveTelemetrySignal;
             startup.ActiveConnectionCount = speedify.ActiveConnectionCount;
             startup.TimeUtc = state.TimeUtc;
-            startup.AggregateLatencyMs = speedify.AggregateLatencyMs;
+
+            // Startup should use best available tunnel latency.
+            // Speedify often reports aggregate latency as 0 while LatencyMs has the usable tunnel RTT.
+            startup.AggregateLatencyMs = tunnelLatencyMs;
+
             startup.AggregateJitterMs = speedify.AggregateJitterMs;
             startup.QueueDelayMs = state.QueueDelayMs;
             startup.ReportedLatencyMs = speedify.LatencyMs;

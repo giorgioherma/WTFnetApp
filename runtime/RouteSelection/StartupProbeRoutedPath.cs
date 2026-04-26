@@ -495,6 +495,9 @@ namespace WTFnetApp
 
         private const int MainWindowSliceCount = 10;
         private static readonly TimeSpan StabilizationObserveSliceDuration = TimeSpan.FromMilliseconds(1500);
+        private static readonly TimeSpan CleanScoringWindowExtraWait = TimeSpan.FromSeconds(8);
+        private static readonly TimeSpan CleanScoringWindowPollInterval = TimeSpan.FromMilliseconds(500);
+        private const int CleanScoringWindowRequiredConfirmations = 3;
         private const int PhaseMiniMinimumFreshSamples = 3;
         private const double PhaseMiniMinimumSpreadMs = 900.0;
 
@@ -671,6 +674,21 @@ namespace WTFnetApp
                 stabilizationTimedOut = true;
                 stabilizationReason = "timeout-forced-stabilization-start";
                 startupLogger?.LogEvent(candidate, "STABILIZATION_TIMEOUT");
+            }
+
+            bool scoringWindowReady = await WaitForCleanScoringWindowStartAsync(
+                candidate,
+                timeBucketKey,
+                rawScore,
+                stabilizationReason,
+                phaseMiniBuffer,
+                cancellationToken);
+
+            if (!scoringWindowReady)
+            {
+                stabilizationTimedOut = true;
+                stabilizationReason = appendNote(stabilizationReason, "score-window-forced");
+                startupLogger?.LogEvent(candidate, "SCORING_WINDOW_FORCED_AFTER_EXTRA_WAIT");
             }
 
             startupLogger?.LogEvent(candidate, "MAIN_SCORING_WINDOW_STARTED");
@@ -901,6 +919,131 @@ namespace WTFnetApp
             startupLogger?.LogEvent(candidate, "MEASUREMENT_FINISHED");
 
             return aggregateRuntime;
+        }
+
+        private async Task<bool> WaitForCleanScoringWindowStartAsync(
+    ProbeCandidateDefinition candidate,
+    string timeBucketKey,
+    ProbeScoreResult rawScore,
+    string stabilizationReason,
+    StartupMiniSnapBuffer phaseMiniBuffer,
+    CancellationToken cancellationToken)
+        {
+            DateTime waitStartUtc = DateTime.UtcNow;
+            DateTime forceUtc = waitStartUtc + CleanScoringWindowExtraWait;
+            int confirmations = 0;
+
+            while (DateTime.UtcNow < forceUtc)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                ProbeCandidateRuntimeData snapshot = BuildCurrentWindowRuntime(candidate, timeBucketKey);
+                bool clean = IsCleanEnoughToStartScoring(snapshot, out string reason);
+
+                if (clean)
+                    confirmations++;
+                else
+                    confirmations = 0;
+
+                if (confirmations >= CleanScoringWindowRequiredConfirmations)
+                {
+                    startupLogger?.LogEvent(candidate, "SCORING_WINDOW_CLEAN_START (" + reason + ")");
+                    return true;
+                }
+
+                startupLogger?.LogStartupPhase(
+                    candidate,
+                    "score-wait",
+                    snapshot,
+                    clean
+                        ? "clean-confirm-" + confirmations + "/" + CleanScoringWindowRequiredConfirmations
+                        : reason,
+                    null,
+                    logMini: false);
+
+                await Task.Delay(CleanScoringWindowPollInterval, cancellationToken);
+            }
+
+            return false;
+        }
+
+        private ProbeCandidateRuntimeData BuildCurrentWindowRuntime(
+            ProbeCandidateDefinition candidate,
+            string timeBucketKey)
+        {
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot = getShortWindowSnapshot?.Invoke();
+
+            ProbeCandidateRuntimeData runtime = new ProbeCandidateRuntimeData
+            {
+                Candidate = candidate,
+                TimeBucketKey = timeBucketKey,
+                ReachedUsableState = true,
+                MeasurementStarted = false,
+                MeasurementCompleted = false,
+                MeasurementStoppedEarly = false
+            };
+
+            if (snapshot == null || !snapshot.IsValid)
+            {
+                runtime.IsValid = false;
+                return runtime;
+            }
+
+            runtime.IsValid = true;
+            runtime.AvgLossRate = snapshot.AvgLossRate;
+            runtime.AvgPingMs = snapshot.AvgPingMs;
+            runtime.P95PingMs = snapshot.P95PingMs;
+            runtime.AvgJitterMs = snapshot.AvgJitterMs;
+            runtime.P95JitterMs = snapshot.P95JitterMs;
+            runtime.SpikeDensityPerMinute = snapshot.SpikeDensityPerMinute;
+            runtime.StaleRate = snapshot.StaleRate;
+
+            return runtime;
+        }
+
+        private static bool IsCleanEnoughToStartScoring(
+            ProbeCandidateRuntimeData runtime,
+            out string reason)
+        {
+            reason = "clean";
+
+            if (runtime == null || !runtime.IsValid)
+            {
+                reason = "missing-current-window";
+                return false;
+            }
+
+            if (runtime.StaleRate >= 0.20)
+            {
+                reason = "stale-window";
+                return false;
+            }
+
+            if (runtime.AvgLossRate >= 0.08)
+            {
+                reason = "loss-still-settling";
+                return false;
+            }
+
+            if (runtime.SpikeDensityPerMinute >= 24.0)
+            {
+                reason = "spikes-still-settling";
+                return false;
+            }
+
+            if (runtime.AvgJitterMs >= 8.0 || runtime.P95JitterMs >= 16.0)
+            {
+                reason = "jitter-still-settling";
+                return false;
+            }
+
+            if (runtime.P95PingMs >= 180.0)
+            {
+                reason = "latency-tail-still-settling";
+                return false;
+            }
+
+            return true;
         }
 
         private static List<TimeSpan> BuildMainWindowSlices(TimeSpan totalDuration)
