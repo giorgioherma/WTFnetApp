@@ -937,8 +937,15 @@ namespace WTFnetApp
             }
 
             bool stillConnected = IsSpeedifyCurrentlyConnected();
-            Logger.Log("startup", "Speedify disconnect timeout | stillConnected=" + (stillConnected ? "yes" : "no"));
-            return !stillConnected;
+            if (!stillConnected)
+            {
+                ClearSpeedifyRuntimeSnapshot("disconnect-confirmed-timeout-observed-off");
+                Logger.Log("startup", "Speedify disconnect confirmed after timeout | observedDisconnected=yes");
+                return true;
+            }
+
+            Logger.Log("startup", "Speedify disconnect timeout | stillConnected=yes");
+            return false;
         }
 
         private async Task<bool> ActivateSpeedifyTargetAsync(string connectTarget)
@@ -1224,7 +1231,7 @@ namespace WTFnetApp
             if (candidate.Kind == ProbeCandidateKind.Raw)
                 runtime.Notes = "Raw baseline capture";
 
-            if (LogStartupProbeSlices)
+            if (ShouldLogStartupProbeSlices())
             {
                 Logger.Log("startup",
                     "capture probe | " + candidate +
@@ -1377,6 +1384,11 @@ namespace WTFnetApp
 
             token = token.Trim('-');
             return token.Length == 0 ? null : token;
+        }
+
+        private bool ShouldLogStartupProbeSlices()
+        {
+            return LogStartupProbeSlices;
         }
 
         // =========================
