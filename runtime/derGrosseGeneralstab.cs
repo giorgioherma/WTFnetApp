@@ -69,6 +69,7 @@ namespace WTFnetApp
 
         private const string FixedPrimaryProbeTarget = "1.1.1.1";
         private const string FixedSecondaryProbeTarget = "8.8.8.8";
+        private const bool LogStartupProbeSlices = false;
 
         private string lastFastPingPrimaryTarget;
         private string lastFastPingSecondaryTarget;
@@ -901,6 +902,7 @@ namespace WTFnetApp
                 return false;
             }
 
+            ClearSpeedifyRuntimeSnapshot("disconnect-request");
             await RunSpeedifyCliAsync("disconnect");
 
             DateTime disconnectWaitStartUtc = DateTime.UtcNow;
@@ -913,6 +915,7 @@ namespace WTFnetApp
 
             if (disconnected)
             {
+                ClearSpeedifyRuntimeSnapshot("disconnect-confirmed");
                 Logger.Log("startup", "Speedify disconnect confirmed | elapsedMs=" +
                     (DateTime.UtcNow - disconnectWaitStartUtc).TotalMilliseconds.ToString("0"));
                 Logger.Log("startup", "Speedify disabled for raw baseline");
@@ -928,6 +931,7 @@ namespace WTFnetApp
 
             if (disconnectedLate)
             {
+                ClearSpeedifyRuntimeSnapshot("disconnect-confirmed-late");
                 Logger.Log("startup", "Speedify disconnect confirmed after timeout grace");
                 return true;
             }
@@ -952,10 +956,7 @@ namespace WTFnetApp
             }
 
             connectTarget = connectTarget.Trim();
-            lock (publishSync)
-            {
-                lastActivatedServerIdentity = null;
-            }
+            ClearSpeedifyRuntimeSnapshot("new-activation");
 
             Logger.Log("startup", "activating Speedify target | " + connectTarget);
 
@@ -1006,6 +1007,26 @@ namespace WTFnetApp
 
             Logger.Log("startup", "Speedify target did not become active in time | requestedTarget=" + connectTarget);
             return false;
+        }
+
+        private void ClearSpeedifyRuntimeSnapshot(string reason)
+        {
+            string normalizedReason = string.IsNullOrWhiteSpace(reason) ? "unspecified" : reason.Trim();
+            bool clearIdentity =
+                normalizedReason.IndexOf("raw", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalizedReason.IndexOf("disconnect", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                normalizedReason.IndexOf("activation", StringComparison.OrdinalIgnoreCase) >= 0;
+
+            lock (publishSync)
+            {
+                lastSnapshot = null;
+                lastSpeedifySnapshotUtc = DateTime.MinValue;
+
+                if (clearIdentity)
+                    lastActivatedServerIdentity = null;
+            }
+
+            Logger.Log("startup", "speedify runtime snapshot cleared | reason=" + normalizedReason);
         }
 
         private bool IsSpeedifyCurrentlyConnected()
@@ -1200,22 +1221,25 @@ namespace WTFnetApp
             if (candidate.Kind == ProbeCandidateKind.Raw)
                 runtime.Notes = "Raw baseline capture";
 
-            Logger.Log("startup",
-                "capture probe | " + candidate +
-                " | avgPing=" + FormatProbeMetric(runtime.AvgPingMs) +
-                " | p95=" + FormatProbeMetric(runtime.P95PingMs) +
-                " | avgJit=" + FormatProbeMetric(runtime.AvgJitterMs) +
-                " | p95Jit=" + FormatProbeMetric(runtime.P95JitterMs) +
-                " | loss=" + FormatProbePercent(runtime.AvgLossRate) +
-                " | conf=" + FormatProbeMetric(runtime.AvgConfidence) +
-                " | spkD=" + FormatProbeMetric(runtime.SpikeDensityPerMinute) +
-                " | measurementEpochMs=" + FormatProbeMetric(runtime.MeasurementEpochMs) +
-                " | sliceSampleCount=" + runtime.SliceSampleCount +
-                " | sampleAgeMs=" + FormatProbeMetric(runtime.SliceOldestSampleAgeMs) +
-                " | spFresh=" + runtime.SpeedifyFreshSampleCount +
-                " | spAggLat=" + FormatProbeMetric(runtime.SpeedifyAggregateLatencyMs) +
-                " | spAggJit=" + FormatProbeMetric(runtime.SpeedifyAggregateJitterMs) +
-                " | spLatStd=--");
+            if (LogStartupProbeSlices)
+            {
+                Logger.Log("startup",
+                    "capture probe | " + candidate +
+                    " | avgPing=" + FormatProbeMetric(runtime.AvgPingMs) +
+                    " | p95=" + FormatProbeMetric(runtime.P95PingMs) +
+                    " | avgJit=" + FormatProbeMetric(runtime.AvgJitterMs) +
+                    " | p95Jit=" + FormatProbeMetric(runtime.P95JitterMs) +
+                    " | loss=" + FormatProbePercent(runtime.AvgLossRate) +
+                    " | conf=" + FormatProbeMetric(runtime.AvgConfidence) +
+                    " | spkD=" + FormatProbeMetric(runtime.SpikeDensityPerMinute) +
+                    " | measurementEpochMs=" + FormatProbeMetric(runtime.MeasurementEpochMs) +
+                    " | sliceSampleCount=" + runtime.SliceSampleCount +
+                    " | sampleAgeMs=" + FormatProbeMetric(runtime.SliceOldestSampleAgeMs) +
+                    " | spFresh=" + runtime.SpeedifyFreshSampleCount +
+                    " | spAggLat=" + FormatProbeMetric(runtime.SpeedifyAggregateLatencyMs) +
+                    " | spAggJit=" + FormatProbeMetric(runtime.SpeedifyAggregateJitterMs) +
+                    " | spLatStd=--");
+            }
 
             Logger.Log("runtime",
                 "capture | " + candidate +
@@ -1528,9 +1552,6 @@ namespace WTFnetApp
 
         private static SpeedifyActivatedServerIdentity TryParseActivatedServerIdentity(string requestedTarget, string stdout)
         {
-            int rawLength = stdout != null ? stdout.Length : 0;
-            Logger.Log("startup", "Speedify activation identity parse begin | stdoutLen=" + rawLength);
-
             string normalized = NormalizeCliJsonOutput(stdout);
             if (string.IsNullOrWhiteSpace(normalized))
             {
@@ -1540,48 +1561,7 @@ namespace WTFnetApp
 
             try
             {
-                using (JsonDocument document = JsonDocument.Parse(normalized))
-                {
-                    Logger.Log("startup", "Speedify activation identity parse | jsonParse=ok");
-                    JsonElement root = document.RootElement;
-                    string friendlyName = GetJsonString(root, "friendlyName");
-                    string tag = GetJsonString(root, "tag");
-                    string publicIp = GetJsonArrayFirstString(root, "publicIP");
-                    string country = GetJsonString(root, "country");
-                    string city = GetJsonString(root, "city");
-                    string dataCenter = GetJsonString(root, "dataCenter");
-                    bool isPremium = GetJsonBool(root, "isPremium");
-                    int num = GetJsonInt(root, "num");
-
-                    Logger.Log("startup",
-                        "Speedify activation identity extracted | friendlyName=" + (friendlyName ?? "-") +
-                        " | tag=" + (tag ?? "-") +
-                        " | publicIp=" + (publicIp ?? "-") +
-                        " | country=" + (country ?? "-") +
-                        " | city=" + (city ?? "-") +
-                        " | dataCenter=" + (dataCenter ?? "-") +
-                        " | num=" + (num >= 0 ? num.ToString(CultureInfo.InvariantCulture) : "-"));
-
-                    bool hasIdentity =
-                        !string.IsNullOrWhiteSpace(friendlyName) ||
-                        !string.IsNullOrWhiteSpace(tag) ||
-                        !string.IsNullOrWhiteSpace(publicIp);
-
-                    if (!hasIdentity)
-                        return null;
-
-                    return new SpeedifyActivatedServerIdentity(
-                        requestedTarget: requestedTarget,
-                        capturedUtc: DateTime.UtcNow,
-                        friendlyName: friendlyName,
-                        tag: tag,
-                        publicIp: publicIp,
-                        country: country,
-                        city: city,
-                        dataCenter: dataCenter,
-                        isPremium: isPremium,
-                        num: num);
-                }
+                return ParseActivatedServerIdentityFromJson(requestedTarget, normalized);
             }
             catch (Exception ex)
             {
@@ -1593,48 +1573,7 @@ namespace WTFnetApp
                 {
                     try
                     {
-                        using (JsonDocument document = JsonDocument.Parse(spacedFallback))
-                        {
-                            Logger.Log("startup", "Speedify activation identity parse | jsonParse=fallback-ok");
-                            JsonElement root = document.RootElement;
-                            string friendlyName = GetJsonString(root, "friendlyName");
-                            string tag = GetJsonString(root, "tag");
-                            string publicIp = GetJsonArrayFirstString(root, "publicIP");
-                            string country = GetJsonString(root, "country");
-                            string city = GetJsonString(root, "city");
-                            string dataCenter = GetJsonString(root, "dataCenter");
-                            bool isPremium = GetJsonBool(root, "isPremium");
-                            int num = GetJsonInt(root, "num");
-
-                            Logger.Log("startup",
-                                "Speedify activation identity extracted | friendlyName=" + (friendlyName ?? "-") +
-                                " | tag=" + (tag ?? "-") +
-                                " | publicIp=" + (publicIp ?? "-") +
-                                " | country=" + (country ?? "-") +
-                                " | city=" + (city ?? "-") +
-                                " | dataCenter=" + (dataCenter ?? "-") +
-                                " | num=" + (num >= 0 ? num.ToString(CultureInfo.InvariantCulture) : "-"));
-
-                            bool hasIdentity =
-                                !string.IsNullOrWhiteSpace(friendlyName) ||
-                                !string.IsNullOrWhiteSpace(tag) ||
-                                !string.IsNullOrWhiteSpace(publicIp);
-
-                            if (!hasIdentity)
-                                return null;
-
-                            return new SpeedifyActivatedServerIdentity(
-                                requestedTarget: requestedTarget,
-                                capturedUtc: DateTime.UtcNow,
-                                friendlyName: friendlyName,
-                                tag: tag,
-                                publicIp: publicIp,
-                                country: country,
-                                city: city,
-                                dataCenter: dataCenter,
-                                isPremium: isPremium,
-                                num: num);
-                        }
+                        return ParseActivatedServerIdentityFromJson(requestedTarget, spacedFallback);
                     }
                     catch (Exception fallbackEx)
                     {
@@ -1644,6 +1583,42 @@ namespace WTFnetApp
 
                 Logger.Log("startup", "Speedify activation identity parse preview | stdout=" + BuildSanitizedPreview(normalized));
                 return null;
+            }
+        }
+
+        private static SpeedifyActivatedServerIdentity ParseActivatedServerIdentityFromJson(string requestedTarget, string json)
+        {
+            using (JsonDocument document = JsonDocument.Parse(json))
+            {
+                JsonElement root = document.RootElement;
+                string friendlyName = GetJsonString(root, "friendlyName");
+                string tag = GetJsonString(root, "tag");
+                string publicIp = GetJsonArrayFirstString(root, "publicIP");
+                string country = GetJsonString(root, "country");
+                string city = GetJsonString(root, "city");
+                string dataCenter = GetJsonString(root, "dataCenter");
+                bool isPremium = GetJsonBool(root, "isPremium");
+                int num = GetJsonInt(root, "num");
+
+                bool hasIdentity =
+                    !string.IsNullOrWhiteSpace(friendlyName) ||
+                    !string.IsNullOrWhiteSpace(tag) ||
+                    !string.IsNullOrWhiteSpace(publicIp);
+
+                if (!hasIdentity)
+                    return null;
+
+                return new SpeedifyActivatedServerIdentity(
+                    requestedTarget: requestedTarget,
+                    capturedUtc: DateTime.UtcNow,
+                    friendlyName: friendlyName,
+                    tag: tag,
+                    publicIp: publicIp,
+                    country: country,
+                    city: city,
+                    dataCenter: dataCenter,
+                    isPremium: isPremium,
+                    num: num);
             }
         }
 
@@ -1752,7 +1727,9 @@ namespace WTFnetApp
             if (string.IsNullOrWhiteSpace(value))
                 return "-";
 
-            value = value.Trim();
+            string normalized = NormalizeCliJsonOutput(value);
+            string collapsed = TryCollapseInterCharacterSpacing(normalized);
+            value = string.IsNullOrWhiteSpace(collapsed) ? normalized : collapsed;
 
             value = value
                 .Replace("\r", " ")
