@@ -196,15 +196,14 @@ namespace WTFnetApp
                 snapshot.Extended = true;
             if (runtime != null)
             {
-                if (snapshot.Runtime != null)
-                {
-                    ProbeCandidateRuntimeData mergedIdentity =
-                        StartupProbeRuntimeMerge.MergeMeasuredIdentity(snapshot.Runtime, runtime);
-                    ApplyMeasuredIdentity(runtime, mergedIdentity);
-                    ApplyMeasuredIdentity(snapshot.Runtime, mergedIdentity);
-                }
-
-                snapshot.Runtime = runtime;
+                snapshot.Runtime = snapshot.Runtime == null
+                    ? runtime
+                    : StartupProbeRuntimeMerge.MergeMeasuredRuntime(
+                        snapshot.Runtime,
+                        runtime,
+                        TimeSpan.Zero,
+                        TimeSpan.Zero,
+                        AppendNote);
             }
             if (score != null)
             {
