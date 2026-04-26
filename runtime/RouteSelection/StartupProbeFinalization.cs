@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -369,26 +370,63 @@ namespace WTFnetApp
             if (leader?.Runtime != null)
                 leader.Runtime.RestoredServerTarget = restoreTarget;
 
+            string restoredServerLabel = (exactSupported ? "exactTag:" : "routeTarget:") + (restoreTarget ?? "-");
+            string measuredSummary =
+                " | measuredFriendlyName=" + (leader?.Runtime?.MeasuredServerFriendlyName ?? "-") +
+                " | measuredTag=" + (leader?.Runtime?.MeasuredServerTag ?? "-") +
+                " | measuredPublicIp=" + (leader?.Runtime?.MeasuredServerPublicIp ?? "-") +
+                " | measuredRouteTarget=" + (leader?.Runtime?.MeasuredRouteTarget ?? "-") +
+                " | restoredTarget=" + (restoreTarget ?? "-");
+
             if (activated)
                 log?.Invoke("startup-probe | leader restored -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader) +
                     " | measuredServer=" + measuredServer +
-                    " | restoredServer=routeTarget:" + (restoreTarget ?? "-") +
+                    " | restoredServer=" + restoredServerLabel +
                     " | exactRequested=" + (exactRequested ? "yes" : "no") +
-                    " | exactSupported=" + (exactSupported ? "yes" : "no"));
+                    " | exactSupported=" + (exactSupported ? "yes" : "no") +
+                    measuredSummary);
             else
                 log?.Invoke("startup-probe | leader restore failed -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader) +
                     " | measuredServer=" + measuredServer +
-                    " | restoredServer=routeTarget:" + (restoreTarget ?? "-") +
+                    " | restoredServer=" + restoredServerLabel +
                     " | exactRequested=" + (exactRequested ? "yes" : "no") +
-                    " | exactSupported=" + (exactSupported ? "yes" : "no"));
+                    " | exactSupported=" + (exactSupported ? "yes" : "no") +
+                    measuredSummary);
 
             return activated;
         }
 
         private static bool SupportsExactRestoreTarget(string exactTarget)
         {
-            _ = exactTarget;
-            return false;
+            if (string.IsNullOrWhiteSpace(exactTarget))
+                return false;
+
+            string normalized = exactTarget.Trim().ToLowerInvariant();
+            if (!Regex.IsMatch(normalized, @"^[a-z0-9-]+$"))
+                return false;
+
+            string[] parts = normalized.Split('-');
+            if (parts.Length < 3)
+                return false;
+
+            string country = parts[0];
+            if (country.Length != 2 || !country.All(char.IsLetter))
+                return false;
+
+            string tail = parts[parts.Length - 1];
+            if (!int.TryParse(tail, out int number) || number <= 0)
+                return false;
+
+            for (int i = 1; i < parts.Length - 1; i++)
+            {
+                string middle = parts[i];
+                if (string.IsNullOrWhiteSpace(middle))
+                    return false;
+                if (!middle.All(char.IsLetterOrDigit))
+                    return false;
+            }
+
+            return true;
         }
 
         private static string BuildMeasuredServerIdentity(ProbeCandidateRuntimeData runtime)

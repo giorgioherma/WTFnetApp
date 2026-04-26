@@ -16,10 +16,20 @@ namespace WTFnetApp
 
         private readonly Queue<double> latencyWindow = new Queue<double>();
         private const int LatencyWindowSize = 8;
+        private const double SnapshotLatencyLogDeltaMs = 8.0;
+        private static readonly TimeSpan SnapshotLogHeartbeatInterval = TimeSpan.FromSeconds(30);
 
         private readonly SpeedifyStructuredState structuredState = new SpeedifyStructuredState();
         private MiniSpeedifyMiniSnap lastMiniConnectionStatsSnapshot;
         private bool lastConnectionStatsHadAggregate;
+        private bool hasLoggedSnapshotState;
+        private bool lastLoggedSnapshotConnected;
+        private int lastLoggedSnapshotActiveLinks;
+        private int lastLoggedSnapshotWarnings;
+        private string lastLoggedSnapshotServer;
+        private string lastLoggedSnapshotPublicIp;
+        private double lastLoggedSnapshotLatencyMs = -1;
+        private DateTime lastLoggedSnapshotUtc = DateTime.MinValue;
 
         public SpeedifyStructuredState CurrentStructuredState
         {
@@ -332,6 +342,9 @@ namespace WTFnetApp
         private void ParseAggregateTunnelRow(JsonElement row)
         {
             structuredState.Tunnel.Connected = ReadBool(row, "cnnct");
+            if (!structuredState.Tunnel.Connected)
+                ClearStructuredConnectedServerIdentity();
+
             structuredState.Tunnel.Congested = ReadBoolWithFallback(row, "congested", structuredState.Tunnel.Congested);
             structuredState.Tunnel.DownloadCongested = ReadBoolWithFallback(row, "downloadCongested", structuredState.Tunnel.DownloadCongested);
             structuredState.Tunnel.UploadCongested = ReadBoolWithFallback(row, "uploadCongested", structuredState.Tunnel.UploadCongested);
@@ -463,7 +476,11 @@ namespace WTFnetApp
 
             bool? connected = ReadNullableBool(root, "connected");
             if (connected.HasValue)
+            {
                 structuredState.Tunnel.Connected = connected.Value;
+                if (!connected.Value)
+                    ClearStructuredConnectedServerIdentity();
+            }
         }
 
         private void ParseConnectedServerIntoStructured(JsonElement root)
@@ -678,6 +695,44 @@ namespace WTFnetApp
                 });
             }
 
+            MaybeLogSnapshot(snapshot);
+
+            return snapshot;
+        }
+
+        private void ClearStructuredConnectedServerIdentity()
+        {
+            structuredState.Tunnel.ConnectedServerName = null;
+            structuredState.Tunnel.ConnectedServerPublicIp = null;
+            structuredState.HasConnectedServer = false;
+            structuredState.LastConnectedServerUtc = DateTime.MinValue;
+        }
+
+        private void MaybeLogSnapshot(MetricsSnapshot snapshot)
+        {
+            DateTime now = DateTime.UtcNow;
+            int activeLinks = snapshot != null ? snapshot.Links.Count : 0;
+            string server = snapshot?.ConnectedServerName ?? string.Empty;
+            string publicIp = snapshot?.ConnectedServerPublicIp ?? string.Empty;
+
+            bool connectedChanged = !hasLoggedSnapshotState || lastLoggedSnapshotConnected != snapshot.TunnelConnected;
+            bool linksChanged = !hasLoggedSnapshotState || lastLoggedSnapshotActiveLinks != activeLinks;
+            bool warningsChanged = !hasLoggedSnapshotState || lastLoggedSnapshotWarnings != snapshot.ParseWarningCount;
+            bool identityChanged = !hasLoggedSnapshotState ||
+                !string.Equals(lastLoggedSnapshotServer, server, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(lastLoggedSnapshotPublicIp, publicIp, StringComparison.OrdinalIgnoreCase);
+            bool latencyChanged = !hasLoggedSnapshotState ||
+                lastLoggedSnapshotLatencyMs < 0 ||
+                snapshot.LatencyMs < 0 ||
+                Math.Abs(snapshot.LatencyMs - lastLoggedSnapshotLatencyMs) >= SnapshotLatencyLogDeltaMs;
+
+            bool heartbeatDue = !hasLoggedSnapshotState ||
+                lastLoggedSnapshotUtc == DateTime.MinValue ||
+                (now - lastLoggedSnapshotUtc) >= SnapshotLogHeartbeatInterval;
+
+            if (!(connectedChanged || linksChanged || warningsChanged || identityChanged || latencyChanged || heartbeatDue))
+                return;
+
             Logger.Log("speedify-snapshot",
                 "connected=" + snapshot.TunnelConnected +
                 " | aggLat=" + snapshot.AggregateLatencyMs +
@@ -687,10 +742,17 @@ namespace WTFnetApp
                 " | dynBase=" + snapshot.DynamicBase +
                 " | server=" + SafeText(snapshot.ConnectedServerName) +
                 " | pubIp=" + SafeText(snapshot.ConnectedServerPublicIp) +
-                " | links=" + snapshot.Links.Count +
+                " | links=" + activeLinks +
                 " | warnings=" + snapshot.ParseWarningCount);
 
-            return snapshot;
+            hasLoggedSnapshotState = true;
+            lastLoggedSnapshotConnected = snapshot.TunnelConnected;
+            lastLoggedSnapshotActiveLinks = activeLinks;
+            lastLoggedSnapshotWarnings = snapshot.ParseWarningCount;
+            lastLoggedSnapshotServer = server;
+            lastLoggedSnapshotPublicIp = publicIp;
+            lastLoggedSnapshotLatencyMs = snapshot.LatencyMs;
+            lastLoggedSnapshotUtc = now;
         }
 
         private SpeedifyLinkState GetBestLinkByJitterStability()

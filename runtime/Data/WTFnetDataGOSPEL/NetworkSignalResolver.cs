@@ -9,7 +9,15 @@ namespace WTFnetApp
         private int consecutiveStableSpeedifySnapshots = 0;
         private DateTime lastStableSpeedifySnapshotUtc = DateTime.MinValue;
         private static readonly TimeSpan StableSnapshotGapReset = TimeSpan.FromSeconds(2);
+        private static readonly TimeSpan SpeedifyCheckHeartbeatInterval = TimeSpan.FromSeconds(30);
         private readonly FastPingSignalAnalyzer fastPingSignalAnalyzer;
+        private string lastLoggedSpeedifyCheckReason;
+        private bool? lastLoggedSpeedifyCheckValid;
+        private bool? lastLoggedSpeedifyCheckConnected;
+        private int? lastLoggedSpeedifyCheckActive;
+        private string lastLoggedSpeedifyCheckServer;
+        private string lastLoggedSpeedifyCheckPublicIp;
+        private DateTime lastLoggedSpeedifyCheckUtc = DateTime.MinValue;
 
         public NetworkSignalResolver(FastPingSignalAnalyzer fastPingSignalAnalyzer)
         {
@@ -39,28 +47,12 @@ namespace WTFnetApp
                 IsTrustedSpeedifySnapshot(snapshot, out speedifyReason);
 
             if (hasSpeedify)
-            {
-                Logger.Log("speedify-check",
-                    "fresh=" + speedifyFresh +
-                    " | connected=" + snapshot.TunnelConnected +
-                    " | active=" + snapshot.ActiveConnectionCount +
-                    " | aggLat=" + snapshot.AggregateLatencyMs.ToString("0.0") +
-                    " | lat=" + snapshot.LatencyMs.ToString("0.0") +
-                    " | adapter1=" + snapshot.Adapter1Latency.ToString("0.0") +
-                    " | structuredCore=" + snapshot.StructuredCoreComplete +
-                    " | hasConn=" + snapshot.HasConnectionStats +
-                    " | hasNet=" + snapshot.HasNetworks +
-                    " | hasCurrent=" + snapshot.HasCurrentState +
-                    " | hasServer=" + snapshot.HasConnectedServer +
-                    " | warnings=" + snapshot.ParseWarningCount +
-                    " | valid=" + speedifyValid +
-                    " | reason=" + speedifyReason);
-            }
+                MaybeLogSpeedifyCheck(snapshot, speedifyFresh, speedifyValid, speedifyReason);
 
             bool speedifyUsable = speedifyValid;
             state.SpeedifyAvailable = speedifyUsable;
 
-            if (hasSpeedify)
+            if (hasSpeedify && speedifyFresh)
                 ApplySpeedifyFields(state, snapshot);
 
             if (hasFastPing)
@@ -112,6 +104,57 @@ namespace WTFnetApp
             return state;
         }
 
+        private void MaybeLogSpeedifyCheck(MetricsSnapshot snapshot, bool speedifyFresh, bool speedifyValid, string speedifyReason)
+        {
+            DateTime now = DateTime.UtcNow;
+            bool connected = speedifyFresh && snapshot != null && snapshot.TunnelConnected;
+            int active = speedifyFresh && snapshot != null ? snapshot.ActiveConnectionCount : 0;
+            string server = speedifyFresh ? snapshot?.ConnectedServerName ?? string.Empty : string.Empty;
+            string publicIp = speedifyFresh ? snapshot?.ConnectedServerPublicIp ?? string.Empty : string.Empty;
+            string effectiveReason = speedifyFresh ? speedifyReason : "no fresh snapshot";
+
+            bool changed =
+                !lastLoggedSpeedifyCheckValid.HasValue ||
+                lastLoggedSpeedifyCheckValid.Value != speedifyValid ||
+                !string.Equals(lastLoggedSpeedifyCheckReason, effectiveReason, StringComparison.OrdinalIgnoreCase) ||
+                !lastLoggedSpeedifyCheckConnected.HasValue ||
+                lastLoggedSpeedifyCheckConnected.Value != connected ||
+                !lastLoggedSpeedifyCheckActive.HasValue ||
+                lastLoggedSpeedifyCheckActive.Value != active ||
+                !string.Equals(lastLoggedSpeedifyCheckServer, server, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(lastLoggedSpeedifyCheckPublicIp, publicIp, StringComparison.OrdinalIgnoreCase);
+
+            bool heartbeatDue = lastLoggedSpeedifyCheckUtc == DateTime.MinValue ||
+                (now - lastLoggedSpeedifyCheckUtc) >= SpeedifyCheckHeartbeatInterval;
+
+            if (!changed && !heartbeatDue)
+                return;
+
+            Logger.Log("speedify-check",
+                "fresh=" + speedifyFresh +
+                " | connected=" + connected +
+                " | active=" + active +
+                " | aggLat=" + (speedifyFresh ? snapshot.AggregateLatencyMs.ToString("0.0") : "0.0") +
+                " | lat=" + (speedifyFresh ? snapshot.LatencyMs.ToString("0.0") : "0.0") +
+                " | adapter1=" + (speedifyFresh ? snapshot.Adapter1Latency.ToString("0.0") : "0.0") +
+                " | structuredCore=" + (speedifyFresh && snapshot.StructuredCoreComplete) +
+                " | hasConn=" + (speedifyFresh && snapshot.HasConnectionStats) +
+                " | hasNet=" + (speedifyFresh && snapshot.HasNetworks) +
+                " | hasCurrent=" + (speedifyFresh && snapshot.HasCurrentState) +
+                " | hasServer=" + (speedifyFresh && snapshot.HasConnectedServer) +
+                " | warnings=" + (speedifyFresh ? snapshot.ParseWarningCount : 0) +
+                " | valid=" + speedifyValid +
+                " | reason=" + effectiveReason);
+
+            lastLoggedSpeedifyCheckUtc = now;
+            lastLoggedSpeedifyCheckReason = effectiveReason;
+            lastLoggedSpeedifyCheckValid = speedifyValid;
+            lastLoggedSpeedifyCheckConnected = connected;
+            lastLoggedSpeedifyCheckActive = active;
+            lastLoggedSpeedifyCheckServer = server;
+            lastLoggedSpeedifyCheckPublicIp = publicIp;
+        }
+
         private static void PopulateStartupDecision(UnifiedNetworkState state)
         {
             if (state == null)
@@ -119,6 +162,24 @@ namespace WTFnetApp
 
             StartupDecisionSnapshot startup = state.StartupDecision ?? new StartupDecisionSnapshot();
             SpeedifyTelemetrySnapshot speedify = state.SpeedifyTelemetry ?? new SpeedifyTelemetrySnapshot();
+            bool speedifyFresh = state.SpeedifyTelemetryFresh;
+
+            if (!speedifyFresh)
+            {
+                startup.TunnelConnected = false;
+                startup.HasFreshTelemetry = false;
+                startup.ActiveConnectionCount = 0;
+                startup.TimeUtc = state.TimeUtc;
+                startup.AggregateLatencyMs = -1;
+                startup.AggregateJitterMs = -1;
+                startup.QueueDelayMs = 0;
+                startup.ReportedLatencyMs = -1;
+                startup.AggregateCongested = false;
+                startup.DownloadCongested = false;
+                startup.UploadCongested = false;
+                state.StartupDecision = startup;
+                return;
+            }
 
             double tunnelLatencyMs = speedify.AggregateLatencyMs > 0
                 ? speedify.AggregateLatencyMs

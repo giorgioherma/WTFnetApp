@@ -168,6 +168,11 @@ namespace WTFnetApp
                 " | composite=" + FormatNumber(score?.StartupSelectionScore ?? -1) +
                 " | overall=" + FormatNumber(score?.OverallStabilityScore ?? -1) +
                 " | warning=" + (score != null ? ProbeScoring.GetWarningLabel(score) : "--") +
+                " | measuredFriendlyName=" + (runtime?.MeasuredServerFriendlyName ?? "-") +
+                " | measuredTag=" + (runtime?.MeasuredServerTag ?? "-") +
+                " | measuredPublicIp=" + (runtime?.MeasuredServerPublicIp ?? "-") +
+                " | measuredRouteTarget=" + (runtime?.MeasuredRouteTarget ?? "-") +
+                " | restoredTarget=" + (runtime?.RestoredServerTarget ?? "-") +
                 " | outcome=" + (string.IsNullOrWhiteSpace(outcome) ? "kept-not-winner" : outcome));
         }
 
