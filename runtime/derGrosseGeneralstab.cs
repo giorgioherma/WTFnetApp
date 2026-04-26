@@ -1391,6 +1391,17 @@ namespace WTFnetApp
             return LogStartupProbeSlices;
         }
 
+        private static string FirstNonEmpty(string first, string second)
+        {
+            if (!string.IsNullOrWhiteSpace(first))
+                return first;
+
+            if (!string.IsNullOrWhiteSpace(second))
+                return second;
+
+            return null;
+        }
+
         // =========================
         // SPEEDIFY CLI
         // =========================
@@ -1503,6 +1514,14 @@ namespace WTFnetApp
                     activationIdentity.Tag ??
                     activationIdentity.RequestedTarget;
                 runtime.HasAuthoritativeIdentity = true;
+
+                Logger.Log("startup",
+                    "startup-probe | measured identity applied | candidate=" + candidate +
+                    " | friendlyName=" + (runtime.MeasuredServerFriendlyName ?? "-") +
+                    " | tag=" + (runtime.MeasuredServerTag ?? "-") +
+                    " | publicIp=" + (runtime.MeasuredServerPublicIp ?? "-") +
+                    " | routeTarget=" + (runtime.MeasuredRouteTarget ?? "-"));
+
                 return;
             }
 

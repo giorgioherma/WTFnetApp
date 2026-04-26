@@ -1,0 +1,35 @@
+2026-04-26 19:16:38.032 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:38.047 [unified] route=raw | stable=37 | inst=24 | lat=34 | jit=5 | loss=0,04 | conf=0,99 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:38.299 [fastping-agg] avg=35 max=41 p95=41 j=4 loss=0,09 bad=0,11 conf=0,98 q=6,2 q95=11,8 qg=+0,9 qa=-0,4 qt=0,88 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,1 badT10=1,00 wSegLoss10=0,11
+2026-04-26 19:16:42.620 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:42.621 [unified] route=raw | stable=31 | inst=30 | lat=31 | jit=4 | loss=0,11 | conf=0,96 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:43.390 [fastping-agg] avg=34 max=41 p95=41 j=4 loss=0,07 bad=0,08 conf=0,98 q=5,3 q95=11,8 qg=-1,1 qa=-0,1 qt=0,90 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,1 badT10=1,00 wSegLoss10=0,09
+2026-04-26 19:16:44.187 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:44.187 [unified] route=raw | stable=31 | inst=27 | lat=30 | jit=3 | loss=0,10 | conf=0,97 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:47.485 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:47.485 [unified] route=raw | stable=37 | inst=29 | lat=35 | jit=3 | loss=0,07 | conf=0,98 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:48.507 [fastping-agg] avg=31 max=37 p95=37 j=3 loss=0,07 bad=0,07 conf=0,98 q=2,4 q95=7,1 qg=+0,3 qa=+0,1 qt=0,63 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,0 badT10=1,00 wSegLoss10=0,11
+2026-04-26 19:16:48.759 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:48.759 [unified] route=raw | stable=31 | inst=21 | lat=29 | jit=4 | loss=0,04 | conf=0,99 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:50.802 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:50.803 [unified] route=raw | stable=34 | inst=25 | lat=32 | jit=5 | loss=0,04 | conf=0,99 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:52.077 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:52.077 [unified] route=raw | stable=35 | inst=27 | lat=33 | jit=4 | loss=0,01 | conf=1,00 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:53.593 [fastping-agg] avg=33 max=37 p95=37 j=4 loss=0,05 bad=0,05 conf=0,99 q=3,4 q95=7,1 qg=+0,1 qa=-0,1 qt=0,93 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,0 badT10=1,00 wSegLoss10=0,09
+2026-04-26 19:16:57.167 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:16:57.167 [unified] route=raw | stable=31 | inst=25 | lat=30 | jit=4 | loss=0,04 | conf=0,99 | stale=False | quality=OK | valid=False
+2026-04-26 19:16:58.709 [fastping-agg] avg=31 max=35 p95=35 j=4 loss=0,04 bad=0,05 conf=0,99 q=2,4 q95=5,7 qg=-0,1 qa=-0,1 qt=0,66 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,0 badT10=1,00 wSegLoss10=0,05
+2026-04-26 19:17:01.756 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:17:01.756 [unified] route=raw | stable=36 | inst=28 | lat=34 | jit=6 | loss=0,03 | conf=1,00 | stale=False | quality=OK | valid=False
+2026-04-26 19:17:03.027 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:17:03.028 [unified] route=raw | stable=29 | inst=23 | lat=28 | jit=3 | loss=0,06 | conf=0,98 | stale=False | quality=OK | valid=False
+2026-04-26 19:17:03.784 [fastping-agg] avg=31 max=36 p95=36 j=4 loss=0,05 bad=0,06 conf=0,99 q=1,8 q95=5,8 qg=0,0 qa=0,0 qt=0,65 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,0 badT10=1,00 wSegLoss10=0,07
+2026-04-26 19:17:08.120 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:17:08.120 [unified] route=raw | stable=34 | inst=34 | lat=34 | jit=3 | loss=0,08 | conf=0,98 | stale=False | quality=OK | valid=False
+2026-04-26 19:17:08.875 [fastping-agg] avg=32 max=36 p95=36 j=4 loss=0,06 bad=0,06 conf=0,98 q=2,4 q95=5,8 qg=+0,1 qa=0,0 qt=0,64 qb=0 qd=0 spkD10=0,0 spkD30=0,0 burstD10=6,1 badT10=1,00 wSegLoss10=0,09
+2026-04-26 19:17:09.378 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:17:09.378 [unified] route=raw | stable=35 | inst=38 | lat=36 | jit=3 | loss=0,07 | conf=0,98 | stale=False | quality=OK | valid=False
+2026-04-26 19:17:10.639 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:17:10.639 [unified] route=raw | stable=36 | inst=22 | lat=33 | jit=2 | loss=0,07 | conf=0,98 | stale=False | quality=OK | valid=False
+2026-04-26 19:17:11.942 [resolver] route=raw | src=fastping | tunnel=False | server=- | ip=- | active=0 | backup=0 | lat=-- | jit=-- | valid=False | warn=None
+2026-04-26 19:17:11.974 [unified] route=raw | stable=37 | inst=31 | lat=36 | jit=4 | loss=0,10 | conf=0,97 | stale=False | quality=OK | valid=False
