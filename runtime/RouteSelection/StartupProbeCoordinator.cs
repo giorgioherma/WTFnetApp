@@ -12,7 +12,7 @@ namespace WTFnetApp
         private readonly Func<string, Task<bool>> activateSpeedifyAsync;
         private readonly Func<FastPingState> getFastPingState;
         private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
-        private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
+        private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly ServerProbeLearningStore learningStore;
         private readonly StartupProbeTimingConfig timing;
         private readonly Action<string> log;
@@ -30,7 +30,7 @@ namespace WTFnetApp
             Func<FastPingState> getFastPingState,
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
-            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
+            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             ServerProbeLearningStore learningStore,
             StartupProbeTimingConfig timing = null,
             Action<string> log = null)

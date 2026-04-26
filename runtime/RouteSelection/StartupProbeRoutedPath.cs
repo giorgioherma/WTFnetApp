@@ -43,7 +43,7 @@ namespace WTFnetApp
             Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
             CandidateUsableEvaluator isCandidateUsableForMeasurement,
-            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
+            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             StartupProbeTimingConfig timing,
             StartupLogger startupLogger,
             Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime,
@@ -481,7 +481,7 @@ namespace WTFnetApp
     internal sealed class StartupSpeedifyMeasurement
     {
         private readonly Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap;
-        private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
+        private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly StartupProbeTimingConfig timing;
         private readonly StartupLogger startupLogger;
         private readonly Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime;
@@ -497,7 +497,7 @@ namespace WTFnetApp
 
         public StartupSpeedifyMeasurement(
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
-            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
+            Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             StartupProbeTimingConfig timing,
             StartupLogger startupLogger,
             Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime,
@@ -538,8 +538,9 @@ namespace WTFnetApp
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 TimeSpan slice = measuredSlices[i];
+                DateTime sliceStartUtc = DateTime.UtcNow;
 
-                ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(candidate, TimeSpan.Zero, slice);
+                ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(candidate, TimeSpan.Zero, slice, sliceStartUtc);
                 if (sliceRuntime == null)
                     return aggregateRuntime;
 

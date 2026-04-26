@@ -33,6 +33,13 @@ namespace WTFnetApp
 
         public FastPingAggregateSnapshot Last10sSnapshot { get; private set; } = new FastPingAggregateSnapshot();
         public FastPingAggregateSnapshot Last30sSnapshot { get; private set; } = new FastPingAggregateSnapshot();
+        public FastPingAggregateSnapshot GetSnapshotSince(TimeSpan observeDuration, DateTime sliceStartUtc)
+        {
+            RollingWindowStats window = observeDuration >= TimeSpan.FromSeconds(20)
+                ? longWindow
+                : shortWindow;
+            return window.BuildSnapshot(sliceStartUtc);
+        }
 
         public void Reset()
         {
@@ -428,6 +435,8 @@ namespace WTFnetApp
 
         public sealed class FastPingAggregateSnapshot
         {
+            public DateTime WindowStartUtc = DateTime.MinValue;
+            public DateTime WindowEndUtc = DateTime.MinValue;
             public int SampleCount;
             public int ValidPingCount;
             public int ValidQueueCount;
@@ -466,6 +475,7 @@ namespace WTFnetApp
             public double LossBurstDensity = -1;
             public double BadTimeRatio = -1;
             public double WorstSegmentLoss = -1;
+            public double OldestSampleAgeMs = -1;
 
             public bool IsValid
             {
@@ -654,11 +664,19 @@ namespace WTFnetApp
 
             public FastPingAggregateSnapshot BuildSnapshot()
             {
+                return BuildSnapshot(DateTime.MinValue);
+            }
+
+            public FastPingAggregateSnapshot BuildSnapshot(DateTime earliestAllowedUtc)
+            {
                 FastPingAggregateSnapshot snapshot = new FastPingAggregateSnapshot();
                 if (count == 0)
                     return snapshot;
 
-                DateTime cutoff = DateTime.UtcNow - windowDuration;
+                DateTime nowUtc = DateTime.UtcNow;
+                DateTime cutoff = nowUtc - windowDuration;
+                if (earliestAllowedUtc != DateTime.MinValue && earliestAllowedUtc > cutoff)
+                    cutoff = earliestAllowedUtc;
 
                 double[] pingValues = new double[count];
                 double[] jitterValues = new double[count];
@@ -681,6 +699,8 @@ namespace WTFnetApp
                 int considered = 0;
                 int spikeCount = 0;
                 int staleCount = 0;
+                DateTime earliestIncludedUtc = DateTime.MaxValue;
+                DateTime latestIncludedUtc = DateTime.MinValue;
 
                 double maxPing = -1;
                 double minJitter = -1;
@@ -703,6 +723,10 @@ namespace WTFnetApp
 
                     activeSamples[activeCount++] = s;
                     considered++;
+                    if (s.TimeUtc < earliestIncludedUtc)
+                        earliestIncludedUtc = s.TimeUtc;
+                    if (s.TimeUtc > latestIncludedUtc)
+                        latestIncludedUtc = s.TimeUtc;
 
                     if (s.PingMs > 0)
                     {
@@ -763,6 +787,11 @@ namespace WTFnetApp
                 }
 
                 snapshot.SampleCount = considered;
+                snapshot.WindowStartUtc = considered > 0 ? earliestIncludedUtc : DateTime.MinValue;
+                snapshot.WindowEndUtc = considered > 0 ? latestIncludedUtc : DateTime.MinValue;
+                snapshot.OldestSampleAgeMs = considered > 0
+                    ? Math.Max(0.0, (nowUtc - earliestIncludedUtc).TotalMilliseconds)
+                    : -1;
                 snapshot.ValidPingCount = pingCount;
                 snapshot.ValidQueueCount = queueCount;
                 snapshot.SpikeCount = spikeCount;

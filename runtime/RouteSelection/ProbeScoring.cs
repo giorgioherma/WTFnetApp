@@ -135,6 +135,17 @@ namespace WTFnetApp
         public bool StartupSpeedifyBondedEvidence { get; set; }
         public bool StartupSpeedifyFastPingAgreementGood { get; set; }
         public bool StartupSpeedifyCongestedEvidence { get; set; }
+        public DateTime MeasurementSliceStartUtc { get; set; } = DateTime.MinValue;
+        public double MeasurementEpochMs { get; set; } = -1;
+        public int SliceSampleCount { get; set; } = 0;
+        public double SliceOldestSampleAgeMs { get; set; } = -1;
+        public string MeasuredServerFriendlyName { get; set; }
+        public string MeasuredServerTag { get; set; }
+        public string MeasuredRouteTarget { get; set; }
+        public string MeasuredServerCity { get; set; }
+        public string MeasuredServerPublicIp { get; set; }
+        public string MeasuredServerIdentifier { get; set; }
+        public string RestoredServerTarget { get; set; }
     }
 
     public sealed class ProbeScoreResult

@@ -339,16 +339,69 @@ namespace WTFnetApp
                 return disabled;
             }
 
-            bool activated = await activateSpeedifyAsync(leader.Candidate.ConnectTarget);
+            string measuredServer = BuildMeasuredServerIdentity(leader?.Runtime);
+            string restoreTarget = leader?.Candidate?.ConnectTarget;
+            bool exactRequested = false;
+            bool exactSupported = false;
+            string exactTarget = leader?.Runtime?.MeasuredServerTag;
+            if (string.IsNullOrWhiteSpace(exactTarget))
+            {
+                log?.Invoke("exact measured tag unavailable; falling back to route target");
+            }
+            else
+            {
+                exactRequested = true;
+                if (SupportsExactRestoreTarget(exactTarget))
+                {
+                    exactSupported = true;
+                    restoreTarget = exactTarget;
+                }
+                else
+                {
+                    log?.Invoke("exact restore unsupported; falling back to route target");
+                }
+            }
+
+            bool activated = await activateSpeedifyAsync(restoreTarget);
             if (activated)
                 await BeginTransitionGraceAsync("restore-speedify-leader:" + leader.Candidate.RouteKey, cancellationToken);
 
+            if (leader?.Runtime != null)
+                leader.Runtime.RestoredServerTarget = restoreTarget;
+
             if (activated)
-                log?.Invoke("startup-probe | leader restored -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader));
+                log?.Invoke("startup-probe | leader restored -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader) +
+                    " | measuredServer=" + measuredServer +
+                    " | restoredServer=routeTarget:" + (restoreTarget ?? "-") +
+                    " | exactRequested=" + (exactRequested ? "yes" : "no") +
+                    " | exactSupported=" + (exactSupported ? "yes" : "no"));
             else
-                log?.Invoke("startup-probe | leader restore failed -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader));
+                log?.Invoke("startup-probe | leader restore failed -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader) +
+                    " | measuredServer=" + measuredServer +
+                    " | restoredServer=routeTarget:" + (restoreTarget ?? "-") +
+                    " | exactRequested=" + (exactRequested ? "yes" : "no") +
+                    " | exactSupported=" + (exactSupported ? "yes" : "no"));
 
             return activated;
+        }
+
+        private static bool SupportsExactRestoreTarget(string exactTarget)
+        {
+            _ = exactTarget;
+            return false;
+        }
+
+        private static string BuildMeasuredServerIdentity(ProbeCandidateRuntimeData runtime)
+        {
+            if (runtime == null)
+                return "-";
+
+            string combined =
+                "friendlyName:" + (runtime.MeasuredServerFriendlyName ?? "-") +
+                ",publicIp:" + (runtime.MeasuredServerPublicIp ?? "-") +
+                ",routeTarget:" + (runtime.MeasuredRouteTarget ?? "-") +
+                ",tag:" + (runtime.MeasuredServerTag ?? "-");
+            return string.IsNullOrWhiteSpace(combined) ? "-" : combined;
         }
 
         private async Task BeginTransitionGraceAsync(string reason, CancellationToken cancellationToken)
@@ -671,7 +724,18 @@ namespace WTFnetApp
                 StabilizationReason = second.StabilizationReason ?? first.StabilizationReason,
                 ReadinessKind = second.ReadinessKind != ProbeReadinessKind.NotReady ? second.ReadinessKind : first.ReadinessKind,
                 ReadinessReason = second.ReadinessReason ?? first.ReadinessReason,
-                StartupSpeedifyTrusted = first.StartupSpeedifyTrusted || second.StartupSpeedifyTrusted
+                StartupSpeedifyTrusted = first.StartupSpeedifyTrusted || second.StartupSpeedifyTrusted,
+                MeasurementSliceStartUtc = ChooseEarliestKnown(first.MeasurementSliceStartUtc, second.MeasurementSliceStartUtc),
+                MeasurementEpochMs = Math.Max(0, first.MeasurementEpochMs) + Math.Max(0, second.MeasurementEpochMs),
+                SliceSampleCount = Math.Max(0, first.SliceSampleCount) + Math.Max(0, second.SliceSampleCount),
+                SliceOldestSampleAgeMs = MaxKnown(first.SliceOldestSampleAgeMs, second.SliceOldestSampleAgeMs),
+                MeasuredServerFriendlyName = second.MeasuredServerFriendlyName ?? first.MeasuredServerFriendlyName,
+                MeasuredServerTag = second.MeasuredServerTag ?? first.MeasuredServerTag,
+                MeasuredRouteTarget = second.MeasuredRouteTarget ?? first.MeasuredRouteTarget,
+                MeasuredServerCity = second.MeasuredServerCity ?? first.MeasuredServerCity,
+                MeasuredServerPublicIp = second.MeasuredServerPublicIp ?? first.MeasuredServerPublicIp,
+                MeasuredServerIdentifier = second.MeasuredServerIdentifier ?? first.MeasuredServerIdentifier,
+                RestoredServerTarget = second.RestoredServerTarget ?? first.RestoredServerTarget
             };
         }
 
