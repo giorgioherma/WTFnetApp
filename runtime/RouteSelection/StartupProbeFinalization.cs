@@ -706,6 +706,8 @@ namespace WTFnetApp
                 w2 = 1.0;
             }
 
+            ProbeCandidateRuntimeData identity = MergeMeasuredIdentity(first, second);
+
             return new ProbeCandidateRuntimeData
             {
                 Candidate = second.Candidate ?? first.Candidate,
@@ -767,14 +769,64 @@ namespace WTFnetApp
                 MeasurementEpochMs = Math.Max(0, first.MeasurementEpochMs) + Math.Max(0, second.MeasurementEpochMs),
                 SliceSampleCount = Math.Max(0, first.SliceSampleCount) + Math.Max(0, second.SliceSampleCount),
                 SliceOldestSampleAgeMs = MaxKnown(first.SliceOldestSampleAgeMs, second.SliceOldestSampleAgeMs),
-                MeasuredServerFriendlyName = ChooseFirstNonEmpty(first.MeasuredServerFriendlyName, second.MeasuredServerFriendlyName),
-                MeasuredServerTag = ChooseFirstNonEmpty(first.MeasuredServerTag, second.MeasuredServerTag),
-                MeasuredRouteTarget = ChooseFirstNonEmpty(first.MeasuredRouteTarget, second.MeasuredRouteTarget),
-                MeasuredServerCity = ChooseFirstNonEmpty(first.MeasuredServerCity, second.MeasuredServerCity),
-                MeasuredServerPublicIp = ChooseFirstNonEmpty(first.MeasuredServerPublicIp, second.MeasuredServerPublicIp),
-                MeasuredServerIdentifier = ChooseFirstNonEmpty(first.MeasuredServerIdentifier, second.MeasuredServerIdentifier),
-                HasAuthoritativeIdentity = first.HasAuthoritativeIdentity || second.HasAuthoritativeIdentity,
+                MeasuredServerFriendlyName = identity.MeasuredServerFriendlyName,
+                MeasuredServerTag = identity.MeasuredServerTag,
+                MeasuredRouteTarget = identity.MeasuredRouteTarget,
+                MeasuredServerCity = identity.MeasuredServerCity,
+                MeasuredServerPublicIp = identity.MeasuredServerPublicIp,
+                MeasuredServerIdentifier = identity.MeasuredServerIdentifier,
+                HasAuthoritativeIdentity = identity.HasAuthoritativeIdentity,
                 RestoredServerTarget = second.RestoredServerTarget ?? first.RestoredServerTarget
+            };
+        }
+
+        public static ProbeCandidateRuntimeData MergeMeasuredIdentity(
+            ProbeCandidateRuntimeData first,
+            ProbeCandidateRuntimeData second)
+        {
+            if (first == null && second == null)
+                return new ProbeCandidateRuntimeData();
+            if (first == null)
+                return new ProbeCandidateRuntimeData
+                {
+                    MeasuredServerFriendlyName = second.MeasuredServerFriendlyName,
+                    MeasuredServerTag = second.MeasuredServerTag,
+                    MeasuredRouteTarget = second.MeasuredRouteTarget,
+                    MeasuredServerCity = second.MeasuredServerCity,
+                    MeasuredServerPublicIp = second.MeasuredServerPublicIp,
+                    MeasuredServerIdentifier = second.MeasuredServerIdentifier,
+                    HasAuthoritativeIdentity = second.HasAuthoritativeIdentity
+                };
+            if (second == null)
+                return new ProbeCandidateRuntimeData
+                {
+                    MeasuredServerFriendlyName = first.MeasuredServerFriendlyName,
+                    MeasuredServerTag = first.MeasuredServerTag,
+                    MeasuredRouteTarget = first.MeasuredRouteTarget,
+                    MeasuredServerCity = first.MeasuredServerCity,
+                    MeasuredServerPublicIp = first.MeasuredServerPublicIp,
+                    MeasuredServerIdentifier = first.MeasuredServerIdentifier,
+                    HasAuthoritativeIdentity = first.HasAuthoritativeIdentity
+                };
+
+            ProbeCandidateRuntimeData preferred = first;
+            ProbeCandidateRuntimeData fallback = second;
+            if (!first.HasAuthoritativeIdentity && second.HasAuthoritativeIdentity)
+            {
+                preferred = second;
+                fallback = first;
+            }
+
+            bool hasAuthoritativeIdentity = first.HasAuthoritativeIdentity || second.HasAuthoritativeIdentity;
+            return new ProbeCandidateRuntimeData
+            {
+                MeasuredServerFriendlyName = ChooseFirstNonEmpty(preferred.MeasuredServerFriendlyName, fallback.MeasuredServerFriendlyName),
+                MeasuredServerTag = ChooseFirstNonEmpty(preferred.MeasuredServerTag, fallback.MeasuredServerTag),
+                MeasuredRouteTarget = ChooseFirstNonEmpty(preferred.MeasuredRouteTarget, fallback.MeasuredRouteTarget),
+                MeasuredServerCity = ChooseFirstNonEmpty(preferred.MeasuredServerCity, fallback.MeasuredServerCity),
+                MeasuredServerPublicIp = ChooseFirstNonEmpty(preferred.MeasuredServerPublicIp, fallback.MeasuredServerPublicIp),
+                MeasuredServerIdentifier = ChooseFirstNonEmpty(preferred.MeasuredServerIdentifier, fallback.MeasuredServerIdentifier),
+                HasAuthoritativeIdentity = hasAuthoritativeIdentity
             };
         }
 

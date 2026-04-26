@@ -195,11 +195,45 @@ namespace WTFnetApp
             if (extended)
                 snapshot.Extended = true;
             if (runtime != null)
+            {
+                if (snapshot.Runtime != null)
+                {
+                    ProbeCandidateRuntimeData mergedIdentity =
+                        StartupProbeRuntimeMerge.MergeMeasuredIdentity(snapshot.Runtime, runtime);
+                    ApplyMeasuredIdentity(runtime, mergedIdentity);
+                    ApplyMeasuredIdentity(snapshot.Runtime, mergedIdentity);
+                }
+
                 snapshot.Runtime = runtime;
+            }
             if (score != null)
+            {
+                if (score.Runtime != null && snapshot.Runtime != null)
+                {
+                    ProbeCandidateRuntimeData mergedIdentity =
+                        StartupProbeRuntimeMerge.MergeMeasuredIdentity(snapshot.Runtime, score.Runtime);
+                    ApplyMeasuredIdentity(snapshot.Runtime, mergedIdentity);
+                    ApplyMeasuredIdentity(score.Runtime, mergedIdentity);
+                }
+
                 snapshot.Score = score;
+            }
 
             candidateSnapshots[key] = snapshot;
+        }
+
+        private static void ApplyMeasuredIdentity(ProbeCandidateRuntimeData target, ProbeCandidateRuntimeData source)
+        {
+            if (target == null || source == null)
+                return;
+
+            target.MeasuredServerFriendlyName = source.MeasuredServerFriendlyName;
+            target.MeasuredServerTag = source.MeasuredServerTag;
+            target.MeasuredRouteTarget = source.MeasuredRouteTarget;
+            target.MeasuredServerCity = source.MeasuredServerCity;
+            target.MeasuredServerPublicIp = source.MeasuredServerPublicIp;
+            target.MeasuredServerIdentifier = source.MeasuredServerIdentifier;
+            target.HasAuthoritativeIdentity = source.HasAuthoritativeIdentity;
         }
 
         public void LogFinalDecisionBlock(
