@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -46,6 +47,7 @@ namespace WTFnetApp
         private volatile bool startupEvaluationRunning;
         private DateTime lastStartupEvaluationUtc = DateTime.MinValue;
         private DateTime lastSpeedifySnapshotUtc = DateTime.MinValue;
+        private SpeedifyActivatedServerIdentity lastActivatedServerIdentity;
 
         private StartupProbeResult lastStartupProbeResult;
         private EvaluationStats lastRouteEvaluationStats;
@@ -950,15 +952,37 @@ namespace WTFnetApp
             }
 
             connectTarget = connectTarget.Trim();
+            lock (publishSync)
+            {
+                lastActivatedServerIdentity = null;
+            }
 
             Logger.Log("startup", "activating Speedify target | " + connectTarget);
 
-            
-            int connectExit = await RunSpeedifyCliAsync("connect " + connectTarget);
+            SpeedifyCliResult connectResult = await RunSpeedifyCliDetailedAsync("connect " + connectTarget);
+            int connectExit = connectResult.ExitCode;
 
             Logger.Log("startup",
                 "Speedify connect result | requestedTarget=" + connectTarget +
                 " | exitCode=" + connectExit);
+
+            if (connectExit == 0)
+            {
+                SpeedifyActivatedServerIdentity identity = TryParseActivatedServerIdentity(connectTarget, connectResult.Stdout);
+                if (identity != null)
+                {
+                    lock (publishSync)
+                    {
+                        lastActivatedServerIdentity = identity;
+                    }
+
+                    Logger.Log("startup",
+                        "speedify activation identity | requestedTarget=" + connectTarget +
+                        " | friendlyName=" + (identity.FriendlyName ?? "-") +
+                        " | tag=" + (identity.Tag ?? "-") +
+                        " | publicIp=" + (identity.PublicIp ?? "-"));
+                }
+            }
 
             DateTime connectWaitStartUtc = DateTime.UtcNow;
 
@@ -1164,6 +1188,15 @@ namespace WTFnetApp
                 runtime.MeasuredServerTag = TryExtractSpeedifyServerTag(speedifySnapshot.ConnectedServerName);
             }
 
+            ApplyMeasuredServerIdentityFallback(runtime, candidate, speedifySnapshot, sliceStartUtc, observe);
+            if (string.IsNullOrWhiteSpace(runtime.MeasuredServerIdentifier))
+            {
+                runtime.MeasuredServerIdentifier =
+                    runtime.MeasuredServerPublicIp ??
+                    runtime.MeasuredServerTag ??
+                    runtime.MeasuredRouteTarget;
+            }
+
             if (candidate.Kind == ProbeCandidateKind.Raw)
                 runtime.Notes = "Raw baseline capture";
 
@@ -1323,14 +1356,27 @@ namespace WTFnetApp
         // SPEEDIFY CLI
         // =========================
 
+        private sealed class SpeedifyCliResult
+        {
+            public int ExitCode { get; set; }
+            public string Stdout { get; set; }
+            public string Stderr { get; set; }
+        }
+
         private async Task<int> RunSpeedifyCliAsync(string arguments)
+        {
+            SpeedifyCliResult result = await RunSpeedifyCliDetailedAsync(arguments);
+            return result.ExitCode;
+        }
+
+        private async Task<SpeedifyCliResult> RunSpeedifyCliDetailedAsync(string arguments)
         {
             const int CliTimeoutMs = 8000;
 
             if (!System.IO.File.Exists(SpeedifyCliPath))
             {
                 Logger.Log("startup", "Speedify CLI missing | path=" + SpeedifyCliPath);
-                return -1;
+                return new SpeedifyCliResult { ExitCode = -1, Stdout = null, Stderr = null };
             }
 
             try
@@ -1368,7 +1414,7 @@ namespace WTFnetApp
                             "Speedify CLI timeout/killed | timeoutMs=" + CliTimeoutMs +
                             " | args=" + arguments);
 
-                        return -2;
+                        return new SpeedifyCliResult { ExitCode = -2, Stdout = null, Stderr = null };
                     }
 
                     string stdout = process.StandardOutput.ReadToEnd();
@@ -1380,14 +1426,325 @@ namespace WTFnetApp
                         " | stdout=" + FormatCliOutput(stdout) +
                         " | stderr=" + FormatCliOutput(stderr));
 
-                    return process.ExitCode;
+                    return new SpeedifyCliResult
+                    {
+                        ExitCode = process.ExitCode,
+                        Stdout = stdout,
+                        Stderr = stderr
+                    };
                 }
             }
             catch (Exception ex)
             {
                 Logger.Log("startup", "Speedify CLI error | args=" + arguments + " | error=" + ex.Message);
-                return -1;
+                return new SpeedifyCliResult { ExitCode = -1, Stdout = null, Stderr = null };
             }
+        }
+
+        private void ApplyMeasuredServerIdentityFallback(
+            ProbeCandidateRuntimeData runtime,
+            ProbeCandidateDefinition candidate,
+            MetricsSnapshot speedifySnapshot,
+            DateTime sliceStartUtc,
+            TimeSpan observe)
+        {
+            if (runtime == null || candidate == null)
+                return;
+
+            SpeedifyActivatedServerIdentity activationIdentity = GetFreshActivationIdentityForCandidate(candidate, sliceStartUtc, observe);
+            if (activationIdentity != null)
+            {
+                runtime.MeasuredServerFriendlyName = activationIdentity.FriendlyName ?? runtime.MeasuredServerFriendlyName;
+                runtime.MeasuredServerTag = activationIdentity.Tag ?? runtime.MeasuredServerTag;
+                runtime.MeasuredServerPublicIp = activationIdentity.PublicIp ?? runtime.MeasuredServerPublicIp;
+                runtime.MeasuredServerCity = activationIdentity.City ?? runtime.MeasuredServerCity;
+                runtime.MeasuredRouteTarget = activationIdentity.RequestedTarget ?? runtime.MeasuredRouteTarget;
+                runtime.MeasuredServerIdentifier =
+                    activationIdentity.PublicIp ??
+                    activationIdentity.Tag ??
+                    activationIdentity.RequestedTarget ??
+                    runtime.MeasuredServerIdentifier;
+                return;
+            }
+
+            if (speedifySnapshot != null)
+            {
+                runtime.MeasuredServerFriendlyName = speedifySnapshot.ConnectedServerName ?? runtime.MeasuredServerFriendlyName;
+                runtime.MeasuredServerPublicIp = speedifySnapshot.ConnectedServerPublicIp ?? runtime.MeasuredServerPublicIp;
+                runtime.MeasuredServerTag = runtime.MeasuredServerTag ?? TryExtractSpeedifyServerTag(speedifySnapshot.ConnectedServerName);
+                runtime.MeasuredRouteTarget = runtime.MeasuredRouteTarget ?? candidate.ConnectTarget;
+                return;
+            }
+
+            MiniSpeedifyMiniSnap miniSnap = GetFreshMiniSpeedifyMiniSnapForStartup();
+            if (miniSnap != null)
+            {
+                runtime.MeasuredRouteTarget = runtime.MeasuredRouteTarget ?? candidate.ConnectTarget;
+                runtime.MeasuredServerIdentifier = runtime.MeasuredServerIdentifier ?? candidate.ConnectTarget;
+                return;
+            }
+
+            runtime.MeasuredRouteTarget = runtime.MeasuredRouteTarget ?? candidate.ConnectTarget;
+            runtime.MeasuredServerTag = runtime.MeasuredServerTag ?? candidate.ConnectTarget;
+        }
+
+        private SpeedifyActivatedServerIdentity GetFreshActivationIdentityForCandidate(
+            ProbeCandidateDefinition candidate,
+            DateTime sliceStartUtc,
+            TimeSpan observe)
+        {
+            if (candidate == null || string.IsNullOrWhiteSpace(candidate.ConnectTarget))
+                return null;
+
+            SpeedifyActivatedServerIdentity identity;
+            lock (publishSync)
+            {
+                identity = lastActivatedServerIdentity;
+            }
+
+            if (identity == null || string.IsNullOrWhiteSpace(identity.RequestedTarget))
+                return null;
+
+            if (!string.Equals(identity.RequestedTarget, candidate.ConnectTarget, StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            DateTime nowUtc = DateTime.UtcNow;
+            if (identity.CapturedUtc == DateTime.MinValue || identity.CapturedUtc > nowUtc.AddSeconds(2))
+                return null;
+
+            double maxAgeMs = Math.Max(15000.0, observe.TotalMilliseconds + 12000.0);
+            if ((nowUtc - identity.CapturedUtc).TotalMilliseconds > maxAgeMs)
+                return null;
+
+            if (sliceStartUtc != DateTime.MinValue)
+            {
+                DateTime lowerBound = sliceStartUtc - TimeSpan.FromSeconds(12);
+                if (identity.CapturedUtc < lowerBound)
+                    return null;
+            }
+
+            return identity;
+        }
+
+        private static SpeedifyActivatedServerIdentity TryParseActivatedServerIdentity(string requestedTarget, string stdout)
+        {
+            int rawLength = stdout != null ? stdout.Length : 0;
+            Logger.Log("startup", "Speedify activation identity parse begin | stdoutLen=" + rawLength);
+
+            string normalized = NormalizeCliJsonOutput(stdout);
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                Logger.Log("startup", "Speedify activation identity parse skipped | reason=empty-normalized-stdout");
+                return null;
+            }
+
+            try
+            {
+                using (JsonDocument document = JsonDocument.Parse(normalized))
+                {
+                    Logger.Log("startup", "Speedify activation identity parse | jsonParse=ok");
+                    JsonElement root = document.RootElement;
+                    string friendlyName = GetJsonString(root, "friendlyName");
+                    string tag = GetJsonString(root, "tag");
+                    string publicIp = GetJsonArrayFirstString(root, "publicIP");
+                    string country = GetJsonString(root, "country");
+                    string city = GetJsonString(root, "city");
+                    string dataCenter = GetJsonString(root, "dataCenter");
+                    bool isPremium = GetJsonBool(root, "isPremium");
+                    int num = GetJsonInt(root, "num");
+
+                    Logger.Log("startup",
+                        "Speedify activation identity extracted | friendlyName=" + (friendlyName ?? "-") +
+                        " | tag=" + (tag ?? "-") +
+                        " | publicIp=" + (publicIp ?? "-") +
+                        " | country=" + (country ?? "-") +
+                        " | city=" + (city ?? "-") +
+                        " | dataCenter=" + (dataCenter ?? "-") +
+                        " | num=" + (num >= 0 ? num.ToString(CultureInfo.InvariantCulture) : "-"));
+
+                    bool hasIdentity =
+                        !string.IsNullOrWhiteSpace(friendlyName) ||
+                        !string.IsNullOrWhiteSpace(tag) ||
+                        !string.IsNullOrWhiteSpace(publicIp);
+
+                    if (!hasIdentity)
+                        return null;
+
+                    return new SpeedifyActivatedServerIdentity(
+                        requestedTarget: requestedTarget,
+                        capturedUtc: DateTime.UtcNow,
+                        friendlyName: friendlyName,
+                        tag: tag,
+                        publicIp: publicIp,
+                        country: country,
+                        city: city,
+                        dataCenter: dataCenter,
+                        isPremium: isPremium,
+                        num: num);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("startup", "Speedify activation identity parse | jsonParse=failed | error=" + ex.Message);
+
+                string spacedFallback = TryCollapseInterCharacterSpacing(normalized);
+                if (!string.IsNullOrWhiteSpace(spacedFallback) &&
+                    !string.Equals(spacedFallback, normalized, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        using (JsonDocument document = JsonDocument.Parse(spacedFallback))
+                        {
+                            Logger.Log("startup", "Speedify activation identity parse | jsonParse=fallback-ok");
+                            JsonElement root = document.RootElement;
+                            string friendlyName = GetJsonString(root, "friendlyName");
+                            string tag = GetJsonString(root, "tag");
+                            string publicIp = GetJsonArrayFirstString(root, "publicIP");
+                            string country = GetJsonString(root, "country");
+                            string city = GetJsonString(root, "city");
+                            string dataCenter = GetJsonString(root, "dataCenter");
+                            bool isPremium = GetJsonBool(root, "isPremium");
+                            int num = GetJsonInt(root, "num");
+
+                            Logger.Log("startup",
+                                "Speedify activation identity extracted | friendlyName=" + (friendlyName ?? "-") +
+                                " | tag=" + (tag ?? "-") +
+                                " | publicIp=" + (publicIp ?? "-") +
+                                " | country=" + (country ?? "-") +
+                                " | city=" + (city ?? "-") +
+                                " | dataCenter=" + (dataCenter ?? "-") +
+                                " | num=" + (num >= 0 ? num.ToString(CultureInfo.InvariantCulture) : "-"));
+
+                            bool hasIdentity =
+                                !string.IsNullOrWhiteSpace(friendlyName) ||
+                                !string.IsNullOrWhiteSpace(tag) ||
+                                !string.IsNullOrWhiteSpace(publicIp);
+
+                            if (!hasIdentity)
+                                return null;
+
+                            return new SpeedifyActivatedServerIdentity(
+                                requestedTarget: requestedTarget,
+                                capturedUtc: DateTime.UtcNow,
+                                friendlyName: friendlyName,
+                                tag: tag,
+                                publicIp: publicIp,
+                                country: country,
+                                city: city,
+                                dataCenter: dataCenter,
+                                isPremium: isPremium,
+                                num: num);
+                        }
+                    }
+                    catch (Exception fallbackEx)
+                    {
+                        Logger.Log("startup", "Speedify activation identity parse | jsonParse=fallback-failed | error=" + fallbackEx.Message);
+                    }
+                }
+
+                Logger.Log("startup", "Speedify activation identity parse preview | stdout=" + BuildSanitizedPreview(normalized));
+                return null;
+            }
+        }
+
+        private static string NormalizeCliJsonOutput(string stdout)
+        {
+            if (string.IsNullOrEmpty(stdout))
+                return string.Empty;
+
+            string normalized = stdout.Replace("\0", string.Empty).Trim();
+            return normalized;
+        }
+
+        private static string TryCollapseInterCharacterSpacing(string input)
+        {
+            if (string.IsNullOrWhiteSpace(input))
+                return input;
+
+            string[] tokens = input
+                .Split(new[] { ' ', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+            if (tokens.Length < 8)
+                return input;
+
+            int singleCharTokens = tokens.Count(t => t.Length == 1);
+            double singleCharRatio = singleCharTokens / (double)tokens.Length;
+            if (singleCharRatio < 0.65)
+                return input;
+
+            StringBuilder collapsed = new StringBuilder(input.Length);
+            for (int i = 0; i < input.Length; i++)
+            {
+                char c = input[i];
+                if (char.IsWhiteSpace(c))
+                    continue;
+
+                collapsed.Append(c);
+            }
+
+            return collapsed.ToString();
+        }
+
+        private static string BuildSanitizedPreview(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "-";
+
+            string preview = FormatCliOutput(value);
+            const int maxLen = 220;
+            if (preview.Length > maxLen)
+                preview = preview.Substring(0, maxLen) + "...";
+
+            return preview;
+        }
+
+        private static string GetJsonString(JsonElement root, string propertyName)
+        {
+            if (!root.TryGetProperty(propertyName, out JsonElement value))
+                return null;
+
+            return value.ValueKind == JsonValueKind.String ? value.GetString() : null;
+        }
+
+        private static string GetJsonArrayFirstString(JsonElement root, string propertyName)
+        {
+            if (!root.TryGetProperty(propertyName, out JsonElement value) || value.ValueKind != JsonValueKind.Array)
+                return null;
+
+            if (value.GetArrayLength() == 0)
+                return null;
+
+            JsonElement first = value[0];
+            return first.ValueKind == JsonValueKind.String ? first.GetString() : null;
+        }
+
+        private static bool GetJsonBool(JsonElement root, string propertyName)
+        {
+            if (!root.TryGetProperty(propertyName, out JsonElement value))
+                return false;
+
+            if (value.ValueKind == JsonValueKind.True)
+                return true;
+            if (value.ValueKind == JsonValueKind.False)
+                return false;
+            if (value.ValueKind == JsonValueKind.String)
+                return bool.TryParse(value.GetString(), out bool parsed) && parsed;
+
+            return false;
+        }
+
+        private static int GetJsonInt(JsonElement root, string propertyName)
+        {
+            if (!root.TryGetProperty(propertyName, out JsonElement value))
+                return -1;
+
+            if (value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out int parsed))
+                return parsed;
+
+            if (value.ValueKind == JsonValueKind.String &&
+                int.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsedFromString))
+                return parsedFromString;
+
+            return -1;
         }
 
         private static string FormatCliOutput(string value)

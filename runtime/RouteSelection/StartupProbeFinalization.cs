@@ -729,14 +729,23 @@ namespace WTFnetApp
                 MeasurementEpochMs = Math.Max(0, first.MeasurementEpochMs) + Math.Max(0, second.MeasurementEpochMs),
                 SliceSampleCount = Math.Max(0, first.SliceSampleCount) + Math.Max(0, second.SliceSampleCount),
                 SliceOldestSampleAgeMs = MaxKnown(first.SliceOldestSampleAgeMs, second.SliceOldestSampleAgeMs),
-                MeasuredServerFriendlyName = second.MeasuredServerFriendlyName ?? first.MeasuredServerFriendlyName,
-                MeasuredServerTag = second.MeasuredServerTag ?? first.MeasuredServerTag,
-                MeasuredRouteTarget = second.MeasuredRouteTarget ?? first.MeasuredRouteTarget,
-                MeasuredServerCity = second.MeasuredServerCity ?? first.MeasuredServerCity,
-                MeasuredServerPublicIp = second.MeasuredServerPublicIp ?? first.MeasuredServerPublicIp,
-                MeasuredServerIdentifier = second.MeasuredServerIdentifier ?? first.MeasuredServerIdentifier,
+                MeasuredServerFriendlyName = ChooseFirstNonEmpty(first.MeasuredServerFriendlyName, second.MeasuredServerFriendlyName),
+                MeasuredServerTag = ChooseFirstNonEmpty(first.MeasuredServerTag, second.MeasuredServerTag),
+                MeasuredRouteTarget = ChooseFirstNonEmpty(first.MeasuredRouteTarget, second.MeasuredRouteTarget),
+                MeasuredServerCity = ChooseFirstNonEmpty(first.MeasuredServerCity, second.MeasuredServerCity),
+                MeasuredServerPublicIp = ChooseFirstNonEmpty(first.MeasuredServerPublicIp, second.MeasuredServerPublicIp),
+                MeasuredServerIdentifier = ChooseFirstNonEmpty(first.MeasuredServerIdentifier, second.MeasuredServerIdentifier),
                 RestoredServerTarget = second.RestoredServerTarget ?? first.RestoredServerTarget
             };
+        }
+
+        private static string ChooseFirstNonEmpty(string first, string second)
+        {
+            if (!string.IsNullOrWhiteSpace(first))
+                return first;
+            if (!string.IsNullOrWhiteSpace(second))
+                return second;
+            return null;
         }
 
         public static double WeightedAverageKnown(double a, double b, double wa, double wb)
