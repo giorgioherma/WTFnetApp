@@ -168,102 +168,6 @@ namespace WTFnetApp
                 log: message => Logger.Log("startup", message));
         }
 
-        private volatile bool _hungaryTestRunning = false;
-
-        private void StartDebugKeyListener()
-        {
-            Task.Run(async () =>
-            {
-                while (true)
-                {
-                    try
-                    {
-                        if (Console.KeyAvailable)
-                        {
-                            ConsoleKeyInfo key = Console.ReadKey(true);
-
-                            if (key.Key == ConsoleKey.H)
-                            {
-                                if (_hungaryTestRunning)
-                                {
-                                    Logger.Log("startup", "hungary-loss-test | already running");
-                                    continue;
-                                }
-
-                                _hungaryTestRunning = true;
-
-                                Logger.Log("startup", "hungary-loss-test | manual trigger");
-
-                                bool activated = await ActivateSpeedifyTargetAsync("hu");
-                                if (!activated)
-                                {
-                                    Logger.Log("startup", "hungary-loss-test | failed to activate Hungary");
-                                    _hungaryTestRunning = false;
-                                    continue;
-                                }
-
-                                Logger.Log("startup", "hungary-loss-test | Hungary activated | waiting 5000ms");
-                                await Task.Delay(5000);
-
-                                _ = Task.Run(async () =>
-                                {
-                                    try
-                                    {
-                                        await RunHungaryLossTestAsync(CancellationToken.None);
-                                    }
-                                    finally
-                                    {
-                                        _hungaryTestRunning = false;
-                                    }
-                                });
-                            }
-                        }
-
-                        await Task.Delay(100);
-                    }
-                    catch (Exception ex)
-                    {
-                        Logger.Log("startup", "hungary-loss-test | key listener error | " + ex.Message);
-                        await Task.Delay(1000);
-                    }
-                }
-            });
-        }
-
-        private async Task RunHungaryLossTestAsync(CancellationToken cancellationToken)
-        {
-            Logger.Log("startup", "hungary-loss-test | started | duration=5min");
-
-            DateTime endUtc = DateTime.UtcNow.AddMinutes(5);
-
-            while (DateTime.UtcNow < endUtc)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var snap = fastPingSignalAnalyzer.Last10sSnapshot;
-
-                if (snap != null && snap.IsValid)
-                {
-                    Logger.Log(
-                        "startup",
-                        "hungary-loss-test | loss=" + (snap.AvgLossRate * 100.0).ToString("0.0") + "%" +
-                        " | avgPing=" + snap.AvgPingMs.ToString("0.0") +
-                        " | p95=" + snap.P95PingMs.ToString("0.0") +
-                        " | avgJit=" + snap.AvgJitterMs.ToString("0.0") +
-                        " | p95Jit=" + snap.P95JitterMs.ToString("0.0") +
-                        " | spkD=" + snap.SpikeDensityPerMinute.ToString("0.0"));
-                }
-                else
-                {
-                    Logger.Log("startup", "hungary-loss-test | no valid snapshot");
-                }
-
-                await Task.Delay(TimeSpan.FromSeconds(10), cancellationToken);
-            }
-
-            Logger.Log("startup", "hungary-loss-test | finished");
-        }
-
         // =========================
         // INPUT PATHS
         // =========================
@@ -545,17 +449,17 @@ namespace WTFnetApp
         {
             if (startupEvaluationRunning)
             {
-                Logger.Log("startup", "hungary-loss-test | already running | ignored");
+                Logger.Log("startup", "startup route evaluation already running");
                 return;
             }
 
             if (!IsSpeedifyInstalled())
             {
-                Logger.Log("startup", "hungary-loss-test | Speedify not installed");
+                Logger.Log("startup", "startup route evaluation skipped: Speedify not installed");
                 return;
             }
 
-            Logger.Log("startup", "hungary-loss-test | startup evaluation bypassed | Hungary only");
+            Logger.Log("startup", "starting startup route evaluation");
 
             startupEvaluationRunning = true;
 
@@ -563,28 +467,12 @@ namespace WTFnetApp
             {
                 try
                 {
-                    await EnsureSpeedifyProcessRunningAsync();
-                    await EnsureSpeedifyTelemetryAvailableAsync();
-
-                    Logger.Log("startup", "hungary-loss-test | activating Hungary");
-
-                    bool activated = await ActivateSpeedifyTargetAsync("hu");
-                    if (!activated)
-                    {
-                        Logger.Log("startup", "hungary-loss-test | failed to activate Hungary");
-                        return;
-                    }
-
-                    Logger.Log("startup", "hungary-loss-test | Hungary activated | waiting 5000ms");
-                    await Task.Delay(5000);
-
-                    await RunHungaryLossTestAsync(CancellationToken.None);
-
+                    await RunStartupRouteEvaluationAsync();
                     lastStartupEvaluationUtc = DateTime.UtcNow;
                 }
                 catch (Exception ex)
                 {
-                    Logger.Log("startup", "hungary-loss-test error: " + ex.Message);
+                    Logger.Log("startup", "startup route evaluation error: " + ex.Message);
                 }
                 finally
                 {
