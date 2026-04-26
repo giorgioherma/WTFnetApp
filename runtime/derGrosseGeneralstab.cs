@@ -48,6 +48,7 @@ namespace WTFnetApp
         private DateTime lastStartupEvaluationUtc = DateTime.MinValue;
         private DateTime lastSpeedifySnapshotUtc = DateTime.MinValue;
         private SpeedifyActivatedServerIdentity lastActivatedServerIdentity;
+        private readonly Dictionary<string, DateTime> measuredIdentityLoggedByCandidate = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
         private StartupProbeResult lastStartupProbeResult;
         private EvaluationStats lastRouteEvaluationStats;
@@ -1515,12 +1516,15 @@ namespace WTFnetApp
                     activationIdentity.RequestedTarget;
                 runtime.HasAuthoritativeIdentity = true;
 
-                Logger.Log("startup",
-                    "startup-probe | measured identity applied | candidate=" + candidate +
-                    " | friendlyName=" + (runtime.MeasuredServerFriendlyName ?? "-") +
-                    " | tag=" + (runtime.MeasuredServerTag ?? "-") +
-                    " | publicIp=" + (runtime.MeasuredServerPublicIp ?? "-") +
-                    " | routeTarget=" + (runtime.MeasuredRouteTarget ?? "-"));
+                if (ShouldLogMeasuredIdentityApplied(candidate, activationIdentity))
+                {
+                    Logger.Log("startup",
+                        "startup-probe | measured identity applied | candidate=" + candidate +
+                        " | friendlyName=" + (runtime.MeasuredServerFriendlyName ?? "-") +
+                        " | tag=" + (runtime.MeasuredServerTag ?? "-") +
+                        " | publicIp=" + (runtime.MeasuredServerPublicIp ?? "-") +
+                        " | routeTarget=" + (runtime.MeasuredRouteTarget ?? "-"));
+                }
 
                 return;
             }
@@ -1582,6 +1586,36 @@ namespace WTFnetApp
                 return null;
 
             return identity;
+        }
+
+        private bool ShouldLogMeasuredIdentityApplied(
+            ProbeCandidateDefinition candidate,
+            SpeedifyActivatedServerIdentity identity)
+        {
+            if (candidate == null || identity == null)
+                return false;
+
+            string key =
+                candidate.RouteKey ??
+                candidate.ConnectTarget ??
+                candidate.DisplayName ??
+                "unknown";
+
+            DateTime capturedUtc = identity.CapturedUtc == DateTime.MinValue
+                ? DateTime.UtcNow
+                : identity.CapturedUtc;
+
+            lock (publishSync)
+            {
+                if (measuredIdentityLoggedByCandidate.TryGetValue(key, out DateTime loggedUtc))
+                {
+                    if (loggedUtc == capturedUtc)
+                        return false;
+                }
+
+                measuredIdentityLoggedByCandidate[key] = capturedUtc;
+                return true;
+            }
         }
 
         private static SpeedifyActivatedServerIdentity TryParseActivatedServerIdentity(string requestedTarget, string stdout)

@@ -262,6 +262,12 @@ namespace WTFnetApp
 
                 LearnedProbeStateProfile candidateLearned = learningStore.GetProfile(candidate.RouteKey, timeBucket);
                 score.StartupSelectionScore = ProbeScoring.ComputeStartupSelectionScore(score, candidateLearned);
+                Log("startup-probe | identity after score | candidate=" + candidate +
+                    " | friendly=" + (score?.Runtime?.MeasuredServerFriendlyName ?? "-") +
+                    " | tag=" + (score?.Runtime?.MeasuredServerTag ?? "-") +
+                    " | publicIp=" + (score?.Runtime?.MeasuredServerPublicIp ?? "-") +
+                    " | routeTarget=" + (score?.Runtime?.MeasuredRouteTarget ?? "-") +
+                    " | auth=" + ((score?.Runtime?.HasAuthoritativeIdentity ?? false) ? "true" : "false"));
                 startupLogger.RegisterCandidateEvaluation(
                     candidate,
                     lifecycle.WaitedMs,

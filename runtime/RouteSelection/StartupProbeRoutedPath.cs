@@ -858,7 +858,15 @@ namespace WTFnetApp
                 StartupSpeedifyFastPingAgreementDeltaMs = source.StartupSpeedifyFastPingAgreementDeltaMs,
                 StartupSpeedifyBondedEvidence = source.StartupSpeedifyBondedEvidence,
                 StartupSpeedifyFastPingAgreementGood = source.StartupSpeedifyFastPingAgreementGood,
-                StartupSpeedifyCongestedEvidence = source.StartupSpeedifyCongestedEvidence
+                StartupSpeedifyCongestedEvidence = source.StartupSpeedifyCongestedEvidence,
+                MeasuredServerFriendlyName = source.MeasuredServerFriendlyName,
+                MeasuredServerTag = source.MeasuredServerTag,
+                MeasuredRouteTarget = source.MeasuredRouteTarget,
+                MeasuredServerCity = source.MeasuredServerCity,
+                MeasuredServerPublicIp = source.MeasuredServerPublicIp,
+                MeasuredServerIdentifier = source.MeasuredServerIdentifier,
+                HasAuthoritativeIdentity = source.HasAuthoritativeIdentity,
+                RestoredServerTarget = source.RestoredServerTarget
             };
         }
     }
