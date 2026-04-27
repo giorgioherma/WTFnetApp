@@ -124,6 +124,12 @@ namespace WTFnetApp
         public LearnedMetricBand JitterRangeMs { get; set; } = new LearnedMetricBand();
         public LearnedMetricBand P95PingMs { get; set; } = new LearnedMetricBand();
         public LearnedMetricBand SpikeDensityPerMinute { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand AvgLossRate { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand WorstSegmentLoss { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand LossBurstDensity { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand StaleRate { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand BadTimeRatio { get; set; } = new LearnedMetricBand();
+        public LearnedMetricBand AvgConfidence { get; set; } = new LearnedMetricBand();
 
         public int SampleCountGood { get; set; }
         public int SampleCountBad { get; set; }
@@ -141,7 +147,19 @@ namespace WTFnetApp
                        P95PingMs.HasGoodBand ||
                        P95PingMs.HasBadBand ||
                        SpikeDensityPerMinute.HasGoodBand ||
-                       SpikeDensityPerMinute.HasBadBand;
+                       SpikeDensityPerMinute.HasBadBand ||
+                       AvgLossRate.HasGoodBand ||
+                       AvgLossRate.HasBadBand ||
+                       WorstSegmentLoss.HasGoodBand ||
+                       WorstSegmentLoss.HasBadBand ||
+                       LossBurstDensity.HasGoodBand ||
+                       LossBurstDensity.HasBadBand ||
+                       StaleRate.HasGoodBand ||
+                       StaleRate.HasBadBand ||
+                       BadTimeRatio.HasGoodBand ||
+                       BadTimeRatio.HasBadBand ||
+                       AvgConfidence.HasGoodBand ||
+                       AvgConfidence.HasBadBand;
             }
         }
 
@@ -158,7 +176,7 @@ namespace WTFnetApp
 
     public sealed class ServerProbeLearningStore
     {
-        private const int PersistenceVersion = 1;
+        private const int PersistenceVersion = 2;
 
         public const int MinimumGoodSamples = 5;
         public const int MinimumBadSamples = 5;
@@ -201,6 +219,14 @@ namespace WTFnetApp
         {
             public LearningStoreLoadStatus Status { get; set; }
             public int ProfilesApplied { get; set; }
+        }
+
+        public sealed class LearnedLossCredibility
+        {
+            public double CredibilityMultiplier { get; set; } = 1.0;
+            public double ProbeNoiseSuspicion { get; set; }
+            public string Label { get; set; } = "neutral";
+            public string Reason { get; set; } = "insufficient-evidence";
         }
 
         public void SeedDefaultsIfEmpty()
@@ -476,6 +502,34 @@ namespace WTFnetApp
                 goodWeight: 4.20,
                 badWeight: 2.40);
 
+            double avgLossScore = ComputeMetricOrderingScore(
+                profile.AvgLossRate,
+                fallbackGoodCenter: 0.02,
+                fallbackBadCenter: 0.14,
+                goodWeight: 26.0,
+                badWeight: 15.0);
+
+            double lossBurstScore = ComputeMetricOrderingScore(
+                profile.LossBurstDensity,
+                fallbackGoodCenter: 0.30,
+                fallbackBadCenter: 1.50,
+                goodWeight: 1.85,
+                badWeight: 1.10);
+
+            double staleRateScore = ComputeMetricOrderingScore(
+                profile.StaleRate,
+                fallbackGoodCenter: 0.04,
+                fallbackBadCenter: 0.20,
+                goodWeight: 9.0,
+                badWeight: 5.5);
+
+            double badTimeScore = ComputeMetricOrderingScore(
+                profile.BadTimeRatio,
+                fallbackGoodCenter: 0.06,
+                fallbackBadCenter: 0.25,
+                goodWeight: 11.0,
+                badWeight: 8.0);
+
             double sampleConfidenceAdjustment = ComputeSampleConfidenceAdjustment(profile);
             double bandWidthAdjustment = ComputeBandWidthAdjustment(profile);
 
@@ -484,6 +538,10 @@ namespace WTFnetApp
                 jitterRangeScore +
                 p95PingScore +
                 spikeScore +
+                avgLossScore +
+                lossBurstScore +
+                staleRateScore +
+                badTimeScore +
                 sampleConfidenceAdjustment +
                 bandWidthAdjustment;
 
@@ -558,6 +616,10 @@ namespace WTFnetApp
             penalty += ComputeSingleBandWidthPenalty(profile.JitterRangeMs, 0.14);
             penalty += ComputeSingleBandWidthPenalty(profile.P95PingMs, 0.03);
             penalty += ComputeSingleBandWidthPenalty(profile.SpikeDensityPerMinute, 0.50);
+            penalty += ComputeSingleBandWidthPenalty(profile.AvgLossRate, 3.50);
+            penalty += ComputeSingleBandWidthPenalty(profile.LossBurstDensity, 0.70);
+            penalty += ComputeSingleBandWidthPenalty(profile.StaleRate, 2.20);
+            penalty += ComputeSingleBandWidthPenalty(profile.BadTimeRatio, 2.50);
 
             return penalty;
         }
@@ -682,7 +744,7 @@ namespace WTFnetApp
                     return result;
                 }
 
-                if (model.Version != 0 && model.Version != PersistenceVersion)
+                if (model.Version != 0 && model.Version != 1 && model.Version != PersistenceVersion)
                 {
                     result.Status = LearningStoreLoadStatus.Invalid;
                     return result;
@@ -713,6 +775,12 @@ namespace WTFnetApp
                     ApplyBand(profile.JitterRangeMs, persisted.JitterRangeMs);
                     ApplyBand(profile.P95PingMs, persisted.P95PingMs);
                     ApplyBand(profile.SpikeDensityPerMinute, persisted.SpikeDensityPerMinute);
+                    ApplyBand(profile.AvgLossRate, persisted.AvgLossRate);
+                    ApplyBand(profile.WorstSegmentLoss, persisted.WorstSegmentLoss);
+                    ApplyBand(profile.LossBurstDensity, persisted.LossBurstDensity);
+                    ApplyBand(profile.StaleRate, persisted.StaleRate);
+                    ApplyBand(profile.BadTimeRatio, persisted.BadTimeRatio);
+                    ApplyBand(profile.AvgConfidence, persisted.AvgConfidence);
 
                     applied++;
                 }
@@ -795,6 +863,12 @@ namespace WTFnetApp
             double jitterRange = result.JitterRangeMs;
             double p95Ping = result.Runtime.P95PingMs;
             double spikeDensity = result.Runtime.SpikeDensityPerMinute;
+            double avgLossRate = result.Runtime.AvgLossRate;
+            double worstSegmentLoss = result.Runtime.WorstSegmentLoss;
+            double lossBurstDensity = result.Runtime.LossBurstDensity;
+            double staleRate = result.Runtime.StaleRate;
+            double badTimeRatio = result.Runtime.BadTimeRatio;
+            double avgConfidence = result.Runtime.AvgConfidence;
 
             if (isGood)
             {
@@ -802,6 +876,12 @@ namespace WTFnetApp
                 profile.JitterRangeMs.UpdateGood(jitterRange);
                 profile.P95PingMs.UpdateGood(p95Ping);
                 profile.SpikeDensityPerMinute.UpdateGood(spikeDensity);
+                profile.AvgLossRate.UpdateGood(avgLossRate);
+                profile.WorstSegmentLoss.UpdateGood(worstSegmentLoss);
+                profile.LossBurstDensity.UpdateGood(lossBurstDensity);
+                profile.StaleRate.UpdateGood(staleRate);
+                profile.BadTimeRatio.UpdateGood(badTimeRatio);
+                profile.AvgConfidence.UpdateGood(avgConfidence);
                 profile.SampleCountGood++;
             }
 
@@ -811,6 +891,12 @@ namespace WTFnetApp
                 profile.JitterRangeMs.UpdateBad(jitterRange);
                 profile.P95PingMs.UpdateBad(p95Ping);
                 profile.SpikeDensityPerMinute.UpdateBad(spikeDensity);
+                profile.AvgLossRate.UpdateBad(avgLossRate);
+                profile.WorstSegmentLoss.UpdateBad(worstSegmentLoss);
+                profile.LossBurstDensity.UpdateBad(lossBurstDensity);
+                profile.StaleRate.UpdateBad(staleRate);
+                profile.BadTimeRatio.UpdateBad(badTimeRatio);
+                profile.AvgConfidence.UpdateBad(avgConfidence);
                 profile.SampleCountBad++;
             }
 
@@ -868,6 +954,12 @@ namespace WTFnetApp
             double jitterRange = ComputeJitterRange(snapshot);
             double p95Ping = snapshot.P95PingMs;
             double spikeDensity = snapshot.SpikeDensityPerMinute;
+            double avgLossRate = snapshot.AvgLossRate;
+            double worstSegmentLoss = snapshot.WorstSegmentLoss;
+            double lossBurstDensity = snapshot.LossBurstDensity;
+            double staleRate = snapshot.StaleRate;
+            double badTimeRatio = snapshot.BadTimeRatio;
+            double avgConfidence = snapshot.AvgConfidence;
 
             if (readinessKind == ProbeReadinessKind.GoodStable)
             {
@@ -875,6 +967,12 @@ namespace WTFnetApp
                 profile.JitterRangeMs.UpdateGood(jitterRange);
                 profile.P95PingMs.UpdateGood(p95Ping);
                 profile.SpikeDensityPerMinute.UpdateGood(spikeDensity);
+                profile.AvgLossRate.UpdateGood(avgLossRate);
+                profile.WorstSegmentLoss.UpdateGood(worstSegmentLoss);
+                profile.LossBurstDensity.UpdateGood(lossBurstDensity);
+                profile.StaleRate.UpdateGood(staleRate);
+                profile.BadTimeRatio.UpdateGood(badTimeRatio);
+                profile.AvgConfidence.UpdateGood(avgConfidence);
                 profile.SampleCountGood++;
             }
             else if (readinessKind == ProbeReadinessKind.BadStable)
@@ -883,6 +981,12 @@ namespace WTFnetApp
                 profile.JitterRangeMs.UpdateBad(jitterRange);
                 profile.P95PingMs.UpdateBad(p95Ping);
                 profile.SpikeDensityPerMinute.UpdateBad(spikeDensity);
+                profile.AvgLossRate.UpdateBad(avgLossRate);
+                profile.WorstSegmentLoss.UpdateBad(worstSegmentLoss);
+                profile.LossBurstDensity.UpdateBad(lossBurstDensity);
+                profile.StaleRate.UpdateBad(staleRate);
+                profile.BadTimeRatio.UpdateBad(badTimeRatio);
+                profile.AvgConfidence.UpdateBad(avgConfidence);
                 profile.SampleCountBad++;
             }
 
@@ -926,6 +1030,140 @@ namespace WTFnetApp
 
             if (!profile.SpikeDensityPerMinute.HasBadBand)
                 profile.SpikeDensityPerMinute.SeedBad(spikeBadMin, 999);
+
+            if (!profile.AvgLossRate.HasGoodBand)
+                profile.AvgLossRate.SeedGood(0.0, 0.025);
+
+            if (!profile.AvgLossRate.HasBadBand)
+                profile.AvgLossRate.SeedBad(0.12, 1.0);
+
+            if (!profile.WorstSegmentLoss.HasGoodBand)
+                profile.WorstSegmentLoss.SeedGood(0.0, 0.09);
+
+            if (!profile.WorstSegmentLoss.HasBadBand)
+                profile.WorstSegmentLoss.SeedBad(0.22, 1.0);
+
+            if (!profile.LossBurstDensity.HasGoodBand)
+                profile.LossBurstDensity.SeedGood(0.0, 0.70);
+
+            if (!profile.LossBurstDensity.HasBadBand)
+                profile.LossBurstDensity.SeedBad(1.45, 10.0);
+
+            if (!profile.StaleRate.HasGoodBand)
+                profile.StaleRate.SeedGood(0.0, 0.05);
+
+            if (!profile.StaleRate.HasBadBand)
+                profile.StaleRate.SeedBad(0.18, 1.0);
+
+            if (!profile.BadTimeRatio.HasGoodBand)
+                profile.BadTimeRatio.SeedGood(0.0, 0.08);
+
+            if (!profile.BadTimeRatio.HasBadBand)
+                profile.BadTimeRatio.SeedBad(0.20, 1.0);
+
+            if (!profile.AvgConfidence.HasGoodBand)
+                profile.AvgConfidence.SeedGood(0.78, 1.0);
+
+            if (!profile.AvgConfidence.HasBadBand)
+                profile.AvgConfidence.SeedBad(0.0, 0.45);
+        }
+
+        public LearnedLossCredibility EvaluateLossCredibility(
+            string routeKey,
+            string timeBucketKey,
+            ProbeCandidateRuntimeData runtime)
+        {
+            LearnedLossCredibility output = new LearnedLossCredibility();
+            if (runtime == null)
+            {
+                output.Label = "neutral";
+                output.Reason = "runtime-missing";
+                return output;
+            }
+
+            LearnedProbeStateProfile profile = GetProfileForReadiness(routeKey, timeBucketKey);
+            List<string> reasons = new List<string>();
+
+            double credibility = 1.0;
+            double noiseSuspicion = 0.0;
+
+            double runtimeLoss = runtime.AvgLossRate;
+            bool lossHigh =
+                runtimeLoss >= 0.10 ||
+                runtime.WorstSegmentLoss >= 0.18 ||
+                runtime.LossBurstDensity >= 1.15 ||
+                runtime.BadTimeRatio >= 0.16;
+
+            int otherGoodSignals = 0;
+            int otherBadSignals = 0;
+
+            CountSignal(runtime.AvgJitterMs, 12.0, 16.0, ref otherGoodSignals, ref otherBadSignals);
+            CountSignal(runtime.P95PingMs, 95.0, 130.0, ref otherGoodSignals, ref otherBadSignals);
+            CountSignal(runtime.SpikeDensityPerMinute, 4.0, 8.0, ref otherGoodSignals, ref otherBadSignals);
+            CountSignal(runtime.StaleRate, 0.06, 0.15, ref otherGoodSignals, ref otherBadSignals);
+            CountSignal(runtime.BadTimeRatio, 0.08, 0.18, ref otherGoodSignals, ref otherBadSignals);
+
+            if (lossHigh && otherGoodSignals >= 4 && otherBadSignals == 0)
+            {
+                credibility *= 0.58;
+                noiseSuspicion += 0.30;
+                reasons.Add("high-loss while jitter/p95/spikes/stale/bad-time remain good");
+            }
+            else if (lossHigh && otherBadSignals >= 3)
+            {
+                credibility *= 1.20;
+                reasons.Add("high-loss aligned with degraded jitter/p95/spikes/stale/bad-time");
+            }
+
+            if (lossHigh && profile != null && profile.HasUsefulLearning)
+            {
+                bool lossInGoodBand = profile.AvgLossRate.IsInGoodBand(runtimeLoss);
+                bool lossInBadBand = profile.AvgLossRate.IsInBadBand(runtimeLoss);
+                bool lossOutsideBadBand =
+                    profile.AvgLossRate.HasBadBand &&
+                    runtimeLoss >= 0 &&
+                    runtimeLoss > (profile.AvgLossRate.BadMax + 0.02);
+
+                bool learnedGoodNonLoss =
+                    profile.StaleRate.IsInGoodBand(runtime.StaleRate) &&
+                    profile.BadTimeRatio.IsInGoodBand(runtime.BadTimeRatio);
+
+                if (lossInGoodBand && learnedGoodNonLoss)
+                {
+                    credibility *= 0.78;
+                    noiseSuspicion += 0.34;
+                    reasons.Add("learned profile often tolerates similar loss with stable stale/bad-time");
+                }
+
+                if (lossInBadBand)
+                {
+                    credibility *= 1.10;
+                    reasons.Add("runtime loss sits in learned bad band");
+                }
+
+                if (lossOutsideBadBand && otherBadSignals >= 2)
+                {
+                    credibility *= 1.15;
+                    reasons.Add("runtime loss exceeds learned bad range while other instability is elevated");
+                }
+            }
+
+            credibility = Clamp(credibility, 0.40, 1.35);
+            noiseSuspicion = Clamp(noiseSuspicion, 0.0, 1.0);
+
+            string label =
+                credibility <= 0.75 ? "likely-probe-noise" :
+                credibility >= 1.12 ? "likely-real-loss" :
+                "mixed";
+
+            output.CredibilityMultiplier = credibility;
+            output.ProbeNoiseSuspicion = noiseSuspicion;
+            output.Label = label;
+            output.Reason = reasons.Count > 0
+                ? string.Join(" | ", reasons)
+                : "loss credibility remains neutral";
+
+            return output;
         }
 
         private LearnedProbeStateProfile GetOrCreateOwnedProfile(string routeKey, string timeBucketKey)
@@ -1038,8 +1276,39 @@ namespace WTFnetApp
                 AvgJitterMs = ToPersistenceBand(profile.AvgJitterMs),
                 JitterRangeMs = ToPersistenceBand(profile.JitterRangeMs),
                 P95PingMs = ToPersistenceBand(profile.P95PingMs),
-                SpikeDensityPerMinute = ToPersistenceBand(profile.SpikeDensityPerMinute)
+                SpikeDensityPerMinute = ToPersistenceBand(profile.SpikeDensityPerMinute),
+                AvgLossRate = ToPersistenceBand(profile.AvgLossRate),
+                WorstSegmentLoss = ToPersistenceBand(profile.WorstSegmentLoss),
+                LossBurstDensity = ToPersistenceBand(profile.LossBurstDensity),
+                StaleRate = ToPersistenceBand(profile.StaleRate),
+                BadTimeRatio = ToPersistenceBand(profile.BadTimeRatio),
+                AvgConfidence = ToPersistenceBand(profile.AvgConfidence)
             };
+        }
+
+        private static void CountSignal(
+            double value,
+            double goodMax,
+            double badMin,
+            ref int goodCount,
+            ref int badCount)
+        {
+            if (value < 0)
+                return;
+
+            if (value <= goodMax)
+                goodCount++;
+            else if (value >= badMin)
+                badCount++;
+        }
+
+        private static double Clamp(double value, double min, double max)
+        {
+            if (value < min)
+                return min;
+            if (value > max)
+                return max;
+            return value;
         }
 
         private sealed class LearningStorePersistenceModel
@@ -1060,6 +1329,12 @@ namespace WTFnetApp
             public LearnedMetricBandPersistenceModel JitterRangeMs { get; set; } = new LearnedMetricBandPersistenceModel();
             public LearnedMetricBandPersistenceModel P95PingMs { get; set; } = new LearnedMetricBandPersistenceModel();
             public LearnedMetricBandPersistenceModel SpikeDensityPerMinute { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel AvgLossRate { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel WorstSegmentLoss { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel LossBurstDensity { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel StaleRate { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel BadTimeRatio { get; set; } = new LearnedMetricBandPersistenceModel();
+            public LearnedMetricBandPersistenceModel AvgConfidence { get; set; } = new LearnedMetricBandPersistenceModel();
         }
 
         private sealed class LearnedMetricBandPersistenceModel
