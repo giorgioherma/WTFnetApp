@@ -171,6 +171,7 @@ namespace WTFnetApp
         public bool HasMeaningfulSignal => sawConnectedEvidence || AverageTunnelLatencyMs > 0 || AverageAggLatencyMs > 0;
         public bool HasMinimumSamples => SampleCount >= minimumFreshSamples;
         public bool HasMinimumSpread => SampleSpreadMs >= minimumSpreadMs;
+
         public bool IsSufficientForStartupTrust
         {
             get
@@ -237,7 +238,6 @@ namespace WTFnetApp
 
             return true;
         }
-
         private static int ResolveAvailableConnectionCount(MiniSpeedifyMiniSnap miniSnap)
         {
             if (miniSnap == null)
@@ -246,13 +246,11 @@ namespace WTFnetApp
             if (miniSnap.AvailableConnectionCount >= 0)
                 return miniSnap.AvailableConnectionCount;
 
-            if (miniSnap.UsableLinkCount >= 0)
-                return miniSnap.UsableLinkCount;
-
             return Math.Max(0, miniSnap.ActiveConnectionCount);
         }
+    }
 
-        internal sealed class StartupSpeedifyWarmup
+    internal sealed class StartupSpeedifyWarmup
     {
         private readonly StartupProbeTimingConfig timing;
         private readonly Func<FastPingState> getFastPingState;
@@ -795,6 +793,17 @@ namespace WTFnetApp
                 return -1;
 
             return Math.Abs(aggLatencyMs - fastPingMs);
+        }
+
+        private static int ResolveAvailableConnectionCount(MiniSpeedifyMiniSnap miniSnap)
+        {
+            if (miniSnap == null)
+                return 0;
+
+            if (miniSnap.AvailableConnectionCount >= 0)
+                return miniSnap.AvailableConnectionCount;
+
+            return Math.Max(0, miniSnap.ActiveConnectionCount);
         }
 
         private static double SelectEffectiveSpeedifyLatencyMs(
