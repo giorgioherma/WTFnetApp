@@ -980,7 +980,7 @@ namespace WTFnetApp
             if (timing.PostStableMeasuredDuration > TimeSpan.Zero)
                 return timing.PostStableMeasuredDuration;
 
-            return TimeSpan.FromSeconds(12.0);
+            return TimeSpan.FromSeconds(17.0);
         }
 
     }

@@ -92,7 +92,7 @@ namespace WTFnetApp
             BaseMeasuredDuration = TimeSpan.FromSeconds(13.0),
             RawMeasuredDuration = TimeSpan.FromSeconds(18.0),
             MaxStabilizationObserveDuration = TimeSpan.FromSeconds(30.0),
-            PostStableMeasuredDuration = TimeSpan.FromSeconds(12.0),
+            PostStableMeasuredDuration = TimeSpan.FromSeconds(17.0),
             PromisingCandidateExtensionDuration = TimeSpan.FromSeconds(4.0),
         };
 

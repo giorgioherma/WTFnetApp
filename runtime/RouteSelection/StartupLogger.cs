@@ -15,7 +15,8 @@ namespace WTFnetApp
         }
 
         private readonly Action<string> log;
-        internal static bool EnableIdentityDiagnostics { get; } = false;
+        internal static bool EnableIdentityDiagnostics { get; set; } = false;
+        internal static bool EnableMiniSnapshotMainLog { get; set; } = false;
 
         private readonly HashSet<string> printedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -59,8 +60,32 @@ namespace WTFnetApp
         {
             LogPhaseRow(candidate, phase, runtime, note);
 
-            if (logMini)
+            if (logMini && EnableMiniSnapshotMainLog)
                 LogMiniSnapshot(candidate, phase, miniSnap);
+        }
+
+        public void LogSpeedifyProbeStatus(
+            ProbeCandidateDefinition candidate,
+            ProbeCandidateRuntimeData runtime,
+            string phaseOrOutcome)
+        {
+            log?.Invoke(
+                "startup-speedify-status | target=" + (candidate?.DisplayName ?? candidate?.RouteKey ?? "unknown") +
+                " | outcome=" + (string.IsNullOrWhiteSpace(phaseOrOutcome) ? "--" : phaseOrOutcome) +
+                " | trusted=" + FormatLabel(runtime?.StartupSpeedifyConfidenceLabel) +
+                " | connected=" + FormatYesNo(runtime?.TunnelConnected ?? false) +
+                " | active=" + FormatNonNegativeWhole(runtime?.ActiveConnectionCount ?? -1) +
+                " | backup=" + FormatNonNegativeWhole(runtime?.BackupConnectionCount ?? -1) +
+                " | usableLinks=" + FormatNonNegativeWhole(runtime?.SpeedifyUsableLinkCount ?? -1) +
+                " | independentPaths=" + FormatNonNegativeWhole(runtime?.SpeedifyAvailableConnectionCount ?? -1) +
+                " | tunnelLat=" + FormatNumber(runtime?.SpeedifyReportedLatencyMs ?? -1) +
+                " | aggLat=" + FormatNumber(runtime?.SpeedifyAggregateLatencyMs ?? -1) +
+                " | aggJit=" + FormatNumber(runtime?.SpeedifyAggregateJitterMs ?? -1) +
+                " | congested=" + FormatYesNo(runtime?.AggregateCongested ?? false) +
+                " | agreementDelta=" + FormatNumber(runtime?.StartupSpeedifyFastPingAgreementDeltaMs ?? -1) +
+                " | agreementGood=" + FormatYesNo(runtime?.StartupSpeedifyFastPingAgreementGood ?? false) +
+                " | bonded=" + FormatYesNo(runtime?.StartupSpeedifyBondedEvidence ?? false) +
+                " | miniTrusted=" + FormatYesNo(runtime?.StartupSpeedifyTrusted ?? false));
         }
 
         public void LogEvent(ProbeCandidateDefinition candidate, string eventText)
@@ -406,6 +431,21 @@ namespace WTFnetApp
         private static string FormatConf(double value)
         {
             return value >= 0 ? value.ToString("0.00") : "--";
+        }
+
+        private static string FormatYesNo(bool value)
+        {
+            return value ? "yes" : "no";
+        }
+
+        private static string FormatNonNegativeWhole(int value)
+        {
+            return value >= 0 ? value.ToString("0") : "--";
+        }
+
+        private static string FormatLabel(string value)
+        {
+            return string.IsNullOrWhiteSpace(value) ? "--" : value;
         }
     }
 }

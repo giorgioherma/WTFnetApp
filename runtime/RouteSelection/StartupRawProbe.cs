@@ -88,6 +88,7 @@ namespace WTFnetApp
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime;
         private readonly Func<string, string, string> appendNote;
+        private readonly StartupLogger startupLogger;
         private readonly Action<string> log;
         private const int MainWindowSliceCount = 10;
 
@@ -98,6 +99,7 @@ namespace WTFnetApp
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime,
             Func<string, string, string> appendNote,
+            StartupLogger startupLogger,
             Action<string> log)
         {
             this.timing = timing;
@@ -106,6 +108,7 @@ namespace WTFnetApp
             this.captureProbeAsync = captureProbeAsync;
             this.mergeMeasuredRuntime = mergeMeasuredRuntime;
             this.appendNote = appendNote;
+            this.startupLogger = startupLogger;
             this.log = log;
         }
 
@@ -231,6 +234,13 @@ namespace WTFnetApp
                 sliceRuntime.MeasurementCompleted = false;
                 sliceRuntime.MeasurementStoppedEarly = false;
                 sliceRuntime.Notes = appendNote(sliceRuntime.Notes, "measured-raw-direct");
+                startupLogger?.LogStartupPhase(
+                    candidate,
+                    "raw-measure",
+                    sliceRuntime,
+                    "-",
+                    null,
+                    logMini: false);
 
                 aggregateRuntime = aggregateRuntime == null
                     ? sliceRuntime
