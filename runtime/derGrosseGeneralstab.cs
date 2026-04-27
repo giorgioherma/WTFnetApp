@@ -1503,6 +1503,12 @@ namespace WTFnetApp
                     activationIdentity.Tag ??
                     activationIdentity.RequestedTarget;
                 runtime.HasAuthoritativeIdentity = true;
+                Logger.Log("startup",
+                    "startup-probe | measured identity applied | candidate=" + candidate +
+                    " | friendlyName=" + (runtime.MeasuredServerFriendlyName ?? "-") +
+                    " | tag=" + (runtime.MeasuredServerTag ?? "-") +
+                    " | publicIp=" + (runtime.MeasuredServerPublicIp ?? "-") +
+                    " | routeTarget=" + (runtime.MeasuredRouteTarget ?? "-"));
                 return;
             }
 

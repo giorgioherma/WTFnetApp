@@ -206,18 +206,33 @@ namespace WTFnetApp
                         AppendNote);
             }
             if (score != null)
+            {
+                if (score.Runtime != null && snapshot.Runtime != null)
+                {
+                    ProbeCandidateRuntimeData mergedIdentity =
+                        StartupProbeRuntimeMerge.MergeMeasuredIdentity(snapshot.Runtime, score.Runtime);
+                    ApplyMeasuredIdentity(snapshot.Runtime, mergedIdentity);
+                    ApplyMeasuredIdentity(score.Runtime, mergedIdentity);
+                }
+
                 snapshot.Score = score;
+            }
 
             candidateSnapshots[key] = snapshot;
         }
 
-        private static string AppendNote(string first, string second)
+        private static void ApplyMeasuredIdentity(ProbeCandidateRuntimeData target, ProbeCandidateRuntimeData source)
         {
-            if (string.IsNullOrWhiteSpace(first))
-                return second;
-            if (string.IsNullOrWhiteSpace(second))
-                return first;
-            return first + " | " + second;
+            if (target == null || source == null)
+                return;
+
+            target.MeasuredServerFriendlyName = source.MeasuredServerFriendlyName;
+            target.MeasuredServerTag = source.MeasuredServerTag;
+            target.MeasuredRouteTarget = source.MeasuredRouteTarget;
+            target.MeasuredServerCity = source.MeasuredServerCity;
+            target.MeasuredServerPublicIp = source.MeasuredServerPublicIp;
+            target.MeasuredServerIdentifier = source.MeasuredServerIdentifier;
+            target.HasAuthoritativeIdentity = source.HasAuthoritativeIdentity;
         }
 
         public void LogFinalDecisionBlock(
