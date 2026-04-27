@@ -15,7 +15,7 @@ namespace WTFnetApp
         }
 
         private readonly Action<string> log;
-        internal const bool EnableIdentityDiagnostics = false;
+        internal static bool EnableIdentityDiagnostics { get; } = false;
 
         private readonly HashSet<string> printedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
