@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 
 namespace WTFnetApp
 {
@@ -29,6 +30,7 @@ namespace WTFnetApp
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, DateTime> lastSpeedifyCategoryLogUtc =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private static readonly AsyncLocal<int> startupProbeLogScopeDepth = new AsyncLocal<int>();
         private const int SpeedifyLinkDowngradeConsecutiveThreshold = 2;
         private const int SpeedifyLinkRecoveryConsecutiveThreshold = 2;
         private static readonly TimeSpan SpeedifyLinkTransitionCooldown = TimeSpan.FromMilliseconds(1500);
@@ -204,6 +206,12 @@ namespace WTFnetApp
         {
             string normalizedCategory = category?.Trim() ?? string.Empty;
 
+            if (IsStartupProbeLogScopeActive &&
+                IsStartupSuppressedSpeedifyCategory(normalizedCategory))
+            {
+                return;
+            }
+
             if (!IsSpeedifyParserDeepDebugEnabled() &&
                 IsSpeedifyDeepDebugOnlyCategory(normalizedCategory))
             {
@@ -237,6 +245,17 @@ namespace WTFnetApp
                 $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} [CRITICAL] {message}";
 
             WriteLine(line);
+        }
+
+        public static IDisposable BeginStartupProbeLogScope()
+        {
+            startupProbeLogScopeDepth.Value = startupProbeLogScopeDepth.Value + 1;
+            return new StartupProbeLogScope();
+        }
+
+        public static bool IsStartupProbeLogScopeActive
+        {
+            get { return startupProbeLogScopeDepth.Value > 0; }
         }
 
         // =========================================================
@@ -857,6 +876,32 @@ namespace WTFnetApp
 
                 default:
                     return false;
+            }
+        }
+
+        private static bool IsStartupSuppressedSpeedifyCategory(string category)
+        {
+            if (string.IsNullOrWhiteSpace(category))
+                return false;
+
+            string normalized = category.Trim().ToLowerInvariant();
+            return normalized == "speedify-snapshot" ||
+                   normalized == "speedify-check" ||
+                   normalized == "speedify-link";
+        }
+
+        private sealed class StartupProbeLogScope : IDisposable
+        {
+            private bool disposed;
+
+            public void Dispose()
+            {
+                if (disposed)
+                    return;
+
+                disposed = true;
+                int depth = startupProbeLogScopeDepth.Value;
+                startupProbeLogScopeDepth.Value = depth > 0 ? depth - 1 : 0;
             }
         }
 

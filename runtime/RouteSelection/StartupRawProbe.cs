@@ -88,8 +88,10 @@ namespace WTFnetApp
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime;
         private readonly Func<string, string, string> appendNote;
+        private readonly StartupLogger startupLogger;
         private readonly Action<string> log;
         private const int MainWindowSliceCount = 10;
+        private static readonly TimeSpan StartupTableRowLogInterval = TimeSpan.FromMilliseconds(500);
 
         public StartupRawProbe(
             StartupProbeTimingConfig timing,
@@ -98,6 +100,7 @@ namespace WTFnetApp
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime,
             Func<string, string, string> appendNote,
+            StartupLogger startupLogger,
             Action<string> log)
         {
             this.timing = timing;
@@ -106,6 +109,7 @@ namespace WTFnetApp
             this.captureProbeAsync = captureProbeAsync;
             this.mergeMeasuredRuntime = mergeMeasuredRuntime;
             this.appendNote = appendNote;
+            this.startupLogger = startupLogger;
             this.log = log;
         }
 
@@ -208,6 +212,7 @@ namespace WTFnetApp
             List<TimeSpan> measuredSlices = BuildMainWindowSlices(rawDuration);
             ProbeCandidateRuntimeData aggregateRuntime = null;
             TimeSpan accumulatedMeasured = TimeSpan.Zero;
+            DateTime lastLoggedSnapshotUtc = DateTime.MinValue;
 
             for (int i = 0; i < measuredSlices.Count; i++)
             {
@@ -215,11 +220,19 @@ namespace WTFnetApp
 
                 TimeSpan slice = measuredSlices[i];
                 DateTime sliceStartUtc = DateTime.UtcNow;
-                ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(
+                Task<ProbeCandidateRuntimeData> sliceCaptureTask = captureProbeAsync(
                     candidate,
                     TimeSpan.Zero,
                     slice,
                     sliceStartUtc);
+                RawSliceCaptureResult sliceResult = await LogMeasurementRowsWhileRunningAsync(
+                    candidate,
+                    "raw-measure",
+                    sliceCaptureTask,
+                    cancellationToken,
+                    lastLoggedSnapshotUtc);
+                ProbeCandidateRuntimeData sliceRuntime = sliceResult.Runtime;
+                lastLoggedSnapshotUtc = sliceResult.LastLoggedSnapshotUtc;
 
                 if (sliceRuntime == null)
                     return aggregateRuntime;
@@ -264,6 +277,76 @@ namespace WTFnetApp
             ApplyRawPreMeasureInfluence(aggregateRuntime, preMeasureSignal);
 
             return aggregateRuntime;
+        }
+
+        private async Task<RawSliceCaptureResult> LogMeasurementRowsWhileRunningAsync(
+            ProbeCandidateDefinition candidate,
+            string phase,
+            Task<ProbeCandidateRuntimeData> sliceCaptureTask,
+            CancellationToken cancellationToken,
+            DateTime lastLoggedSnapshotUtc)
+        {
+            if (sliceCaptureTask == null)
+                return new RawSliceCaptureResult(null, lastLoggedSnapshotUtc);
+
+            while (!sliceCaptureTask.IsCompleted)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                lastLoggedSnapshotUtc = TryLogMeasurementSnapshot(candidate, phase, lastLoggedSnapshotUtc);
+                Task delayTask = Task.Delay(StartupTableRowLogInterval, cancellationToken);
+                await Task.WhenAny(sliceCaptureTask, delayTask);
+            }
+
+            lastLoggedSnapshotUtc = TryLogMeasurementSnapshot(candidate, phase, lastLoggedSnapshotUtc);
+            return new RawSliceCaptureResult(await sliceCaptureTask, lastLoggedSnapshotUtc);
+        }
+
+        private DateTime TryLogMeasurementSnapshot(
+            ProbeCandidateDefinition candidate,
+            string phase,
+            DateTime lastLoggedSnapshotUtc)
+        {
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot?.Invoke();
+            if (window == null || !window.IsValid)
+                return lastLoggedSnapshotUtc;
+
+            DateTime snapshotUtc = window.WindowEndUtc != DateTime.MinValue ? window.WindowEndUtc : DateTime.MinValue;
+            if (snapshotUtc != DateTime.MinValue &&
+                lastLoggedSnapshotUtc != DateTime.MinValue &&
+                snapshotUtc <= lastLoggedSnapshotUtc)
+            {
+                return lastLoggedSnapshotUtc;
+            }
+
+            if (snapshotUtc != DateTime.MinValue)
+                lastLoggedSnapshotUtc = snapshotUtc;
+
+            ProbeCandidateRuntimeData rowRuntime = new ProbeCandidateRuntimeData
+            {
+                Candidate = candidate,
+                AvgLossRate = window.AvgLossRate,
+                AvgPingMs = window.AvgPingMs,
+                P95PingMs = window.P95PingMs,
+                AvgJitterMs = window.AvgJitterMs,
+                P95JitterMs = window.P95JitterMs,
+                SpikeDensityPerMinute = window.SpikeDensityPerMinute,
+                AvgConfidence = window.AvgConfidence
+            };
+
+            startupLogger?.LogStartupPhase(candidate, phase, rowRuntime, "-", null, logMini: false);
+            return lastLoggedSnapshotUtc;
+        }
+
+        private readonly struct RawSliceCaptureResult
+        {
+            public RawSliceCaptureResult(ProbeCandidateRuntimeData runtime, DateTime lastLoggedSnapshotUtc)
+            {
+                Runtime = runtime;
+                LastLoggedSnapshotUtc = lastLoggedSnapshotUtc;
+            }
+
+            public ProbeCandidateRuntimeData Runtime { get; }
+            public DateTime LastLoggedSnapshotUtc { get; }
         }
 
         private void ApplyRawPreMeasureInfluence(

@@ -58,6 +58,7 @@ namespace WTFnetApp
                 startupLogger);
 
             measurement = new StartupSpeedifyMeasurement(
+                getShortWindowSnapshot,
                 getMiniSpeedifyMiniSnap,
                 captureProbeAsync,
                 timing,
@@ -628,6 +629,7 @@ namespace WTFnetApp
 
     internal sealed class StartupSpeedifyMeasurement
     {
+        private readonly Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot;
         private readonly Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap;
         private readonly Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync;
         private readonly StartupProbeTimingConfig timing;
@@ -638,12 +640,14 @@ namespace WTFnetApp
         private const int MainWindowSliceCount = 10;
         private const int PhaseMiniMinimumFreshSamples = 3;
         private const double PhaseMiniMinimumSpreadMs = 900.0;
+        private static readonly TimeSpan StartupTableRowLogInterval = TimeSpan.FromMilliseconds(500);
 
         // =========================
         // CONSTRUCTOR
         // =========================
 
         public StartupSpeedifyMeasurement(
+            Func<FastPingSignalAnalyzer.FastPingAggregateSnapshot> getShortWindowSnapshot,
             Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap,
             Func<ProbeCandidateDefinition, TimeSpan, TimeSpan, DateTime, Task<ProbeCandidateRuntimeData>> captureProbeAsync,
             StartupProbeTimingConfig timing,
@@ -651,6 +655,7 @@ namespace WTFnetApp
             Func<ProbeCandidateRuntimeData, ProbeCandidateRuntimeData, TimeSpan, TimeSpan, ProbeCandidateRuntimeData> mergeMeasuredRuntime,
             Func<string, string, string> appendNote)
         {
+            this.getShortWindowSnapshot = getShortWindowSnapshot;
             this.getMiniSpeedifyMiniSnap = getMiniSpeedifyMiniSnap;
             this.captureProbeAsync = captureProbeAsync;
             this.timing = timing;
@@ -681,6 +686,7 @@ namespace WTFnetApp
             TimeSpan accumulatedMeasured = TimeSpan.Zero;
             double adjustedLossWeightedSum = 0.0;
             double adjustedLossDurationSum = 0.0;
+            DateTime lastLoggedSnapshotUtc = DateTime.MinValue;
 
             for (int i = 0; i < measuredSlices.Count; i++)
             {
@@ -688,7 +694,15 @@ namespace WTFnetApp
                 TimeSpan slice = measuredSlices[i];
                 DateTime sliceStartUtc = DateTime.UtcNow;
 
-                ProbeCandidateRuntimeData sliceRuntime = await captureProbeAsync(candidate, TimeSpan.Zero, slice, sliceStartUtc);
+                Task<ProbeCandidateRuntimeData> sliceCaptureTask = captureProbeAsync(candidate, TimeSpan.Zero, slice, sliceStartUtc);
+                SliceCaptureResult sliceResult = await LogMeasurementRowsWhileRunningAsync(
+                    candidate,
+                    "post-stable",
+                    sliceCaptureTask,
+                    cancellationToken,
+                    lastLoggedSnapshotUtc);
+                ProbeCandidateRuntimeData sliceRuntime = sliceResult.Runtime;
+                lastLoggedSnapshotUtc = sliceResult.LastLoggedSnapshotUtc;
                 if (sliceRuntime == null)
                     return aggregateRuntime;
 
@@ -705,7 +719,6 @@ namespace WTFnetApp
                 if (!acceptedPostStableMini)
                     postStableMiniSnap = null;
                 ApplyStartupMiniSnapContext(sliceRuntime, postStableMiniSnap);
-                startupLogger?.LogStartupPhase(candidate, "post-stable", sliceRuntime, "-", postStableMiniSnap, logMini: true);
 
                 AccumulateStartupAdjustedLoss(
                     sliceRuntime,
@@ -795,6 +808,76 @@ namespace WTFnetApp
             }
 
             return slices.Where(x => x >= TimeSpan.Zero).ToList();
+        }
+
+        private async Task<SliceCaptureResult> LogMeasurementRowsWhileRunningAsync(
+            ProbeCandidateDefinition candidate,
+            string phase,
+            Task<ProbeCandidateRuntimeData> sliceCaptureTask,
+            CancellationToken cancellationToken,
+            DateTime lastLoggedSnapshotUtc)
+        {
+            if (sliceCaptureTask == null)
+                return new SliceCaptureResult(null, lastLoggedSnapshotUtc);
+
+            while (!sliceCaptureTask.IsCompleted)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                lastLoggedSnapshotUtc = TryLogMeasurementSnapshot(candidate, phase, lastLoggedSnapshotUtc);
+                Task delayTask = Task.Delay(StartupTableRowLogInterval, cancellationToken);
+                await Task.WhenAny(sliceCaptureTask, delayTask);
+            }
+
+            lastLoggedSnapshotUtc = TryLogMeasurementSnapshot(candidate, phase, lastLoggedSnapshotUtc);
+            return new SliceCaptureResult(await sliceCaptureTask, lastLoggedSnapshotUtc);
+        }
+
+        private DateTime TryLogMeasurementSnapshot(
+            ProbeCandidateDefinition candidate,
+            string phase,
+            DateTime lastLoggedSnapshotUtc)
+        {
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot window = getShortWindowSnapshot?.Invoke();
+            if (window == null || !window.IsValid)
+                return lastLoggedSnapshotUtc;
+
+            DateTime snapshotUtc = window.WindowEndUtc != DateTime.MinValue ? window.WindowEndUtc : DateTime.MinValue;
+            if (snapshotUtc != DateTime.MinValue &&
+                lastLoggedSnapshotUtc != DateTime.MinValue &&
+                snapshotUtc <= lastLoggedSnapshotUtc)
+            {
+                return lastLoggedSnapshotUtc;
+            }
+
+            if (snapshotUtc != DateTime.MinValue)
+                lastLoggedSnapshotUtc = snapshotUtc;
+
+            ProbeCandidateRuntimeData rowRuntime = new ProbeCandidateRuntimeData
+            {
+                Candidate = candidate,
+                AvgLossRate = window.AvgLossRate,
+                AvgPingMs = window.AvgPingMs,
+                P95PingMs = window.P95PingMs,
+                AvgJitterMs = window.AvgJitterMs,
+                P95JitterMs = window.P95JitterMs,
+                SpikeDensityPerMinute = window.SpikeDensityPerMinute,
+                AvgConfidence = window.AvgConfidence
+            };
+
+            startupLogger?.LogStartupPhase(candidate, phase, rowRuntime, "-", null, logMini: false);
+            return lastLoggedSnapshotUtc;
+        }
+
+        private readonly struct SliceCaptureResult
+        {
+            public SliceCaptureResult(ProbeCandidateRuntimeData runtime, DateTime lastLoggedSnapshotUtc)
+            {
+                Runtime = runtime;
+                LastLoggedSnapshotUtc = lastLoggedSnapshotUtc;
+            }
+
+            public ProbeCandidateRuntimeData Runtime { get; }
+            public DateTime LastLoggedSnapshotUtc { get; }
         }
 
         private static void AccumulateStartupAdjustedLoss(
@@ -980,7 +1063,7 @@ namespace WTFnetApp
             if (timing.PostStableMeasuredDuration > TimeSpan.Zero)
                 return timing.PostStableMeasuredDuration;
 
-            return TimeSpan.FromSeconds(12.0);
+            return TimeSpan.FromSeconds(17.0);
         }
 
     }
