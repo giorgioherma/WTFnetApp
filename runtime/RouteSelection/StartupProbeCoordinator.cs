@@ -342,19 +342,19 @@ namespace WTFnetApp
                 return false;
             }
 
-            if (state.Confidence < 0.30)
-            {
-                reason = "confidence too low";
-                return false;
-            }
-
             bool churn =
-                state.Confidence < 0.25 &&
-                (window.StaleRate >= 0.35 || window.AvgLossRate >= 0.35);
+    state.Confidence < 0.25 &&
+    (window.StaleRate >= 0.35 || window.AvgLossRate >= 0.35);
 
             if (churn)
             {
                 reason = "reconnect/disconnect churn";
+                return false;
+            }
+
+            if (state.Confidence < 0.30)
+            {
+                reason = "confidence too low";
                 return false;
             }
 

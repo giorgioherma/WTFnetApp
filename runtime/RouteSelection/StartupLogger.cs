@@ -21,6 +21,7 @@ namespace WTFnetApp
         private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, CandidateSummarySnapshot> candidateSnapshots = new Dictionary<string, CandidateSummarySnapshot>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, DateTime> miniSnapshotLastLogUtc = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+
         private const string TableHeader = "time         phase          loss%   avgPing  p95Ping  avgJit  p95Jit  spikeD  conf   note";
         private const string TableDivider = "---------------------------------------------------------------------------------------";
 
@@ -38,13 +39,13 @@ namespace WTFnetApp
             EnsureCandidateTable(candidate);
             log?.Invoke(BuildTableRow(
                 phase,
-                FormatPercent((double)(runtime?.AvgLossRate ?? -1)),
-                FormatNumber((double)(runtime?.AvgPingMs ?? -1)),
-                FormatNumber((double)(runtime?.P95PingMs ?? -1)),
-                FormatNumber((double)(runtime?.AvgJitterMs ?? -1)),
-                FormatNumber((double)(runtime?.P95JitterMs ?? -1)),
-                FormatNumber((double)(runtime?.SpikeDensityPerMinute ?? -1)),
-                FormatConf((double)(runtime?.AvgConfidence ?? -1)),
+                FormatPercent(runtime?.AvgLossRate ?? -1),
+                FormatNumber(runtime?.AvgPingMs ?? -1),
+                FormatNumber(runtime?.P95PingMs ?? -1),
+                FormatNumber(runtime?.AvgJitterMs ?? -1),
+                FormatNumber(runtime?.P95JitterMs ?? -1),
+                FormatNumber(runtime?.SpikeDensityPerMinute ?? -1),
+                FormatConf(runtime?.AvgConfidence ?? -1),
                 string.IsNullOrWhiteSpace(note) ? "-" : note));
         }
 
@@ -106,6 +107,7 @@ namespace WTFnetApp
                 (runtime != null
                     ? ProbeScoring.ScoreCandidate(StartupScoreRuntimeSanitizer.BuildScoreRuntimeWithoutSpeedify(runtime))
                     : null);
+
             double postStableMs =
                 postStableMeasurementStartUtc.HasValue && postStableMeasurementEndUtc.HasValue
                     ? Math.Max(0.0, (postStableMeasurementEndUtc.Value - postStableMeasurementStartUtc.Value).TotalMilliseconds + postStableMiniExtraWaitMs)
@@ -202,6 +204,7 @@ namespace WTFnetApp
                 snapshot.PostStableMs = postStableMs;
             if (extended)
                 snapshot.Extended = true;
+
             if (runtime != null)
             {
                 snapshot.Runtime = snapshot.Runtime == null
@@ -212,8 +215,8 @@ namespace WTFnetApp
                         TimeSpan.Zero,
                         TimeSpan.Zero,
                         AppendNote);
-
             }
+
             LogIdentityDiagnostics("startup-probe | identity registered | candidate=" + (candidate?.DisplayName ?? "Unknown") +
                 " | friendly=" + (snapshot.Runtime?.MeasuredServerFriendlyName ?? "-") +
                 " | tag=" + (snapshot.Runtime?.MeasuredServerTag ?? "-") +
@@ -298,23 +301,6 @@ namespace WTFnetApp
             }
         }
 
-        
-
-        private static string FormatNumber(double value)
-        {
-            return value >= 0 ? value.ToString("0.0") : "--";
-        }
-
-        private static string FormatPercent(double value)
-        {
-            return value >= 0 ? (value * 100.0).ToString("0.0") + "%" : "--";
-        }
-
-        private static string FormatConf(double value)
-        {
-            return value >= 0 ? value.ToString("0.00") : "--";
-        }
-
         private void LogMiniSnapshot(
             ProbeCandidateDefinition candidate,
             string phase,
@@ -393,5 +379,33 @@ namespace WTFnetApp
                 note ?? "-");
         }
 
+        private static string AppendNote(string existing, string note)
+        {
+            if (string.IsNullOrWhiteSpace(note))
+                return existing;
+
+            if (string.IsNullOrWhiteSpace(existing))
+                return note;
+
+            if (existing.IndexOf(note, StringComparison.OrdinalIgnoreCase) >= 0)
+                return existing;
+
+            return existing + " | " + note;
+        }
+
+        private static string FormatNumber(double value)
+        {
+            return value >= 0 ? value.ToString("0.0") : "--";
+        }
+
+        private static string FormatPercent(double value)
+        {
+            return value >= 0 ? (value * 100.0).ToString("0.0") + "%" : "--";
+        }
+
+        private static string FormatConf(double value)
+        {
+            return value >= 0 ? value.ToString("0.00") : "--";
+        }
     }
 }
