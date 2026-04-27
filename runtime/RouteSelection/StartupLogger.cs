@@ -15,6 +15,7 @@ namespace WTFnetApp
         }
 
         private readonly Action<string> log;
+        internal const bool EnableIdentityDiagnostics = false;
 
         private readonly HashSet<string> printedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -155,7 +156,7 @@ namespace WTFnetApp
                     extended = snapshot.Extended;
             }
 
-            log?.Invoke("startup-probe | identity final-summary-source | candidate=" + (candidate?.DisplayName ?? "Unknown") +
+            LogIdentityDiagnostics("startup-probe | identity final-summary-source | candidate=" + (candidate?.DisplayName ?? "Unknown") +
                 " | friendly=" + (runtime?.MeasuredServerFriendlyName ?? "-") +
                 " | tag=" + (runtime?.MeasuredServerTag ?? "-") +
                 " | publicIp=" + (runtime?.MeasuredServerPublicIp ?? "-") +
@@ -213,7 +214,7 @@ namespace WTFnetApp
                         AppendNote);
 
             }
-            log?.Invoke("startup-probe | identity registered | candidate=" + (candidate?.DisplayName ?? "Unknown") +
+            LogIdentityDiagnostics("startup-probe | identity registered | candidate=" + (candidate?.DisplayName ?? "Unknown") +
                 " | friendly=" + (snapshot.Runtime?.MeasuredServerFriendlyName ?? "-") +
                 " | tag=" + (snapshot.Runtime?.MeasuredServerTag ?? "-") +
                 " | publicIp=" + (snapshot.Runtime?.MeasuredServerPublicIp ?? "-") +
@@ -233,6 +234,14 @@ namespace WTFnetApp
             if (string.IsNullOrWhiteSpace(second))
                 return first;
             return first + " | " + second;
+        }
+
+        private void LogIdentityDiagnostics(string message)
+        {
+            if (!EnableIdentityDiagnostics || string.IsNullOrWhiteSpace(message))
+                return;
+
+            log?.Invoke(message);
         }
 
         public void LogFinalDecisionBlock(
@@ -322,6 +331,8 @@ namespace WTFnetApp
                 " | connected=" + (tunnelConnected ? "yes" : "no") +
                 " | active=" + Math.Max(0, miniSnap.ActiveConnectionCount) +
                 " | backup=" + Math.Max(0, miniSnap.BackupConnectionCount) +
+                " | usableLinks=" + Math.Max(0, miniSnap.UsableLinkCount) +
+                " | independentPaths=" + Math.Max(0, miniSnap.AvailableConnectionCount) +
                 " | tunnelLat=" + FormatNumber(miniSnap.ReportedLatencyMs) +
                 " | aggLat=" + FormatNumber(miniSnap.AggregateLatencyMs) +
                 " | aggJit=" + FormatNumber(miniSnap.AggregateJitterMs) +

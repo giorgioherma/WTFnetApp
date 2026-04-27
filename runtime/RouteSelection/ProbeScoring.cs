@@ -99,6 +99,8 @@ namespace WTFnetApp
         public bool AggregateCongested { get; set; }
         public int ActiveConnectionCount { get; set; }
         public int BackupConnectionCount { get; set; }
+        public int SpeedifyUsableLinkCount { get; set; } = -1;
+        public int SpeedifyAvailableConnectionCount { get; set; } = -1;
         public double SpeedifyAggregateLatencyMs { get; set; } = -1;
         public double SpeedifyAggregateJitterMs { get; set; } = -1;
         public double SpeedifyReportedLatencyMs { get; set; } = -1;
@@ -188,7 +190,13 @@ namespace WTFnetApp
         public double StartupSpeedifyConfidenceScore { get; set; } = -1;
         public string StartupSpeedifyConfidenceLabel { get; set; }
         public double StartupSpeedifyPositiveComponent { get; set; }
+        public double StartupSpeedifyTransportConfidenceBonus { get; set; }
+        public double StartupSpeedifyBondedStabilityBonus { get; set; }
+        public double StartupSpeedifyCongestionPenalty { get; set; }
+        public double StartupSpeedifyConfidenceScaling { get; set; }
         public double StartupSpeedifyNegativeComponent { get; set; }
+        public double BaseFastPingScore { get; set; }
+        public string StartupDecisionPreferenceNote { get; set; }
         public bool StartupSpeedifyBondedBonusReducedByLoss { get; set; }
         public bool StartupSpeedifyBondedBonusReducedByRisk { get; set; }
         public string StartupSpeedifyAdjustmentReason { get; set; }
@@ -334,7 +342,7 @@ namespace WTFnetApp
             ProbeWarningLevel preliminaryWarning = ClassifyWarning(runtime);
             result.WarningLevel = preliminaryWarning;
 
-            double latencyModifier = GetLatencyPenaltyModifier(runtime, healthBucket);
+            double latencyModifier = 1.0;
             double jitterModifier = GetJitterPenaltyModifier(runtime, healthBucket);
             double spikeModifier = GetSpikePenaltyModifier(runtime, healthBucket);
             double lossStaleModifier = GetLossStalePenaltyModifier(runtime, healthBucket);
@@ -387,6 +395,10 @@ namespace WTFnetApp
             speedifyAdjustment = ComputeStartupSpeedifyAdjustment(
                 runtime,
                 preliminaryWarning,
+                out double transportConfidenceBonus,
+                out double bondedStabilityBonus,
+                out double congestionPenalty,
+                out double confidenceScaling,
                 out double speedifyPositive,
                 out double speedifyNegative,
                 out bondedBonusReducedByLoss,
@@ -413,8 +425,17 @@ namespace WTFnetApp
             result.StartupSpeedifyTieBreakAdjustment = speedifyAdjustment;
             result.StartupSpeedifyConfidenceScore = runtime?.StartupSpeedifyConfidenceScore ?? -1;
             result.StartupSpeedifyConfidenceLabel = runtime?.StartupSpeedifyConfidenceLabel;
+            result.StartupSpeedifyTransportConfidenceBonus = transportConfidenceBonus;
+            result.StartupSpeedifyBondedStabilityBonus = bondedStabilityBonus;
+            result.StartupSpeedifyCongestionPenalty = congestionPenalty;
+            result.StartupSpeedifyConfidenceScaling = confidenceScaling;
             result.StartupSpeedifyPositiveComponent = speedifyPositive;
             result.StartupSpeedifyNegativeComponent = speedifyNegative;
+            result.BaseFastPingScore =
+                latencyContribution +
+                jitterContribution +
+                spikeContribution +
+                lossStaleBadContribution;
             result.StartupSpeedifyBondedBonusReducedByLoss = bondedBonusReducedByLoss;
             result.StartupSpeedifyBondedBonusReducedByRisk = bondedBonusReducedByRisk;
             result.StartupSpeedifyAdjustmentReason = speedifyAdjustmentReason;
@@ -1372,6 +1393,10 @@ namespace WTFnetApp
         private static double ComputeStartupSpeedifyAdjustment(
             ProbeCandidateRuntimeData runtime,
             ProbeWarningLevel warningLevel,
+            out double transportConfidenceBonus,
+            out double bondedStabilityBonus,
+            out double congestionPenalty,
+            out double confidenceScaling,
             out double positive,
             out double negative,
             out bool bondedBonusReducedByLoss,
@@ -1380,11 +1405,27 @@ namespace WTFnetApp
         {
             bondedBonusReducedByLoss = false;
             bondedBonusReducedByRisk = false;
+            transportConfidenceBonus = 0.0;
+            bondedStabilityBonus = 0.0;
+            congestionPenalty = 0.0;
+            confidenceScaling = 0.0;
             positive = 0.0;
             negative = 0.0;
             adjustmentReason = "none";
 
             if (runtime?.Candidate == null || runtime.Candidate.Kind == ProbeCandidateKind.Raw)
+                return 0.0;
+
+            bool hasMeaningfulStartupTelemetry =
+                runtime.StartupSpeedifyConfidenceScore >= 0.0 ||
+                runtime.StartupSpeedifyFastPingAgreementDeltaMs >= 0.0 ||
+                runtime.StartupSpeedifyBondedEvidence ||
+                runtime.StartupSpeedifyCongestedEvidence ||
+                runtime.SpeedifyFreshSampleCount > 0 ||
+                runtime.ActiveConnectionCount > 0 ||
+                ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs) > 0;
+
+            if (!hasMeaningfulStartupTelemetry)
                 return 0.0;
 
             bool routeMeasuredGood =
@@ -1407,6 +1448,7 @@ namespace WTFnetApp
                 runtime == null ||
                 runtime.AvgConfidence < 0.68 ||
                 runtime.AvgLossRate >= 0.14 ||
+                runtime.StaleRate >= 0.14 ||
                 runtime.SpikeDensityPerMinute >= 12.0 ||
                 runtime.AvgJitterMs >= 18.0 ||
                 warningLevel == ProbeWarningLevel.Risky;
@@ -1423,79 +1465,109 @@ namespace WTFnetApp
             bool bonded = runtime != null && runtime.StartupSpeedifyBondedEvidence;
             bool agreeGood = runtime != null && runtime.StartupSpeedifyFastPingAgreementGood;
             bool congested = runtime != null && runtime.StartupSpeedifyCongestedEvidence;
+            bool startupTrusted =
+                runtime != null &&
+                runtime.StartupSpeedifyTrusted &&
+                (spdConf >= 0.55 || agreeGood || bonded);
             double confidenceScaler =
                 spdConf < 0 ? 0.0 :
                 spdConf < 0.30 ? 0.35 :
                 spdConf < 0.55 ? 0.60 :
                 spdConf < 0.75 ? 0.80 :
                 1.00;
+            confidenceScaling = confidenceScaler;
             List<string> tags = new List<string>();
 
-            if (routeMeasuredGood && spdConf >= 0)
+            if (startupTrusted && routeMeasuredGood && spdConf >= 0 && !congested)
             {
-                positive += spdConf * 1.0;
+                transportConfidenceBonus += spdConf * 0.35;
                 if (spdConf >= 0.75)
                     tags.Add("high-confidence");
             }
-            else if (routeMeasuredDecent && spdConf >= 0)
+            else if (startupTrusted && routeMeasuredDecent && spdConf >= 0 && !congested)
             {
-                positive += spdConf * 0.8;
+                transportConfidenceBonus += spdConf * 0.22;
                 tags.Add("decent-confidence");
             }
 
-            if (bonded)
+            if (bonded && startupTrusted)
             {
-                double bondBase = 0.45;
-                tags.Add("bonded");
-
-                if (routeMeasuredDecent)
-                {
-                    bondBase += 0.20;
-                    tags.Add("bonded+good-route");
-                }
-
-                if (routeMeasuredGood)
-                {
-                    bondBase += 0.20;
-                    if (!tags.Contains("bonded+good-route"))
-                        tags.Add("bonded+good-route");
-                }
+                double bondBase = routeMeasuredGood ? 0.55 : (routeMeasuredDecent ? 0.38 : 0.22);
+                tags.Add("multilink-support");
 
                 if (agreeGood)
                 {
-                    bondBase += 0.15;
-                    tags.Add("bonded+agreement");
+                    bondBase += 0.10;
+                    tags.Add("multilink+agreement");
                 }
 
                 if (routeMeasuredWeak)
                 {
-                    bondBase *= 0.35;
+                    bondBase *= 0.20;
                     bondedBonusReducedByLoss = true;
                     bondedBonusReducedByRisk = true;
-                    tags.Add("weak-route-throttled-bonding");
+                    tags.Add("weak-route-throttled-multilink");
                 }
                 else if (highLoss)
                 {
-                    bondBase *= 0.60;
+                    bondBase *= 0.45;
                     bondedBonusReducedByLoss = true;
                 }
+                else if (congested)
+                {
+                    bondBase *= 0.60;
+                    bondedBonusReducedByRisk = true;
+                }
 
-                positive += bondBase;
+                bondedStabilityBonus += bondBase;
             }
 
-            if (agreeGood)
+            if (startupTrusted && agreeGood && !congested && !routeMeasuredWeak)
             {
-                positive += 0.30;
+                transportConfidenceBonus += routeMeasuredGood ? 0.30 : 0.18;
                 tags.Add("good-agreement");
             }
-            else if (spdDelta >= 0 && spdDelta <= 14)
+            else if (startupTrusted && spdDelta >= 0 && spdDelta <= 14 && !congested && !routeMeasuredWeak)
             {
-                positive += 0.10;
+                transportConfidenceBonus += 0.08;
             }
 
-            positive *= confidenceScaler;
-            positive = Math.Min(1.65, positive);
-            double positiveAdjustment = -positive;
+            if (bondedStabilityBonus > 0.0)
+            {
+                if (spdConf >= 0 && spdConf < 0.30)
+                    bondedStabilityBonus *= 0.25;
+
+                if (spdDelta > 18)
+                    bondedStabilityBonus *= 0.65;
+                if (spdDelta > 28)
+                    bondedStabilityBonus *= 0.40;
+                if (spdDelta > 40)
+                    bondedStabilityBonus *= 0.20;
+            }
+
+            double scaledTransportBonus = Math.Min(0.70, transportConfidenceBonus * confidenceScaler);
+            double scaledBondedBonus = Math.Min(0.85, bondedStabilityBonus * confidenceScaler);
+            positive = Math.Min(1.20, scaledTransportBonus + scaledBondedBonus);
+
+            double componentSum = scaledTransportBonus + scaledBondedBonus;
+            if (componentSum > 0.0 && positive < componentSum)
+            {
+                double ratio = positive / componentSum;
+                scaledTransportBonus *= ratio;
+                scaledBondedBonus *= ratio;
+            }
+
+            transportConfidenceBonus = scaledTransportBonus;
+            bondedStabilityBonus = scaledBondedBonus;
+
+            if (routeMeasuredWeak)
+            {
+                positive = 0.0;
+                transportConfidenceBonus = 0.0;
+                bondedStabilityBonus = 0.0;
+            }
+
+            double positiveAdjustment = routeMeasuredWeak ? 0.0 : -positive;
 
             if (spdConf >= 0 && spdConf < 0.30)
                 negative += 0.35;
@@ -1513,7 +1585,8 @@ namespace WTFnetApp
 
             if (congested)
             {
-                negative += 0.45;
+                negative += 0.40;
+                congestionPenalty += 0.40;
                 tags.Add("congested");
             }
 
@@ -1535,27 +1608,24 @@ namespace WTFnetApp
 
             if (highLoss)
             {
-                negative += 0.20;
+                negative += 0.25;
                 tags.Add("high-loss");
             }
             if (reallyHighLoss)
             {
-                negative += 0.30;
+                negative += 0.38;
                 tags.Add("very-high-loss");
             }
 
-            if (bonded)
-            {
-                negative *= 0.85;
-
-                if (routeMeasuredWeak)
-                    negative *= 1.00;
-            }
+            if (bonded && !routeMeasuredWeak)
+                negative *= 0.92;
 
             negative *= (0.6 + 0.4 * confidenceScaler);
-            negative = Math.Min(1.5, negative);
+            if (routeMeasuredGood && !congested)
+                negative *= 0.80;
+            negative = Math.Min(1.25, negative);
             double speedifyAdjustment = positiveAdjustment + negative;
-            speedifyAdjustment = Math.Max(-1.6, Math.Min(1.5, speedifyAdjustment));
+            speedifyAdjustment = Math.Max(-1.20, Math.Min(1.20, speedifyAdjustment));
             adjustmentReason = tags.Count == 0 ? "none" : string.Join(" | ", tags);
             return speedifyAdjustment;
         }
@@ -1643,7 +1713,8 @@ namespace WTFnetApp
                 warning +
                 " | weak=" + weakness +
                 " | spd=" + speedifyState +
-                " | bonded-bonus=" + F(result?.StartupSpeedifyPositiveComponent ?? 0.0) +
+                " | transport-confidence-bonus=" + F(result?.StartupSpeedifyTransportConfidenceBonus ?? 0.0) +
+                " | multilink-support-bonus=" + F(result?.StartupSpeedifyBondedStabilityBonus ?? 0.0) +
                 " | speedify-penalty=" + F(result?.StartupSpeedifyNegativeComponent ?? 0.0) +
                 " | j=" + F(runtime.AvgJitterMs) +
                 " jr=" + F(result.JitterRangeMs) +
@@ -1661,19 +1732,28 @@ namespace WTFnetApp
                    ",jit=" + F(result.JitterContribution) +
                    ",spk=" + F(result.SpikeContribution) +
                    ",lsb=" + F(result.LossStaleBadContribution) +
-                   ",bonded-bonus=" + F(result.StartupSpeedifyPositiveComponent) +
+                   ",transport-confidence-bonus=" + F(result.StartupSpeedifyTransportConfidenceBonus) +
+                   ",multilink-support-bonus=" + F(result.StartupSpeedifyBondedStabilityBonus) +
+                   ",congestion-penalty=" + F(result.StartupSpeedifyCongestionPenalty) +
+                   ",confidence-scaling=" + F(result.StartupSpeedifyConfidenceScaling) +
                    ",agreement-bonus=" + (result.Runtime?.StartupSpeedifyFastPingAgreementGood == true ? "yes" : "no") +
                    ",speedify-penalty=" + F(result.StartupSpeedifyNegativeComponent) +
-                   ",bonded-bonus-reduced-by-loss=" + (result.StartupSpeedifyBondedBonusReducedByLoss ? "yes" : "no") +
-                   ",bonded-bonus-reduced-by-risk=" + (result.StartupSpeedifyBondedBonusReducedByRisk ? "yes" : "no") +
+                   ",multilink-support-reduced-by-loss=" + (result.StartupSpeedifyBondedBonusReducedByLoss ? "yes" : "no") +
+                   ",multilink-support-reduced-by-risk=" + (result.StartupSpeedifyBondedBonusReducedByRisk ? "yes" : "no") +
                    ",spdPos=" + F(result.StartupSpeedifyPositiveComponent) +
                    ",spdNeg=" + F(result.StartupSpeedifyNegativeComponent) +
                    ",spdConf=" + F(result.StartupSpeedifyConfidenceScore) +
-                   ",spdBonded=" + (result.Runtime?.StartupSpeedifyBondedEvidence == true ? "yes" : "no") +
+                   ",spdMultilink=" + (result.Runtime?.StartupSpeedifyBondedEvidence == true ? "yes" : "no") +
+                   ",active=" + ((result.Runtime?.ActiveConnectionCount ?? -1) >= 0 ? (result.Runtime.ActiveConnectionCount).ToString() : "--") +
+                   ",backup=" + ((result.Runtime?.BackupConnectionCount ?? -1) >= 0 ? (result.Runtime.BackupConnectionCount).ToString() : "--") +
+                   ",usableLinks=" + ((result.Runtime?.SpeedifyUsableLinkCount ?? -1) >= 0 ? (result.Runtime.SpeedifyUsableLinkCount).ToString() : "--") +
+                   ",independentPaths=" + ((result.Runtime?.SpeedifyAvailableConnectionCount ?? -1) >= 0 ? (result.Runtime.SpeedifyAvailableConnectionCount).ToString() : "--") +
                    ",spdCong=" + (result.Runtime?.StartupSpeedifyCongestedEvidence == true ? "yes" : "no") +
                    ",spdDelta=" + F(result.Runtime?.StartupSpeedifyFastPingAgreementDeltaMs ?? -1) +
                    ",spdWhy=" + (string.IsNullOrWhiteSpace(result.StartupSpeedifyAdjustmentReason) ? "none" : result.StartupSpeedifyAdjustmentReason) +
                    ",spdAdj=" + F(result.StartupSpeedifyAdjustment) +
+                   ",baseFastPingScore=" + F(result.BaseFastPingScore) +
+                   ",preference=" + (string.IsNullOrWhiteSpace(result.StartupDecisionPreferenceNote) ? "none" : result.StartupDecisionPreferenceNote) +
                    ",adj=" + F(result.StartupSpeedifyAdjustment) +
                    ",confM=" + result.ConfidenceModifier.ToString("0.00") +
                    ",final=" + F(result.OverallStabilityScore) + "}";
@@ -1689,14 +1769,14 @@ namespace WTFnetApp
                 : 4.0;
             double freshSamples = Math.Max(0.0, runtime.SpeedifyFreshSampleCount);
             double sampleCoverage = Clamp(freshSamples / Math.Max(1.0, expectedSamples), 0.0, 1.2);
-            double sampleConfidence = Clamp(0.40 + (sampleCoverage * 0.65), 0.35, 1.08);
+            double sampleConfidence = Clamp(0.55 + (sampleCoverage * 0.45), 0.55, 1.06);
 
             double speedifyLatency = ChoosePositive(runtime.SpeedifyAggregateLatencyMs, runtime.SpeedifyReportedLatencyMs);
             double stdDev = runtime.SpeedifyAggregateLatencyStdDevMs;
             double relativeStdDev = speedifyLatency > 0 ? stdDev / Math.Max(1.0, speedifyLatency) : -1;
             double stabilityConfidence = relativeStdDev >= 0
-                ? Clamp(1.03 - (relativeStdDev * 0.85), 0.45, 1.05)
-                : 0.92;
+                ? Clamp(1.03 - (relativeStdDev * 0.85), 0.60, 1.05)
+                : 0.96;
 
             string notes = runtime.Notes ?? string.Empty;
             double noteConfidence = 1.0;
@@ -1710,7 +1790,7 @@ namespace WTFnetApp
             if (speedifyLatency > 0 && fastPingLatency > 0)
             {
                 double relativeDifference = Math.Abs(speedifyLatency - fastPingLatency) / Math.Max(1.0, fastPingLatency);
-                crossSignalConfidence = Clamp(1.10 - (relativeDifference * 0.75), 0.45, 1.12);
+                crossSignalConfidence = Clamp(1.08 - (relativeDifference * 0.65), 0.60, 1.10);
             }
 
             double modifier = sampleConfidence * stabilityConfidence * noteConfidence * crossSignalConfidence;
@@ -1718,7 +1798,7 @@ namespace WTFnetApp
                 modifier -= 0.05;
             if (runtime.LossBurstDensity > 1.25)
                 modifier -= 0.05;
-            modifier = Clamp(modifier, 0.3, 1.15);
+            modifier = Clamp(modifier, 0.50, 1.12);
 
             Logger.Log("conf",
                 "compute | " + (runtime.Candidate?.ToString() ?? "unknown") +
@@ -1754,7 +1834,7 @@ namespace WTFnetApp
                 SpeedifyHealthBucket.NoTelemetry => "no telemetry",
                 SpeedifyHealthBucket.Unhealthy => "unhealthy",
                 SpeedifyHealthBucket.HealthySingleLink => "healthy single-link",
-                SpeedifyHealthBucket.HealthyBonded => "healthy bonded",
+                SpeedifyHealthBucket.HealthyBonded => "healthy multi-link",
                 _ => "n/a"
             };
         }

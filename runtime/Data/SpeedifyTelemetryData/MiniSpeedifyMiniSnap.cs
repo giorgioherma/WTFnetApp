@@ -20,6 +20,8 @@ namespace WTFnetApp
         public bool AggregateCongested;
         public int ActiveConnectionCount = -1;
         public int BackupConnectionCount = -1;
+        public int UsableLinkCount = -1;
+        public int AvailableConnectionCount = -1;
         public bool IsFresh;
         public int ParseWarningCount;
     }
