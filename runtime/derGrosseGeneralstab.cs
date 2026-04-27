@@ -48,6 +48,7 @@ namespace WTFnetApp
         private DateTime lastStartupEvaluationUtc = DateTime.MinValue;
         private DateTime lastSpeedifySnapshotUtc = DateTime.MinValue;
         private SpeedifyActivatedServerIdentity lastActivatedServerIdentity;
+        private readonly Dictionary<string, DateTime> measuredIdentityLoggedByCandidate = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
         private StartupProbeResult lastStartupProbeResult;
         private EvaluationStats lastRouteEvaluationStats;
@@ -505,19 +506,13 @@ namespace WTFnetApp
             if (!snap.HasConnectionStats && !snap.TunnelAggregatePresent)
                 return null;
 
-            double tunnelLatencyMs = snap.AggregateLatencyMs > 0
-                ? snap.AggregateLatencyMs
-                : snap.ReportedLatencyMs > 0
-                    ? snap.ReportedLatencyMs
-                    : -1;
-
             return new MiniSpeedifyMiniSnap
             {
                 TimeUtc = snap.TimeUtc,
                 HasConnectionStats = snap.HasConnectionStats,
                 TunnelAggregatePresent = snap.TunnelAggregatePresent,
 
-                AggregateLatencyMs = tunnelLatencyMs,
+                AggregateLatencyMs = snap.AggregateLatencyMs > 0 ? snap.AggregateLatencyMs : -1,
                 AggregateJitterMs = snap.AggregateJitterMs,
 
                 ReportedLatencyMs = snap.ReportedLatencyMs,
@@ -526,6 +521,8 @@ namespace WTFnetApp
                 AggregateCongested = snap.AggregateCongested,
                 ActiveConnectionCount = snap.ActiveConnectionCount,
                 BackupConnectionCount = snap.BackupConnectionCount,
+                UsableLinkCount = snap.UsableLinkCount,
+                AvailableConnectionCount = snap.AvailableConnectionCount,
                 IsFresh = snap.IsFresh,
                 ParseWarningCount = snap.ParseWarningCount
             };
@@ -906,32 +903,38 @@ namespace WTFnetApp
             await RunSpeedifyCliAsync("disconnect");
 
             DateTime disconnectWaitStartUtc = DateTime.UtcNow;
+            string disconnectConfirmSource = "none";
             bool disconnected = await WaitForSpeedifyConnectivityStateAsync(
                 shouldBeConnected: false,
                 connectTarget: "raw",
                 maxWaitMs: 12000,
                 pollMs: 300,
-                requiredStableChecks: 3);
+                requiredStableChecks: 3,
+                confirmationSource: source => disconnectConfirmSource = source);
 
             if (disconnected)
             {
                 ClearSpeedifyRuntimeSnapshot("disconnect-confirmed");
                 Logger.Log("startup", "Speedify disconnect confirmed | elapsedMs=" +
                     (DateTime.UtcNow - disconnectWaitStartUtc).TotalMilliseconds.ToString("0"));
+                Logger.Log("startup", "Speedify disconnect confirmation source | mode=" + disconnectConfirmSource);
                 Logger.Log("startup", "Speedify disabled for raw baseline");
                 return true;
             }
 
+            string disconnectLateConfirmSource = "none";
             bool disconnectedLate = await WaitForSpeedifyConnectivityStateAsync(
                 shouldBeConnected: false,
                 connectTarget: "raw",
                 maxWaitMs: 3000,
                 pollMs: 250,
-                requiredStableChecks: 2);
+                requiredStableChecks: 2,
+                confirmationSource: source => disconnectLateConfirmSource = source);
 
             if (disconnectedLate)
             {
                 ClearSpeedifyRuntimeSnapshot("disconnect-confirmed-late");
+                Logger.Log("startup", "Speedify disconnect confirmation source | mode=" + disconnectLateConfirmSource);
                 Logger.Log("startup", "Speedify disconnect confirmed after timeout grace");
                 return true;
             }
@@ -940,6 +943,7 @@ namespace WTFnetApp
             if (!stillConnected)
             {
                 ClearSpeedifyRuntimeSnapshot("disconnect-confirmed-timeout-observed-off");
+                Logger.Log("startup", "Speedify disconnect confirmation source | mode=timeout-fallback-observed-off");
                 Logger.Log("startup", "Speedify disconnect confirmed after timeout | observedDisconnected=yes");
                 return true;
             }
@@ -1058,7 +1062,8 @@ namespace WTFnetApp
             string connectTarget,
             int maxWaitMs,
             int pollMs,
-            int requiredStableChecks)
+            int requiredStableChecks,
+            Action<string> confirmationSource = null)
         {
             int stableChecks = 0;
             int waited = 0;
@@ -1074,9 +1079,20 @@ namespace WTFnetApp
                 bool stateMatch = IsSpeedifyStateConsistent(snapshot, shouldBeConnected, connectTarget);
                 if (stateMatch)
                 {
+                    if (!shouldBeConnected &&
+                        IsDisconnectSnapshotStable(snapshot) &&
+                        stableChecks + 1 >= Math.Max(2, requiredStableChecks - 1))
+                    {
+                        confirmationSource?.Invoke("stable-websocket-telemetry");
+                        return true;
+                    }
+
                     stableChecks++;
                     if (stableChecks >= requiredStableChecks)
+                    {
+                        confirmationSource?.Invoke(shouldBeConnected ? "stable-connected-state" : "stable-disconnected-state");
                         return true;
+                    }
                 }
                 else
                 {
@@ -1117,6 +1133,20 @@ namespace WTFnetApp
                 return false;
 
             return true;
+        }
+
+        private static bool IsDisconnectSnapshotStable(MetricsSnapshot snapshot)
+        {
+            if (snapshot == null)
+                return false;
+
+            if (snapshot.TunnelConnected)
+                return false;
+
+            if (snapshot.ActiveConnectionCount > 0)
+                return false;
+
+            return !IsTunnelStateChurning(snapshot);
         }
 
         private static bool IsTunnelStateChurning(MetricsSnapshot snapshot)
@@ -1391,6 +1421,17 @@ namespace WTFnetApp
             return LogStartupProbeSlices;
         }
 
+        private static string FirstNonEmpty(string first, string second)
+        {
+            if (!string.IsNullOrWhiteSpace(first))
+                return first;
+
+            if (!string.IsNullOrWhiteSpace(second))
+                return second;
+
+            return null;
+        }
+
         // =========================
         // SPEEDIFY CLI
         // =========================
@@ -1503,12 +1544,17 @@ namespace WTFnetApp
                     activationIdentity.Tag ??
                     activationIdentity.RequestedTarget;
                 runtime.HasAuthoritativeIdentity = true;
-                Logger.Log("startup",
-                    "startup-probe | measured identity applied | candidate=" + candidate +
-                    " | friendlyName=" + (runtime.MeasuredServerFriendlyName ?? "-") +
-                    " | tag=" + (runtime.MeasuredServerTag ?? "-") +
-                    " | publicIp=" + (runtime.MeasuredServerPublicIp ?? "-") +
-                    " | routeTarget=" + (runtime.MeasuredRouteTarget ?? "-"));
+
+                if (ShouldLogMeasuredIdentityApplied(candidate, activationIdentity))
+                {
+                    Logger.Log("startup",
+                        "startup-probe | measured identity applied | candidate=" + candidate +
+                        " | friendlyName=" + (runtime.MeasuredServerFriendlyName ?? "-") +
+                        " | tag=" + (runtime.MeasuredServerTag ?? "-") +
+                        " | publicIp=" + (runtime.MeasuredServerPublicIp ?? "-") +
+                        " | routeTarget=" + (runtime.MeasuredRouteTarget ?? "-"));
+                }
+
                 return;
             }
 
@@ -1569,6 +1615,36 @@ namespace WTFnetApp
                 return null;
 
             return identity;
+        }
+
+        private bool ShouldLogMeasuredIdentityApplied(
+            ProbeCandidateDefinition candidate,
+            SpeedifyActivatedServerIdentity identity)
+        {
+            if (candidate == null || identity == null)
+                return false;
+
+            string key =
+                candidate.RouteKey ??
+                candidate.ConnectTarget ??
+                candidate.DisplayName ??
+                "unknown";
+
+            DateTime capturedUtc = identity.CapturedUtc == DateTime.MinValue
+                ? DateTime.UtcNow
+                : identity.CapturedUtc;
+
+            lock (publishSync)
+            {
+                if (measuredIdentityLoggedByCandidate.TryGetValue(key, out DateTime loggedUtc))
+                {
+                    if (loggedUtc == capturedUtc)
+                        return false;
+                }
+
+                measuredIdentityLoggedByCandidate[key] = capturedUtc;
+                return true;
+            }
         }
 
         private static SpeedifyActivatedServerIdentity TryParseActivatedServerIdentity(string requestedTarget, string stdout)
@@ -1892,7 +1968,13 @@ namespace WTFnetApp
                 StartupSpeedifyConfidenceScore = source.StartupSpeedifyConfidenceScore,
                 StartupSpeedifyConfidenceLabel = source.StartupSpeedifyConfidenceLabel,
                 StartupSpeedifyPositiveComponent = source.StartupSpeedifyPositiveComponent,
+                StartupSpeedifyTransportConfidenceBonus = source.StartupSpeedifyTransportConfidenceBonus,
+                StartupSpeedifyBondedStabilityBonus = source.StartupSpeedifyBondedStabilityBonus,
+                StartupSpeedifyCongestionPenalty = source.StartupSpeedifyCongestionPenalty,
+                StartupSpeedifyConfidenceScaling = source.StartupSpeedifyConfidenceScaling,
                 StartupSpeedifyNegativeComponent = source.StartupSpeedifyNegativeComponent,
+                BaseFastPingScore = source.BaseFastPingScore,
+                StartupDecisionPreferenceNote = source.StartupDecisionPreferenceNote,
                 StartupSpeedifyBondedBonusReducedByLoss = source.StartupSpeedifyBondedBonusReducedByLoss,
                 StartupSpeedifyBondedBonusReducedByRisk = source.StartupSpeedifyBondedBonusReducedByRisk,
                 StartupSpeedifyAdjustmentReason = source.StartupSpeedifyAdjustmentReason
@@ -1928,6 +2010,8 @@ namespace WTFnetApp
                 AggregateCongested = source.AggregateCongested,
                 ActiveConnectionCount = source.ActiveConnectionCount,
                 BackupConnectionCount = source.BackupConnectionCount,
+                SpeedifyUsableLinkCount = source.SpeedifyUsableLinkCount,
+                SpeedifyAvailableConnectionCount = source.SpeedifyAvailableConnectionCount,
                 SpeedifyAggregateLatencyMs = source.SpeedifyAggregateLatencyMs,
                 SpeedifyAggregateJitterMs = source.SpeedifyAggregateJitterMs,
                 SpeedifyReportedLatencyMs = source.SpeedifyReportedLatencyMs,

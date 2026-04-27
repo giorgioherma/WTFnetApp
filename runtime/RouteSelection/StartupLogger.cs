@@ -15,6 +15,7 @@ namespace WTFnetApp
         }
 
         private readonly Action<string> log;
+        internal const bool EnableIdentityDiagnostics = false;
 
         private readonly HashSet<string> printedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> summarizedCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -155,6 +156,13 @@ namespace WTFnetApp
                     extended = snapshot.Extended;
             }
 
+            LogIdentityDiagnostics("startup-probe | identity final-summary-source | candidate=" + (candidate?.DisplayName ?? "Unknown") +
+                " | friendly=" + (runtime?.MeasuredServerFriendlyName ?? "-") +
+                " | tag=" + (runtime?.MeasuredServerTag ?? "-") +
+                " | publicIp=" + (runtime?.MeasuredServerPublicIp ?? "-") +
+                " | routeTarget=" + (runtime?.MeasuredRouteTarget ?? "-") +
+                " | auth=" + ((runtime?.HasAuthoritativeIdentity ?? false) ? "true" : "false"));
+
             log?.Invoke("[startup-probe-summary] " + (candidate?.DisplayName ?? "Unknown") +
                 " | warmupMs=" + (warmupMs >= 0 ? warmupMs.ToString("0") : "--") +
                 " | stabilized=" + (string.IsNullOrWhiteSpace(stabilized) ? "--" : stabilized) +
@@ -204,7 +212,15 @@ namespace WTFnetApp
                         TimeSpan.Zero,
                         TimeSpan.Zero,
                         AppendNote);
+
             }
+            LogIdentityDiagnostics("startup-probe | identity registered | candidate=" + (candidate?.DisplayName ?? "Unknown") +
+                " | friendly=" + (snapshot.Runtime?.MeasuredServerFriendlyName ?? "-") +
+                " | tag=" + (snapshot.Runtime?.MeasuredServerTag ?? "-") +
+                " | publicIp=" + (snapshot.Runtime?.MeasuredServerPublicIp ?? "-") +
+                " | routeTarget=" + (snapshot.Runtime?.MeasuredRouteTarget ?? "-") +
+                " | auth=" + ((snapshot.Runtime?.HasAuthoritativeIdentity ?? false) ? "true" : "false"));
+
             if (score != null)
             {
                 if (score.Runtime != null && snapshot.Runtime != null)
@@ -233,6 +249,14 @@ namespace WTFnetApp
             target.MeasuredServerPublicIp = source.MeasuredServerPublicIp;
             target.MeasuredServerIdentifier = source.MeasuredServerIdentifier;
             target.HasAuthoritativeIdentity = source.HasAuthoritativeIdentity;
+        }
+
+        private void LogIdentityDiagnostics(string message)
+        {
+            if (!EnableIdentityDiagnostics || string.IsNullOrWhiteSpace(message))
+                return;
+
+            log?.Invoke(message);
         }
 
         public void LogFinalDecisionBlock(
@@ -322,6 +346,8 @@ namespace WTFnetApp
                 " | connected=" + (tunnelConnected ? "yes" : "no") +
                 " | active=" + Math.Max(0, miniSnap.ActiveConnectionCount) +
                 " | backup=" + Math.Max(0, miniSnap.BackupConnectionCount) +
+                " | usableLinks=" + Math.Max(0, miniSnap.UsableLinkCount) +
+                " | independentPaths=" + Math.Max(0, miniSnap.AvailableConnectionCount) +
                 " | tunnelLat=" + FormatNumber(miniSnap.ReportedLatencyMs) +
                 " | aggLat=" + FormatNumber(miniSnap.AggregateLatencyMs) +
                 " | aggJit=" + FormatNumber(miniSnap.AggregateJitterMs) +

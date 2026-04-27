@@ -341,13 +341,15 @@ namespace WTFnetApp
             }
 
             string measuredServer = BuildMeasuredServerIdentity(leader?.Runtime);
-            string restoreTarget = leader?.Candidate?.ConnectTarget;
+            string restoreTarget = leader?.Runtime?.MeasuredRouteTarget;
+            if (string.IsNullOrWhiteSpace(restoreTarget))
+                restoreTarget = leader?.Candidate?.ConnectTarget;
             bool exactRequested = false;
             bool exactSupported = false;
             string exactTarget = leader?.Runtime?.MeasuredServerTag;
             if (string.IsNullOrWhiteSpace(exactTarget))
             {
-                log?.Invoke("exact measured tag unavailable; falling back to route target");
+                log?.Invoke("exact measured tag unavailable; falling back to measured route target");
             }
             else
             {
@@ -359,7 +361,7 @@ namespace WTFnetApp
                 }
                 else
                 {
-                    log?.Invoke("exact restore unsupported; falling back to route target");
+                    log?.Invoke("exact restore unsupported; falling back to measured route target");
                 }
             }
 
@@ -543,6 +545,21 @@ namespace WTFnetApp
             TrimShortlistByStartupScore(output.Shortlist, 3);
 
             bool candidateBeatsLeader = score.StartupSelectionScore < leader.StartupSelectionScore;
+            double scoreGap = Math.Abs(score.StartupSelectionScore - leader.StartupSelectionScore);
+
+            if (candidateBeatsLeader && ShouldPreferRawOnSmallGap(score, leader, scoreGap))
+            {
+                candidateBeatsLeader = false;
+                leader.StartupDecisionPreferenceNote = "raw-preference";
+                log?.Invoke("startup-probe | preference | raw-preference-applied | gap=" + scoreGap.ToString("0.0"));
+            }
+            else if (!candidateBeatsLeader && ShouldPreferBondedBorderline(score, leader, scoreGap))
+            {
+                candidateBeatsLeader = true;
+                score.StartupDecisionPreferenceNote = "multilink-borderline-preference";
+                log?.Invoke("startup-probe | preference | multilink-borderline-preference-applied | gap=" + scoreGap.ToString("0.0"));
+            }
+
             if (candidateBeatsLeader)
             {
                 leader = score;
@@ -574,6 +591,46 @@ namespace WTFnetApp
 
             while (shortlist.Count > maxKeep)
                 shortlist.RemoveAt(shortlist.Count - 1);
+        }
+
+        private static bool ShouldPreferRawOnSmallGap(ProbeScoreResult challenger, ProbeScoreResult currentLeader, double gap)
+        {
+            if (challenger?.Candidate == null || currentLeader?.Candidate == null)
+                return false;
+
+            if (gap > 2.0)
+                return false;
+
+            bool rawIsCleanLeader =
+                currentLeader.Candidate.Kind == ProbeCandidateKind.Raw &&
+                currentLeader.WarningLevel == ProbeWarningLevel.None;
+
+            bool speedifyChallenger =
+                challenger.Candidate.Kind == ProbeCandidateKind.Speedify;
+
+            return rawIsCleanLeader && speedifyChallenger;
+        }
+
+        private static bool ShouldPreferBondedBorderline(ProbeScoreResult challenger, ProbeScoreResult currentLeader, double gap)
+        {
+            if (challenger?.Runtime == null || challenger.Candidate == null || currentLeader?.Candidate == null)
+                return false;
+
+            if (gap > 2.0)
+                return false;
+
+            bool speedifyChallenger =
+                challenger.Candidate.Kind == ProbeCandidateKind.Speedify &&
+                challenger.Runtime.StartupSpeedifyTrusted &&
+                challenger.Runtime.StartupSpeedifyBondedEvidence &&
+                !challenger.Runtime.StartupSpeedifyCongestedEvidence;
+
+            bool rawLeader = currentLeader.Candidate.Kind == ProbeCandidateKind.Raw;
+            bool bothBorderlineOrWorse =
+                challenger.WarningLevel != ProbeWarningLevel.None &&
+                currentLeader.WarningLevel != ProbeWarningLevel.None;
+
+            return speedifyChallenger && rawLeader && bothBorderlineOrWorse;
         }
     }
 }
@@ -736,6 +793,8 @@ namespace WTFnetApp
                 AggregateCongested = first.AggregateCongested || second.AggregateCongested,
                 ActiveConnectionCount = Math.Max(first.ActiveConnectionCount, second.ActiveConnectionCount),
                 BackupConnectionCount = Math.Max(first.BackupConnectionCount, second.BackupConnectionCount),
+                SpeedifyUsableLinkCount = Math.Max(first.SpeedifyUsableLinkCount, second.SpeedifyUsableLinkCount),
+                SpeedifyAvailableConnectionCount = Math.Max(first.SpeedifyAvailableConnectionCount, second.SpeedifyAvailableConnectionCount),
                 SpeedifyAggregateLatencyMs = WeightedAverageKnown(first.SpeedifyAggregateLatencyMs, second.SpeedifyAggregateLatencyMs, w1, w2),
                 SpeedifyAggregateJitterMs = WeightedAverageKnown(first.SpeedifyAggregateJitterMs, second.SpeedifyAggregateJitterMs, w1, w2),
                 SpeedifyReportedLatencyMs = WeightedAverageKnown(first.SpeedifyReportedLatencyMs, second.SpeedifyReportedLatencyMs, w1, w2),

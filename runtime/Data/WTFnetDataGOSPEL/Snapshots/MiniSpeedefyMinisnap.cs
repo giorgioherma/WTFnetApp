@@ -1,26 +1,23 @@
 ﻿using System;
 
-internal sealed class MiniSpeedifyMiniSnap
+namespace WTFnetApp
 {
-    public DateTime TimeUtc { get; set; }
-    public bool IsFresh { get; set; }
-
-    // 🔹 Tunnel state
-    public bool TunnelConnected { get; set; }
-    public int ActiveConnectionCount { get; set; }
-    public int BackupConnectionCount { get; set; }
-
-    // 🔹 Latency (FastPing-aligned)
-    public double TunnelAvgPingMs { get; set; }
-    public double TunnelReportedPingMs { get; set; }
-
-    // 🔹 Jitter
-    public double TunnelAvgJitterMs { get; set; }
-
-    // 🔹 Congestion
-    public bool IsCongested { get; set; }
-
-    // 🔹 Base / queue (advanced)
-    public double BasePingMs { get; set; }
-    public double DynamicBasePingMs { get; set; }
+    public sealed class MiniSpeedifyMiniSnap
+    {
+        public DateTime TimeUtc = DateTime.MinValue;
+        public bool HasConnectionStats;
+        public bool TunnelAggregatePresent;
+        public double AggregateLatencyMs = -1;
+        public double AggregateJitterMs = -1;
+        public double ReportedLatencyMs = -1;
+        public double BaseLatencyMs = -1;
+        public double DynamicBaseMs = -1;
+        public bool AggregateCongested;
+        public int ActiveConnectionCount = -1;
+        public int BackupConnectionCount = -1;
+        public int UsableLinkCount = -1;
+        public int AvailableConnectionCount = -1;
+        public bool IsFresh;
+        public int ParseWarningCount;
+    }
 }

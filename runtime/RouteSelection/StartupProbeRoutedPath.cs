@@ -137,7 +137,7 @@ namespace WTFnetApp
         private DateTime lastAcceptedUtc = DateTime.MinValue;
         private bool sawConnectedEvidence;
         private int connectedEvidenceCount;
-        private bool sawDualLinkEvidence;
+        private bool sawAssistCapableEvidence;
         private bool sawCongestion;
         private double tunnelLatencySum;
         private int tunnelLatencyCount;
@@ -163,7 +163,7 @@ namespace WTFnetApp
                 ? (lastAcceptedUtc - firstAcceptedUtc).TotalMilliseconds
                 : 0.0;
         public bool HasConnectedEvidence => sawConnectedEvidence;
-        public bool HasDualLinkEvidence => sawDualLinkEvidence;
+        public bool HasDualLinkEvidence => sawAssistCapableEvidence;
         public bool HasCongestionEvidence => sawCongestion;
         public double AverageTunnelLatencyMs => tunnelLatencyCount > 0 ? tunnelLatencySum / tunnelLatencyCount : -1;
         public double AverageAggLatencyMs => aggLatencyCount > 0 ? aggLatencySum / aggLatencyCount : -1;
@@ -171,6 +171,7 @@ namespace WTFnetApp
         public bool HasMeaningfulSignal => sawConnectedEvidence || AverageTunnelLatencyMs > 0 || AverageAggLatencyMs > 0;
         public bool HasMinimumSamples => SampleCount >= minimumFreshSamples;
         public bool HasMinimumSpread => SampleSpreadMs >= minimumSpreadMs;
+
         public bool IsSufficientForStartupTrust
         {
             get
@@ -213,7 +214,8 @@ namespace WTFnetApp
             sawConnectedEvidence = sawConnectedEvidence || connectedEvidence;
             if (connectedEvidence)
                 connectedEvidenceCount++;
-            sawDualLinkEvidence = sawDualLinkEvidence || miniSnap.ActiveConnectionCount >= 2;
+            int availableConnectionCount = ResolveAvailableConnectionCount(miniSnap);
+            sawAssistCapableEvidence = sawAssistCapableEvidence || availableConnectionCount >= 2;
             sawCongestion = sawCongestion || miniSnap.AggregateCongested;
 
             if (miniSnap.ReportedLatencyMs > 0)
@@ -235,6 +237,16 @@ namespace WTFnetApp
             }
 
             return true;
+        }
+        private static int ResolveAvailableConnectionCount(MiniSpeedifyMiniSnap miniSnap)
+        {
+            if (miniSnap == null)
+                return 0;
+
+            if (miniSnap.AvailableConnectionCount >= 0)
+                return miniSnap.AvailableConnectionCount;
+
+            return Math.Max(0, miniSnap.ActiveConnectionCount);
         }
     }
 
@@ -581,8 +593,13 @@ namespace WTFnetApp
             aggregateRuntime.StartupSpeedifyConfidenceLabel = BuildStartupSpeedifyConfidenceLabel(miniConfidence.Score);
             aggregateRuntime.StartupSpeedifyBondedEvidence = phaseMiniBuffer.HasDualLinkEvidence;
             aggregateRuntime.StartupSpeedifyCongestedEvidence = phaseMiniBuffer.HasCongestionEvidence;
-            aggregateRuntime.StartupSpeedifyFastPingAgreementDeltaMs = ComputeStartupSpeedifyAgreementDeltaMs(
+            double effectiveSpeedifyLatencyMs = SelectEffectiveSpeedifyLatencyMs(
                 phaseMiniBuffer.AverageAggLatencyMs,
+                phaseMiniBuffer.AverageTunnelLatencyMs,
+                aggregateRuntime.SpeedifyAggregateLatencyMs,
+                aggregateRuntime.SpeedifyReportedLatencyMs);
+            aggregateRuntime.StartupSpeedifyFastPingAgreementDeltaMs = ComputeStartupSpeedifyAgreementDeltaMs(
+                effectiveSpeedifyLatencyMs,
                 aggregateRuntime.AvgPingMs);
             aggregateRuntime.StartupSpeedifyFastPingAgreementGood =
                 aggregateRuntime.StartupSpeedifyFastPingAgreementDeltaMs >= 0 &&
@@ -685,6 +702,8 @@ namespace WTFnetApp
             runtime.TunnelConnected = false;
             runtime.ActiveConnectionCount = 0;
             runtime.BackupConnectionCount = 0;
+            runtime.SpeedifyUsableLinkCount = -1;
+            runtime.SpeedifyAvailableConnectionCount = -1;
             runtime.SpeedifyReportedLatencyMs = -1;
             runtime.SpeedifyAggregateLatencyMs = -1;
             runtime.SpeedifyAggregateJitterMs = -1;
@@ -712,6 +731,8 @@ namespace WTFnetApp
                 miniSnap.TunnelAggregatePresent;
             runtime.ActiveConnectionCount = Math.Max(0, miniSnap.ActiveConnectionCount);
             runtime.BackupConnectionCount = Math.Max(0, miniSnap.BackupConnectionCount);
+            runtime.SpeedifyUsableLinkCount = Math.Max(0, miniSnap.UsableLinkCount);
+            runtime.SpeedifyAvailableConnectionCount = ResolveAvailableConnectionCount(miniSnap);
             runtime.SpeedifyReportedLatencyMs = miniSnap.ReportedLatencyMs > 0 ? miniSnap.ReportedLatencyMs : -1;
             runtime.SpeedifyAggregateLatencyMs = miniSnap.AggregateLatencyMs > 0 ? miniSnap.AggregateLatencyMs : -1;
             runtime.SpeedifyAggregateJitterMs = miniSnap.AggregateJitterMs > 0 ? miniSnap.AggregateJitterMs : -1;
@@ -774,6 +795,38 @@ namespace WTFnetApp
             return Math.Abs(aggLatencyMs - fastPingMs);
         }
 
+        private static int ResolveAvailableConnectionCount(MiniSpeedifyMiniSnap miniSnap)
+        {
+            if (miniSnap == null)
+                return 0;
+
+            if (miniSnap.AvailableConnectionCount >= 0)
+                return miniSnap.AvailableConnectionCount;
+
+            return Math.Max(0, miniSnap.ActiveConnectionCount);
+        }
+
+        private static double SelectEffectiveSpeedifyLatencyMs(
+            double aggregateLatencyMs,
+            double reportedLatencyMs,
+            double runtimeAggregateLatencyMs,
+            double runtimeReportedLatencyMs)
+        {
+            if (aggregateLatencyMs > 0)
+                return aggregateLatencyMs;
+
+            if (reportedLatencyMs > 0)
+                return reportedLatencyMs;
+
+            if (runtimeAggregateLatencyMs > 0)
+                return runtimeAggregateLatencyMs;
+
+            if (runtimeReportedLatencyMs > 0)
+                return runtimeReportedLatencyMs;
+
+            return -1;
+        }
+
         private readonly struct StartupMiniConfidenceResult
         {
             public StartupMiniConfidenceResult(double score, string label)
@@ -823,22 +876,24 @@ namespace WTFnetApp
                 BadTimeRatio = source.BadTimeRatio,
                 WorstSegmentLoss = source.WorstSegmentLoss,
                 StaleRate = source.StaleRate,
-                TunnelConnected = false,
-                AggregateCongested = false,
-                ActiveConnectionCount = 0,
-                BackupConnectionCount = 0,
-                SpeedifyAggregateLatencyMs = -1,
-                SpeedifyAggregateJitterMs = -1,
-                SpeedifyReportedLatencyMs = -1,
-                SpeedifyFreshSampleCount = 0,
-                SpeedifyExpectedSampleCount = -1,
-                SpeedifyAggregateLatencyStdDevMs = -1,
-                FirstFreshPostSwitchStatsUtc = DateTime.MinValue,
-                FirstFreshPostSwitchAggLatencyMs = -1,
-                FirstFreshPostSwitchAggJitterMs = -1,
-                FirstFreshPostSwitchReportedLatencyMs = -1,
-                FirstFreshPostSwitchActiveConnectionCount = -1,
-                FirstFreshPostSwitchAggregateCongested = false,
+                TunnelConnected = source.TunnelConnected,
+                AggregateCongested = source.AggregateCongested,
+                ActiveConnectionCount = source.ActiveConnectionCount,
+                BackupConnectionCount = source.BackupConnectionCount,
+                SpeedifyUsableLinkCount = source.SpeedifyUsableLinkCount,
+                SpeedifyAvailableConnectionCount = source.SpeedifyAvailableConnectionCount,
+                SpeedifyAggregateLatencyMs = source.SpeedifyAggregateLatencyMs,
+                SpeedifyAggregateJitterMs = source.SpeedifyAggregateJitterMs,
+                SpeedifyReportedLatencyMs = source.SpeedifyReportedLatencyMs,
+                SpeedifyFreshSampleCount = source.SpeedifyFreshSampleCount,
+                SpeedifyExpectedSampleCount = source.SpeedifyExpectedSampleCount,
+                SpeedifyAggregateLatencyStdDevMs = source.SpeedifyAggregateLatencyStdDevMs,
+                FirstFreshPostSwitchStatsUtc = source.FirstFreshPostSwitchStatsUtc,
+                FirstFreshPostSwitchAggLatencyMs = source.FirstFreshPostSwitchAggLatencyMs,
+                FirstFreshPostSwitchAggJitterMs = source.FirstFreshPostSwitchAggJitterMs,
+                FirstFreshPostSwitchReportedLatencyMs = source.FirstFreshPostSwitchReportedLatencyMs,
+                FirstFreshPostSwitchActiveConnectionCount = source.FirstFreshPostSwitchActiveConnectionCount,
+                FirstFreshPostSwitchAggregateCongested = source.FirstFreshPostSwitchAggregateCongested,
                 IsValid = source.IsValid,
                 Notes = source.Notes,
                 StabilizationReached = source.StabilizationReached,
