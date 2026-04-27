@@ -63,6 +63,7 @@ namespace WTFnetApp
                 (first, second, firstDuration, secondDuration) =>
                     StartupProbeRuntimeMerge.MergeMeasuredRuntime(first, second, firstDuration, secondDuration, AppendNote),
                 AppendNote,
+                startupLogger,
                 Log);
 
             routedProbe = new StartupSpeedifyTunnelProbe(
@@ -179,8 +180,27 @@ namespace WTFnetApp
             output.Shortlist.Add(rawScore);
 
             ProbeScoreResult leader = rawScore;
+            HashSet<string> loggedRoutedStatus = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Log("startup-probe | leader initialized -> " + StartupProbeResultBuilder.FormatLeaderLabel(leader) +
                 " | " + ProbeScoring.BuildScoreBreakdown(rawScore));
+
+            void LogRoutedStatusOnce(
+                ProbeCandidateDefinition candidate,
+                ProbeCandidateRuntimeData runtime,
+                string outcome)
+            {
+                if (candidate == null || candidate.Kind != ProbeCandidateKind.Speedify)
+                    return;
+
+                string routeKey = string.IsNullOrWhiteSpace(candidate.RouteKey)
+                    ? (candidate.DisplayName ?? "unknown")
+                    : candidate.RouteKey;
+
+                if (!loggedRoutedStatus.Add(routeKey))
+                    return;
+
+                startupLogger.LogSpeedifyProbeStatus(candidate, runtime, outcome);
+            }
 
             foreach (ProbeCandidateDefinition candidate in ordered)
             {
@@ -202,6 +222,7 @@ namespace WTFnetApp
                 {
                     startupLogger.LogEvent(candidate, "DISCARDED (activation failed)");
                     startupLogger.LogStartupProbeSummary(candidate, -1, "no", "activation-failed", 0, false, null, null, "activation-failed");
+                    LogRoutedStatusOnce(candidate, null, "activation-failed");
                     continue;
                 }
 
@@ -218,10 +239,11 @@ namespace WTFnetApp
                         " | discardReason=unusable-before-measurement | reason=" + lifecycle.Reason);
                     startupLogger.LogEvent(candidate, "DISCARDED (unusable-before-measurement: " + lifecycle.Reason + ")");
                     startupLogger.LogStartupProbeSummary(candidate, lifecycle.WaitedMs, "no", lifecycle.Reason, 0, false, null, null, "unusable-before-measurement");
+                    LogRoutedStatusOnce(candidate, null, "unusable-before-measurement");
                     continue;
                 }
 
-                Log("startup-probe | candidate usable -> measurement start | " + candidate +
+                Log("startup-probe | candidate measured | " + candidate +
                     " | warmupElapsedMs=" + lifecycle.WaitedMs.ToString("0"));
 
                 ProbeReadinessResult candidateReadiness = new ProbeReadinessResult
@@ -246,6 +268,7 @@ namespace WTFnetApp
                     Log("startup-probe | discard | " + candidate + " | discardReason=measurement-capture-failed");
                     startupLogger.LogEvent(candidate, "DISCARDED (measurement-capture-failed)");
                     startupLogger.LogStartupProbeSummary(candidate, lifecycle.WaitedMs, "no", "measurement-capture-failed", 0, false, null, null, "discarded-early");
+                    LogRoutedStatusOnce(candidate, null, "measurement-capture-failed");
                     continue;
                 }
 
@@ -278,6 +301,7 @@ namespace WTFnetApp
                     runtime.Notes != null && runtime.Notes.IndexOf("startup-confidence-extension", StringComparison.OrdinalIgnoreCase) >= 0,
                     runtime,
                     score);
+                LogRoutedStatusOnce(candidate, runtime, "measured");
 
                 leader = finalization.HandleScoredCandidate(
                     candidate,
