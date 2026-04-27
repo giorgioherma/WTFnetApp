@@ -30,7 +30,7 @@ namespace WTFnetApp
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<string, DateTime> lastSpeedifyCategoryLogUtc =
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
-        private static readonly AsyncLocal<int> startupProbeLogScopeDepth = new AsyncLocal<int>();
+        private static int startupProbeLogScopeDepth;
         private const int SpeedifyLinkDowngradeConsecutiveThreshold = 2;
         private const int SpeedifyLinkRecoveryConsecutiveThreshold = 2;
         private static readonly TimeSpan SpeedifyLinkTransitionCooldown = TimeSpan.FromMilliseconds(1500);
@@ -249,13 +249,13 @@ namespace WTFnetApp
 
         public static IDisposable BeginStartupProbeLogScope()
         {
-            startupProbeLogScopeDepth.Value = startupProbeLogScopeDepth.Value + 1;
+            Interlocked.Increment(ref startupProbeLogScopeDepth);
             return new StartupProbeLogScope();
         }
 
         public static bool IsStartupProbeLogScopeActive
         {
-            get { return startupProbeLogScopeDepth.Value > 0; }
+            get { return Volatile.Read(ref startupProbeLogScopeDepth) > 0; }
         }
 
         // =========================================================
@@ -887,7 +887,10 @@ namespace WTFnetApp
             string normalized = category.Trim().ToLowerInvariant();
             return normalized == "speedify-snapshot" ||
                    normalized == "speedify-check" ||
-                   normalized == "speedify-link";
+                   normalized == "speedify-link" ||
+                   normalized == "speedify-parsed" ||
+                   normalized == "speedify-conn-row" ||
+                   normalized == "speedify-net-row";
         }
 
         private sealed class StartupProbeLogScope : IDisposable
@@ -900,8 +903,10 @@ namespace WTFnetApp
                     return;
 
                 disposed = true;
-                int depth = startupProbeLogScopeDepth.Value;
-                startupProbeLogScopeDepth.Value = depth > 0 ? depth - 1 : 0;
+
+                int depth = Interlocked.Decrement(ref startupProbeLogScopeDepth);
+                if (depth < 0)
+                    Interlocked.Exchange(ref startupProbeLogScopeDepth, 0);
             }
         }
 
