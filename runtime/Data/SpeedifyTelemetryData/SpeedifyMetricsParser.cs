@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 
 namespace WTFnetApp
@@ -318,6 +319,13 @@ namespace WTFnetApp
                 dynamicBase = reportedLatency;
 
             double baseLatency = dynamicBase > 0 ? dynamicBase : -1;
+            int activeConnections = Math.Max(0, structuredState.Tunnel.ActiveConnectionCount);
+            int backupConnections = Math.Max(0, structuredState.Tunnel.BackupConnectionCount);
+            List<SpeedifyLinkState> usableLinks = GetUsableLinks();
+            int independentPathCount = ComputeIndependentPathCount(usableLinks);
+            int availableConnections = usableLinks.Count > 0
+                ? independentPathCount
+                : Math.Min(activeConnections, 1);
 
             return new MiniSpeedifyMiniSnap
             {
@@ -325,18 +333,123 @@ namespace WTFnetApp
                 HasConnectionStats = structuredState.HasConnectionStats,
                 TunnelAggregatePresent = lastConnectionStatsHadAggregate,
 
-                AggregateLatencyMs = reportedLatency,
+                AggregateLatencyMs = aggregateLatency,
                 AggregateJitterMs = aggregateJitter,
                 ReportedLatencyMs = reportedLatency,
 
                 BaseLatencyMs = baseLatency,
                 DynamicBaseMs = baseLatency,
                 AggregateCongested = structuredState.Tunnel.Congested,
-                ActiveConnectionCount = structuredState.Tunnel.ActiveConnectionCount,
-                BackupConnectionCount = structuredState.Tunnel.BackupConnectionCount,
+                ActiveConnectionCount = activeConnections,
+                BackupConnectionCount = backupConnections,
+                UsableLinkCount = usableLinks.Count,
+                AvailableConnectionCount = availableConnections,
                 IsFresh = true,
                 ParseWarningCount = structuredState.ParseWarnings != null ? structuredState.ParseWarnings.Count : 0
             };
+        }
+
+
+        private List<SpeedifyLinkState> GetUsableLinks()
+        {
+            List<SpeedifyLinkState> usable = new List<SpeedifyLinkState>();
+
+            foreach (SpeedifyLinkState link in structuredState.Links)
+            {
+                if (link == null)
+                    continue;
+
+                if (link.IsAggregate || link.IsProxy || link.Offline || link.Sleeping)
+                    continue;
+
+                bool hasParticipation =
+                    link.Connected ||
+                    link.NumConns > 0 ||
+                    link.ConnectionState > 0;
+
+                bool hasLiveSignal =
+                    link.LatencyMs > 0 ||
+                    link.JitterMs > 0 ||
+                    link.RxBps > 0 ||
+                    link.TxBps > 0 ||
+                    link.TotalBps > 0;
+
+                if (!hasParticipation || !hasLiveSignal)
+                    continue;
+
+                usable.Add(link);
+            }
+
+            return usable;
+        }
+
+        private int ComputeIndependentPathCount(List<SpeedifyLinkState> usableLinks)
+        {
+            if (usableLinks == null || usableLinks.Count == 0)
+                return 0;
+
+            HashSet<string> paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (SpeedifyLinkState link in usableLinks)
+            {
+                string key = BuildUpstreamIdentity(link);
+                if (!string.IsNullOrWhiteSpace(key))
+                    paths.Add(key);
+            }
+
+            return paths.Count;
+        }
+
+        private static string BuildUpstreamIdentity(SpeedifyLinkState link)
+        {
+            if (link == null)
+                return null;
+
+            string isp = (link.Isp ?? string.Empty).Trim().ToLowerInvariant();
+            string ispType = (link.IspType ?? link.Type ?? string.Empty).Trim().ToLowerInvariant();
+            string gateway = FirstNonEmpty(link.Ip, link.PrivateIp, link.LocalIp);
+            string subnet = NormalizeSubnet(FirstNonEmpty(link.LocalIp, link.PrivateIp));
+
+            bool lanLike = IsLanLike(link);
+            if (lanLike && !string.IsNullOrWhiteSpace(subnet))
+                return "lan:" + subnet;
+
+            if (!string.IsNullOrWhiteSpace(link.RemoteIp))
+                return "rip:" + link.RemoteIp.Trim();
+
+            if (!string.IsNullOrWhiteSpace(ispType) && !string.IsNullOrWhiteSpace(isp) && !string.IsNullOrWhiteSpace(gateway))
+                return "isp:" + ispType + "|" + isp + "|gw:" + gateway.Trim().ToLowerInvariant();
+
+            if (!string.IsNullOrWhiteSpace(ispType) && !string.IsNullOrWhiteSpace(isp))
+                return "isp:" + ispType + "|" + isp;
+
+            return "link:" + FirstNonEmpty(link.Guid, link.Key, link.Name);
+        }
+
+        private static bool IsLanLike(SpeedifyLinkState link)
+        {
+            string type = (link?.Type ?? string.Empty).ToLowerInvariant();
+            string protocol = (link?.Protocol ?? string.Empty).ToLowerInvariant();
+            return type.Contains("wifi") ||
+                   type.Contains("wlan") ||
+                   type.Contains("ethernet") ||
+                   type.Contains("lan") ||
+                   protocol.Contains("wifi") ||
+                   protocol.Contains("ethernet");
+        }
+
+        private static string NormalizeSubnet(string ip)
+        {
+            if (string.IsNullOrWhiteSpace(ip))
+                return null;
+
+            string[] parts = ip.Trim().Split('.');
+            if (parts.Length != 4)
+                return null;
+
+            if (parts.Any(p => !int.TryParse(p, out _)))
+                return null;
+
+            return parts[0] + "." + parts[1] + "." + parts[2];
         }
 
         private void ParseAggregateTunnelRow(JsonElement row)
