@@ -554,7 +554,10 @@ namespace WTFnetApp
                 return;
             }
 
-            lastStartupProbeResult = await startupProbeCoordinator.RunAsync(candidates, CancellationToken.None);
+            using (Logger.BeginStartupProbeLogScope())
+            {
+                lastStartupProbeResult = await startupProbeCoordinator.RunAsync(candidates, CancellationToken.None);
+            }
 
             if (lastStartupProbeResult == null)
             {
@@ -1545,7 +1548,8 @@ namespace WTFnetApp
                     activationIdentity.RequestedTarget;
                 runtime.HasAuthoritativeIdentity = true;
 
-                if (ShouldLogMeasuredIdentityApplied(candidate, activationIdentity))
+                if (StartupLogger.EnableIdentityDiagnostics &&
+                    ShouldLogMeasuredIdentityApplied(candidate, activationIdentity))
                 {
                     Logger.Log("startup",
                         "startup-probe | measured identity applied | candidate=" + candidate +
