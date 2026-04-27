@@ -16,6 +16,13 @@ namespace WTFnetApp
                 double waitedMs,
                 bool warmupMiniTrusted,
                 string warmupTag,
+                string measurementStartReason,
+                double startLossRate,
+                double lossSlopePerSec,
+                ProbeCandidateRuntimeData.LossRecoveryState recoveryState,
+                int flatLossConfirmCount,
+                int flatLossConfirmRequired,
+                double expectedLossDeltaAtStart,
                 ProbeCandidateRuntimeData runtime)
             {
                 IsUsable = isUsable;
@@ -23,6 +30,13 @@ namespace WTFnetApp
                 WaitedMs = waitedMs;
                 WarmupMiniTrusted = warmupMiniTrusted;
                 WarmupTag = warmupTag;
+                MeasurementStartReason = measurementStartReason;
+                StartLossRate = startLossRate;
+                LossSlopePerSec = lossSlopePerSec;
+                RecoveryState = recoveryState;
+                FlatLossConfirmCount = flatLossConfirmCount;
+                FlatLossConfirmRequired = flatLossConfirmRequired;
+                ExpectedLossDeltaAtStart = expectedLossDeltaAtStart;
                 Runtime = runtime;
             }
 
@@ -31,6 +45,13 @@ namespace WTFnetApp
             public double WaitedMs { get; }
             public bool WarmupMiniTrusted { get; }
             public string WarmupTag { get; }
+            public string MeasurementStartReason { get; }
+            public double StartLossRate { get; }
+            public double LossSlopePerSec { get; }
+            public ProbeCandidateRuntimeData.LossRecoveryState RecoveryState { get; }
+            public int FlatLossConfirmCount { get; }
+            public int FlatLossConfirmRequired { get; }
+            public double ExpectedLossDeltaAtStart { get; }
             public ProbeCandidateRuntimeData Runtime { get; }
         }
 
@@ -70,12 +91,14 @@ namespace WTFnetApp
         public async Task<SpeedifyProbeLifecycleResult> RunLifecycleAsync(
             ProbeCandidateDefinition candidate,
             DateTime activationRequestedUtc,
+            double learnedExpectedLossRate,
             string timeBucketKey,
             CancellationToken cancellationToken)
         {
             StartupSpeedifyWarmupResult warmupResult = await warmup.RunAsync(
                 candidate,
                 activationRequestedUtc,
+                learnedExpectedLossRate,
                 cancellationToken);
 
             if (!warmupResult.IsUsable)
@@ -86,12 +109,21 @@ namespace WTFnetApp
                     warmupResult.WaitedMs,
                     warmupResult.WarmupMiniTrusted,
                     warmupResult.WarmupTag,
+                    warmupResult.MeasurementStartReason,
+                    warmupResult.StartLossRate,
+                    warmupResult.LossSlopePerSec,
+                    warmupResult.RecoveryState,
+                    warmupResult.FlatLossConfirmCount,
+                    warmupResult.FlatLossConfirmRequired,
+                    warmupResult.ExpectedLossDeltaAtStart,
                     null);
             }
 
             ProbeCandidateRuntimeData runtime = await measurement.RunAsync(
                 candidate,
                 activationRequestedUtc,
+                learnedExpectedLossRate,
+                warmupResult,
                 timeBucketKey,
                 cancellationToken);
 
@@ -101,6 +133,13 @@ namespace WTFnetApp
                 warmupResult.WaitedMs,
                 warmupResult.WarmupMiniTrusted,
                 warmupResult.WarmupTag,
+                warmupResult.MeasurementStartReason,
+                warmupResult.StartLossRate,
+                warmupResult.LossSlopePerSec,
+                warmupResult.RecoveryState,
+                warmupResult.FlatLossConfirmCount,
+                warmupResult.FlatLossConfirmRequired,
+                warmupResult.ExpectedLossDeltaAtStart,
                 runtime);
         }
     }
@@ -112,13 +151,27 @@ namespace WTFnetApp
             string reason,
             double waitedMs,
             bool warmupMiniTrusted,
-            string warmupTag)
+            string warmupTag,
+            string measurementStartReason,
+            double startLossRate,
+            double lossSlopePerSec,
+            ProbeCandidateRuntimeData.LossRecoveryState recoveryState,
+            int flatLossConfirmCount,
+            int flatLossConfirmRequired,
+            double expectedLossDeltaAtStart)
         {
             IsUsable = isUsable;
             Reason = reason;
             WaitedMs = waitedMs;
             WarmupMiniTrusted = warmupMiniTrusted;
             WarmupTag = warmupTag;
+            MeasurementStartReason = measurementStartReason;
+            StartLossRate = startLossRate;
+            LossSlopePerSec = lossSlopePerSec;
+            RecoveryState = recoveryState;
+            FlatLossConfirmCount = flatLossConfirmCount;
+            FlatLossConfirmRequired = flatLossConfirmRequired;
+            ExpectedLossDeltaAtStart = expectedLossDeltaAtStart;
         }
 
         public bool IsUsable { get; }
@@ -126,6 +179,13 @@ namespace WTFnetApp
         public double WaitedMs { get; }
         public bool WarmupMiniTrusted { get; }
         public string WarmupTag { get; }
+        public string MeasurementStartReason { get; }
+        public double StartLossRate { get; }
+        public double LossSlopePerSec { get; }
+        public ProbeCandidateRuntimeData.LossRecoveryState RecoveryState { get; }
+        public int FlatLossConfirmCount { get; }
+        public int FlatLossConfirmRequired { get; }
+        public double ExpectedLossDeltaAtStart { get; }
     }
 
     internal sealed class StartupMiniSnapBuffer
@@ -262,7 +322,17 @@ namespace WTFnetApp
         private static readonly TimeSpan StartupTunnelHardBuffer = TimeSpan.FromSeconds(4);
         private const int WarmupMiniMinimumFreshSamples = 3;
         private const double WarmupMiniMinimumSpreadMs = 1200.0;
-        private const int WarmupFlattenedStreakRequired = 3;
+        private const int FlatLossConfirmationsRequired = 3;
+        private const double FallingFastSlopePerSec = -0.006;
+        private const double FallingSlopePerSec = -0.002;
+        private const double FlatSlopeAbsPerSec = 0.0015;
+        private const double WorseningSlopePerSec = 0.003;
+        private const double LowLossRateThreshold = 0.025;
+        private const double HighLossRateThreshold = 0.05;
+        private const double AboveExpectedMeaningfulDelta = 0.02;
+        private const double LossTrendWindowSeconds = 4.0;
+        private const double ProjectionLookaheadSeconds = 2.0;
+        private const double ProjectedRecoveryMaxStartLossRate = 0.07;
 
         public StartupSpeedifyWarmup(
             StartupProbeTimingConfig timing,
@@ -283,6 +353,7 @@ namespace WTFnetApp
         public async Task<StartupSpeedifyWarmupResult> RunAsync(
             ProbeCandidateDefinition candidate,
             DateTime activationRequestedUtc,
+            double learnedExpectedLossRate,
             CancellationToken cancellationToken)
         {
             bool isSpeedifyCandidate =
@@ -292,7 +363,19 @@ namespace WTFnetApp
             if (!isSpeedifyCandidate)
             {
                 bool immediateUsable = isCandidateUsableForMeasurement(candidate, out string immediateReason);
-                return new StartupSpeedifyWarmupResult(immediateUsable, immediateReason, 0.0, false, "warmup-skipped");
+                return new StartupSpeedifyWarmupResult(
+                    immediateUsable,
+                    immediateReason,
+                    0.0,
+                    false,
+                    "warmup-skipped",
+                    "raw-immediate",
+                    -1,
+                    double.NaN,
+                    ProbeCandidateRuntimeData.LossRecoveryState.Unknown,
+                    0,
+                    FlatLossConfirmationsRequired,
+                    double.NaN);
             }
 
             TimeSpan fixedSettle = TimeSpan.FromSeconds(10);
@@ -307,7 +390,7 @@ namespace WTFnetApp
             DateTime gateCheck2Utc = gateStartUtc + check2;
             DateTime gateForceUtc = gateStartUtc + forceStart;
             DateTime nextWarmupLogUtc = warmupStartUtc;
-            WarmupQualityTracker qualityTracker = new WarmupQualityTracker();
+            LossTrendTracker lossTrendTracker = new LossTrendTracker();
 
             TimeSpan pollInterval = timing.SpeedifyTelemetryCheckInterval > TimeSpan.Zero
                 ? timing.SpeedifyTelemetryCheckInterval
@@ -322,7 +405,7 @@ namespace WTFnetApp
                 cancellationToken.ThrowIfCancellationRequested();
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
                 FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindowSnapshot = getShortWindowSnapshot?.Invoke();
-                qualityTracker.Observe(shortWindowSnapshot);
+                lossTrendTracker.Observe(shortWindowSnapshot);
                 MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap?.Invoke();
                 bool acceptedMini = miniBuffer.TryAdd(miniSnap);
                 if (!acceptedMini)
@@ -332,7 +415,7 @@ namespace WTFnetApp
                 {
                     ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot(shortWindowSnapshot);
                     string warmupReason = reasonNow == "usable" ? "-" : reasonNow;
-                    warmupReason = AppendTag(warmupReason, qualityTracker.BuildLogNote());
+                    warmupReason = AppendTag(warmupReason, lossTrendTracker.BuildLogNote(learnedExpectedLossRate));
                     startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, warmupReason, miniSnap, logMini: true);
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
@@ -350,7 +433,7 @@ namespace WTFnetApp
 
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
                 FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindowSnapshot = getShortWindowSnapshot?.Invoke();
-                qualityTracker.Observe(shortWindowSnapshot);
+                lossTrendTracker.Observe(shortWindowSnapshot);
                 MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap?.Invoke();
                 bool acceptedMini = miniBuffer.TryAdd(miniSnap);
                 if (!acceptedMini)
@@ -359,14 +442,16 @@ namespace WTFnetApp
                 DateTime nowUtc = DateTime.UtcNow;
                 bool hardBufferComplete = (nowUtc - warmupStartUtc) >= StartupTunnelHardBuffer;
                 bool hasFastPingSignal = HasFastPingSignal(shortWindowSnapshot);
+                LossReadinessDecision decision = EvaluateLossReadiness(shortWindowSnapshot, lossTrendTracker, learnedExpectedLossRate, gateForceUtc, nowUtc);
                 bool readinessGateSatisfied =
                     hardBufferComplete &&
                     shortWindowSnapshot != null &&
                     (usableNow || hasFastPingSignal) &&
-                    qualityTracker.FlattenedStreak >= WarmupFlattenedStreakRequired;
+                    decision.AllowStart;
                 bool stableNow = readinessGateSatisfied;
                 string stableReason = BuildStableReason(shortWindowSnapshot);
-                string stableTags = BuildStableTags(qualityTracker);
+                string stableTags = BuildStableTags(lossTrendTracker);
+                string decisionTag = decision.DecisionTag;
 
                 if (!check1Done && nowUtc >= gateCheck1Utc)
                 {
@@ -377,13 +462,21 @@ namespace WTFnetApp
                         string warmupTag =
                             "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-" +
                             Math.Max(StartupTunnelHardBuffer.TotalSeconds, check1.TotalSeconds).ToString("0.#") + "s";
+                        warmupTag = AppendTag(warmupTag, decisionTag);
 
                         return new StartupSpeedifyWarmupResult(
                             true,
                             stableReason,
                             Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                             miniBuffer.IsSufficientForStartupTrust,
-                            AppendTag(warmupTag, stableTags));
+                            AppendTag(warmupTag, stableTags),
+                            decision.StartReason,
+                            shortWindowSnapshot?.AvgLossRate ?? -1,
+                            decision.LossSlopePerSec,
+                            decision.RecoveryState,
+                            lossTrendTracker.FlatConfirmCount,
+                            FlatLossConfirmationsRequired,
+                            decision.ExpectedDelta);
                     }
                 }
 
@@ -396,13 +489,21 @@ namespace WTFnetApp
                         string warmupTag =
                             "fixed-settle-" + fixedSettle.TotalSeconds.ToString("0.#") + "s | stable-start-" +
                             Math.Max(StartupTunnelHardBuffer.TotalSeconds, check2.TotalSeconds).ToString("0.#") + "s";
+                        warmupTag = AppendTag(warmupTag, decisionTag);
 
                         return new StartupSpeedifyWarmupResult(
                             true,
                             stableReason,
                             Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                             miniBuffer.IsSufficientForStartupTrust,
-                            AppendTag(warmupTag, stableTags));
+                            AppendTag(warmupTag, stableTags),
+                            decision.StartReason,
+                            shortWindowSnapshot?.AvgLossRate ?? -1,
+                            decision.LossSlopePerSec,
+                            decision.RecoveryState,
+                            lossTrendTracker.FlatConfirmCount,
+                            FlatLossConfirmationsRequired,
+                            decision.ExpectedDelta);
                     }
                 }
 
@@ -410,11 +511,12 @@ namespace WTFnetApp
                 {
                     ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot(shortWindowSnapshot);
                     string warmupReason = reasonNow == "usable"
-                        ? (qualityTracker.FlattenedStreak >= WarmupFlattenedStreakRequired
+                        ? (decision.AllowStart
                             ? (BuildStableReason(shortWindowSnapshot) + " | ready")
-                            : "waiting-quality-flat-" + qualityTracker.FlattenedStreak + "/" + WarmupFlattenedStreakRequired)
+                            : "hold-loss-trend")
                         : reasonNow;
-                    warmupReason = AppendTag(warmupReason, qualityTracker.BuildLogNote());
+                    warmupReason = AppendTag(warmupReason, decisionTag);
+                    warmupReason = AppendTag(warmupReason, lossTrendTracker.BuildLogNote(learnedExpectedLossRate));
 
                     startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, warmupReason, miniSnap, logMini: true);
 
@@ -428,13 +530,10 @@ namespace WTFnetApp
             bool finalUsable = isCandidateUsableForMeasurement(candidate, out string finalReason);
             bool hasFinalFastPingSignal = HasFastPingSignal(finalSnapshot);
             bool forceUsable = finalUsable || hasFinalFastPingSignal;
+            LossReadinessDecision forceDecision = EvaluateLossReadiness(finalSnapshot, lossTrendTracker, learnedExpectedLossRate, gateForceUtc, DateTime.UtcNow);
             if (forceUsable)
             {
-                finalReason = qualityTracker.WildStreak > 0
-                    ? "force-start-wild-quality"
-                    : qualityTracker.ImprovingStreak > 0
-                        ? "force-start-unsettled-quality"
-                        : "force-start-poor-quality";
+                finalReason = "force-start-timeout";
             }
 
             string finalTag =
@@ -452,14 +551,21 @@ namespace WTFnetApp
                 finalTag = AppendTag(finalTag, "mini-congestion-observed");
             if (forceUsable)
                 finalTag = AppendTag(finalTag, finalReason);
-            finalTag = AppendTag(finalTag, qualityTracker.BuildForceStartTag());
+            finalTag = AppendTag(finalTag, forceDecision.DecisionTag);
 
             return new StartupSpeedifyWarmupResult(
                 forceUsable,
                 finalReason,
                 Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                 warmupMiniTrusted,
-                finalTag);
+                finalTag,
+                forceDecision.StartReason,
+                finalSnapshot?.AvgLossRate ?? -1,
+                forceDecision.LossSlopePerSec,
+                forceDecision.RecoveryState,
+                lossTrendTracker.FlatConfirmCount,
+                FlatLossConfirmationsRequired,
+                forceDecision.ExpectedDelta);
         }
 
         private static bool HasFastPingSignal(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
@@ -486,14 +592,129 @@ namespace WTFnetApp
                 : "activated-stable-bad-quality";
         }
 
-        private static string BuildStableTags(WarmupQualityTracker tracker)
+        private static string BuildStableTags(LossTrendTracker tracker)
         {
             string tags = string.Empty;
-            if (tracker.LossFlattened)
-                tags = AppendTag(tags, "loss-flattened");
-            if (tracker.JitterFlattened)
-                tags = AppendTag(tags, "jitter-flattened");
+            if (tracker.RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Flat)
+                tags = AppendTag(tags, "loss-flat");
+            if (tracker.RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.FallingFast)
+                tags = AppendTag(tags, "loss-falling-fast");
             return tags;
+        }
+
+        private LossReadinessDecision EvaluateLossReadiness(
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot,
+            LossTrendTracker tracker,
+            double learnedExpectedLossRate,
+            DateTime gateForceUtc,
+            DateTime nowUtc)
+        {
+            double currentLoss = snapshot?.AvgLossRate ?? -1;
+            double slopeRaw = tracker.SlopePerSecond;
+            double slopeSmoothed = tracker.SmoothedSlopePerSecond;
+            ProbeCandidateRuntimeData.LossRecoveryState recoveryState = tracker.RecoveryState;
+            LossTier lossTier = ClassifyLossTier(currentLoss);
+            bool slopeRawFinite = IsFinite(slopeRaw);
+            bool slopeSmoothedFinite = IsFinite(slopeSmoothed);
+            double projectedLoss =
+                currentLoss >= 0 && slopeSmoothedFinite
+                    ? currentLoss + (slopeSmoothed * ProjectionLookaheadSeconds)
+                    : double.NaN;
+            LossTier? projectedLossTier = IsFinite(projectedLoss)
+                ? ClassifyLossTier(projectedLoss)
+                : (LossTier?)null;
+            double expectedDelta = learnedExpectedLossRate >= 0 && currentLoss >= 0
+                ? currentLoss - learnedExpectedLossRate
+                : double.NaN;
+            bool nearFlat =
+                slopeSmoothedFinite &&
+                Math.Abs(slopeSmoothed) < (FlatSlopeAbsPerSec * 1.5);
+            bool rawFallingFast =
+                slopeRawFinite &&
+                slopeRaw <= FallingFastSlopePerSec;
+            bool smoothFallingFast =
+                slopeSmoothedFinite &&
+                slopeSmoothed <= FallingFastSlopePerSec;
+            bool recoveryMomentum =
+                smoothFallingFast || (rawFallingFast && tracker.FlatConfirmCount >= 1);
+
+            string decisionTag =
+                "lossSlopeRaw=" + FormatSlope(slopeRaw) +
+                " | lossSlopeSmooth=" + FormatSlope(slopeSmoothed) +
+                " | recovery=" + recoveryState +
+                " | flatConfirm=" + tracker.FlatConfirmCount + "/" + FlatLossConfirmationsRequired +
+                " | nearFlat=" + (nearFlat ? "true" : "false") +
+                " | recoveryMomentum=" + (recoveryMomentum ? "true" : "false") +
+                " | lossTier=" + lossTier +
+                " | projectedLoss=" + (IsFinite(projectedLoss) ? projectedLoss.ToString("0.000") : "--") +
+                " | projectedLossTier=" + (projectedLossTier.HasValue ? projectedLossTier.Value.ToString() : "--");
+            if (learnedExpectedLossRate >= 0)
+            {
+                decisionTag = AppendTag(decisionTag, "expectedLoss=" + learnedExpectedLossRate.ToString("0.000"));
+                decisionTag = AppendTag(decisionTag, "expectedDelta=" + (double.IsNaN(expectedDelta) ? "--" : expectedDelta.ToString("0.000")));
+            }
+
+            bool timeoutReached = nowUtc >= gateForceUtc;
+            if (timeoutReached)
+            {
+                string timeoutReason = BuildTimeoutForcedReason(recoveryState);
+                return new LossReadinessDecision(true, timeoutReason, timeoutReason, decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+            }
+
+            if (recoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Worsening)
+                return new LossReadinessDecision(false, null, "hold-loss-worsening", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+
+            bool lowLoss = currentLoss >= 0 && currentLoss <= LowLossRateThreshold;
+            bool lowLossSlopeSafe =
+                slopeSmoothedFinite &&
+                slopeSmoothed < (WorseningSlopePerSec * 0.5);
+            if (lowLoss)
+            {
+                if (lowLossSlopeSafe)
+                    return new LossReadinessDecision(true, "low-loss", "allow-low-loss", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+
+                return new LossReadinessDecision(false, null, "hold-low-loss-slope-uncertain", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+            }
+
+            bool highLoss = currentLoss >= HighLossRateThreshold;
+            bool projectedLowLoss =
+                IsFinite(projectedLoss) &&
+                projectedLoss <= LowLossRateThreshold;
+            bool projectedRecoveryAllowed =
+                projectedLowLoss &&
+                (recoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Falling ||
+                 recoveryState == ProbeCandidateRuntimeData.LossRecoveryState.FallingFast) &&
+                currentLoss <= ProjectedRecoveryMaxStartLossRate &&
+                slopeSmoothedFinite &&
+                slopeSmoothed < FallingSlopePerSec &&
+                recoveryState != ProbeCandidateRuntimeData.LossRecoveryState.Worsening;
+            if (projectedRecoveryAllowed)
+            {
+                return new LossReadinessDecision(true, "projected-recovery", "allow-projected-recovery", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+            }
+
+            if (recoveryState == ProbeCandidateRuntimeData.LossRecoveryState.FallingFast && highLoss)
+                return new LossReadinessDecision(false, null, "hold-loss-falling-fast-high", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+
+            if (recoveryState == ProbeCandidateRuntimeData.LossRecoveryState.FallingFast)
+                return new LossReadinessDecision(false, null, "hold-loss-falling-fast", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+
+            if (recoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Falling)
+            {
+                string explainTag = !double.IsNaN(expectedDelta) && expectedDelta <= AboveExpectedMeaningfulDelta
+                    ? "near-expected-context"
+                    : "above-expected-context";
+                return new LossReadinessDecision(false, null, AppendTag("hold-loss-falling", explainTag), decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+            }
+
+            if (nearFlat &&
+                tracker.FlatConfirmCount >= FlatLossConfirmationsRequired &&
+                Math.Abs(slopeSmoothed) < (FlatSlopeAbsPerSec * 1.5))
+            {
+                return new LossReadinessDecision(true, "loss-flat-confirmed", "allow-flat-confirmed", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
+            }
+
+            return new LossReadinessDecision(false, null, "hold-await-flat-confirm", decisionTag, slopeSmoothed, recoveryState, expectedDelta);
         }
 
         private static string AppendTag(string existing, string tag)
@@ -534,95 +755,188 @@ namespace WTFnetApp
             return runtime;
         }
 
-        private sealed class WarmupQualityTracker
+        private sealed class LossTrendTracker
         {
-            private const double FlattenLossDeltaThreshold = 0.03;
-            private const double FlattenJitterDeltaThresholdMs = 5.0;
-            private const double ImprovingLossDeltaThreshold = 0.04;
-            private const double WildLossDeltaThreshold = 0.12;
-            private const double WildJitterDeltaThresholdMs = 20.0;
-
-            private double previousLoss = -1;
-            private double previousJitter = -1;
-
-            public int FlattenedStreak { get; private set; }
-            public int ImprovingStreak { get; private set; }
-            public int WildStreak { get; private set; }
-            public bool LossFlattened { get; private set; }
-            public bool JitterFlattened { get; private set; }
-            public double LossDelta { get; private set; } = double.NaN;
-            public double JitterDelta { get; private set; } = double.NaN;
+            private readonly Queue<(DateTime Utc, double Loss)> lossSamples = new Queue<(DateTime Utc, double Loss)>();
+            private int noSignalSampleStreak;
+            public int FlatConfirmCount { get; private set; }
+            public double SlopePerSecond { get; private set; } = double.NaN;
+            public double SmoothedSlopePerSecond { get; private set; } = double.NaN;
+            public ProbeCandidateRuntimeData.LossRecoveryState RecoveryState { get; private set; } = ProbeCandidateRuntimeData.LossRecoveryState.Unknown;
 
             public void Observe(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
             {
                 double currentLoss = snapshot?.AvgLossRate ?? -1;
-                double currentJitter = snapshot?.AvgJitterMs ?? -1;
+                if (currentLoss < 0)
+                {
+                    noSignalSampleStreak++;
+                    if (noSignalSampleStreak >= 4 && FlatConfirmCount > 0)
+                        FlatConfirmCount = Math.Max(0, FlatConfirmCount - 1);
+                    return;
+                }
+                noSignalSampleStreak = 0;
 
-                bool hasPreviousLoss = previousLoss >= 0;
-                bool hasCurrentLoss = currentLoss >= 0;
-                bool hasPreviousJitter = previousJitter >= 0;
-                bool hasCurrentJitter = currentJitter >= 0;
+                DateTime sampleUtc = snapshot?.WindowEndUtc ?? DateTime.UtcNow;
+                if (sampleUtc == DateTime.MinValue)
+                    sampleUtc = DateTime.UtcNow;
 
-                LossDelta = hasPreviousLoss && hasCurrentLoss
-                    ? Math.Abs(currentLoss - previousLoss)
-                    : double.NaN;
-                JitterDelta = hasPreviousJitter && hasCurrentJitter
-                    ? Math.Abs(currentJitter - previousJitter)
-                    : double.NaN;
+                if (lossSamples.Count > 0 && sampleUtc <= lossSamples.Last().Utc)
+                    sampleUtc = lossSamples.Last().Utc.AddMilliseconds(1);
 
-                bool lossStronglyImproving =
-                    hasPreviousLoss &&
-                    hasCurrentLoss &&
-                    (previousLoss - currentLoss) >= ImprovingLossDeltaThreshold;
+                lossSamples.Enqueue((sampleUtc, currentLoss));
+                DateTime minimumUtc = sampleUtc.AddSeconds(-LossTrendWindowSeconds);
+                while (lossSamples.Count > 2 && lossSamples.Peek().Utc < minimumUtc)
+                    lossSamples.Dequeue();
 
-                LossFlattened =
-                    hasPreviousLoss &&
-                    hasCurrentLoss &&
-                    Math.Abs(currentLoss - previousLoss) <= FlattenLossDeltaThreshold;
+                SlopePerSecond = ComputeSlopePerSecond();
+                if (double.IsNaN(SmoothedSlopePerSecond) || double.IsInfinity(SmoothedSlopePerSecond))
+                    SmoothedSlopePerSecond = SlopePerSecond;
+                else if (!double.IsNaN(SlopePerSecond) && !double.IsInfinity(SlopePerSecond))
+                    SmoothedSlopePerSecond = (SmoothedSlopePerSecond * 0.65) + (SlopePerSecond * 0.35);
 
-                JitterFlattened =
-                    hasPreviousJitter &&
-                    hasCurrentJitter &&
-                    Math.Abs(currentJitter - previousJitter) <= FlattenJitterDeltaThresholdMs;
-
-                bool flattened = (LossFlattened || JitterFlattened) && !lossStronglyImproving;
-                bool wild =
-                    (hasPreviousLoss && hasCurrentLoss && Math.Abs(currentLoss - previousLoss) >= WildLossDeltaThreshold) ||
-                    (hasPreviousJitter && hasCurrentJitter && Math.Abs(currentJitter - previousJitter) >= WildJitterDeltaThresholdMs);
-
-                FlattenedStreak = flattened ? FlattenedStreak + 1 : 0;
-                ImprovingStreak = lossStronglyImproving ? ImprovingStreak + 1 : 0;
-                WildStreak = wild ? WildStreak + 1 : 0;
-
-                if (hasCurrentLoss)
-                    previousLoss = currentLoss;
-                if (hasCurrentJitter)
-                    previousJitter = currentJitter;
+                RecoveryState = ResolveRecoveryState(SmoothedSlopePerSecond);
+                if (RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Flat)
+                {
+                    FlatConfirmCount++;
+                }
+                else if (RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.FallingFast ||
+                         RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Worsening)
+                {
+                    FlatConfirmCount = 0;
+                }
+                else if (RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Falling)
+                {
+                    FlatConfirmCount = Math.Max(0, FlatConfirmCount - 1);
+                }
+                else if (RecoveryState == ProbeCandidateRuntimeData.LossRecoveryState.Unknown && FlatConfirmCount > 0)
+                {
+                    FlatConfirmCount = Math.Max(0, FlatConfirmCount - 1);
+                }
             }
 
-            public string BuildLogNote()
+            public string BuildLogNote(double learnedExpectedLossRate)
             {
-                return "quality-delta(loss=" + FormatDelta(LossDelta) +
-                       ",jitter=" + FormatDelta(JitterDelta) +
-                       ") | flat=" + FlattenedStreak +
-                       " | improving=" + ImprovingStreak +
-                       " | wild=" + WildStreak;
+                double currentLoss = lossSamples.Count > 0 ? lossSamples.Last().Loss : -1;
+                string note =
+                    "lossSlopeRaw=" + FormatSlope(SlopePerSecond) +
+                    " | lossSlopeSmoothed=" + FormatSlope(SmoothedSlopePerSecond) +
+                    " | lossRecoveryState=" + RecoveryState +
+                    " | flatLossConfirmCount=" + FlatConfirmCount + "/" + FlatLossConfirmationsRequired +
+                    " | lossTier=" + ClassifyLossTier(currentLoss);
+                if (learnedExpectedLossRate >= 0 && currentLoss >= 0)
+                {
+                    note = AppendTag(note, "expectedLoss=" + learnedExpectedLossRate.ToString("0.000"));
+                    note = AppendTag(note, "distanceToExpected=" + (currentLoss - learnedExpectedLossRate).ToString("0.000"));
+                }
+                return note;
             }
 
-            public string BuildForceStartTag()
+            private double ComputeSlopePerSecond()
             {
-                if (WildStreak > 0)
-                    return "wild-quality";
-                if (ImprovingStreak > 0)
-                    return "unsettled-quality";
-                return "poor-quality";
+                if (lossSamples.Count < 2)
+                    return double.NaN;
+
+                (DateTime Utc, double Loss) first = lossSamples.Peek();
+                (DateTime Utc, double Loss) last = lossSamples.Last();
+                double elapsedSec = (last.Utc - first.Utc).TotalSeconds;
+                if (elapsedSec <= 0.01)
+                    return double.NaN;
+                return (last.Loss - first.Loss) / elapsedSec;
             }
 
-            private static string FormatDelta(double value)
+            private static ProbeCandidateRuntimeData.LossRecoveryState ResolveRecoveryState(double slopePerSecond)
             {
-                if (double.IsNaN(value) || double.IsInfinity(value))
-                    return "--";
-                return value.ToString("0.###");
+                if (double.IsNaN(slopePerSecond) || double.IsInfinity(slopePerSecond))
+                    return ProbeCandidateRuntimeData.LossRecoveryState.Unknown;
+                if (slopePerSecond <= FallingFastSlopePerSec)
+                    return ProbeCandidateRuntimeData.LossRecoveryState.FallingFast;
+                if (slopePerSecond <= FallingSlopePerSec)
+                    return ProbeCandidateRuntimeData.LossRecoveryState.Falling;
+                if (Math.Abs(slopePerSecond) < FlatSlopeAbsPerSec)
+                    return ProbeCandidateRuntimeData.LossRecoveryState.Flat;
+                if (slopePerSecond >= WorseningSlopePerSec)
+                    return ProbeCandidateRuntimeData.LossRecoveryState.Worsening;
+                return ProbeCandidateRuntimeData.LossRecoveryState.Unknown;
+            }
+        }
+
+        private readonly struct LossReadinessDecision
+        {
+            public LossReadinessDecision(
+                bool allowStart,
+                string startReason,
+                string decisionReason,
+                string decisionTag,
+                double lossSlopePerSec,
+                ProbeCandidateRuntimeData.LossRecoveryState recoveryState,
+                double expectedDelta)
+            {
+                AllowStart = allowStart;
+                StartReason = startReason;
+                DecisionReason = decisionReason;
+                DecisionTag = AppendTag(decisionReason, decisionTag);
+                LossSlopePerSec = lossSlopePerSec;
+                RecoveryState = recoveryState;
+                ExpectedDelta = expectedDelta;
+            }
+
+            public bool AllowStart { get; }
+            public string StartReason { get; }
+            public string DecisionReason { get; }
+            public string DecisionTag { get; }
+            public double LossSlopePerSec { get; }
+            public ProbeCandidateRuntimeData.LossRecoveryState RecoveryState { get; }
+            public double ExpectedDelta { get; }
+        }
+
+        private static string FormatSlope(double slopePerSec)
+        {
+            if (double.IsNaN(slopePerSec) || double.IsInfinity(slopePerSec))
+                return "--";
+            return slopePerSec.ToString("0.000") + "/s";
+        }
+
+        private static bool IsFinite(double value)
+        {
+            return !double.IsNaN(value) && !double.IsInfinity(value);
+        }
+
+        private enum LossTier
+        {
+            Unknown = 0,
+            Good = 1,
+            Acceptable = 2,
+            Risky = 3,
+            Bad = 4
+        }
+
+        private static LossTier ClassifyLossTier(double currentLoss)
+        {
+            if (currentLoss < 0)
+                return LossTier.Unknown;
+            if (currentLoss < 0.025)
+                return LossTier.Good;
+            if (currentLoss < 0.06)
+                return LossTier.Acceptable;
+            if (currentLoss < 0.12)
+                return LossTier.Risky;
+            return LossTier.Bad;
+        }
+
+        private static string BuildTimeoutForcedReason(ProbeCandidateRuntimeData.LossRecoveryState recoveryState)
+        {
+            switch (recoveryState)
+            {
+                case ProbeCandidateRuntimeData.LossRecoveryState.Flat:
+                    return "timeout-forced-flat";
+                case ProbeCandidateRuntimeData.LossRecoveryState.Falling:
+                    return "timeout-forced-falling";
+                case ProbeCandidateRuntimeData.LossRecoveryState.FallingFast:
+                    return "timeout-forced-falling-fast";
+                case ProbeCandidateRuntimeData.LossRecoveryState.Worsening:
+                    return "timeout-forced-worsening";
+                default:
+                    return "timeout-forced-unknown";
             }
         }
     }
@@ -667,6 +981,8 @@ namespace WTFnetApp
         public async Task<ProbeCandidateRuntimeData> RunAsync(
                 ProbeCandidateDefinition candidate,
                 DateTime activationRequestedUtc,
+                double learnedExpectedLossRate,
+                StartupSpeedifyWarmupResult warmupResult,
                 string timeBucketKey,
                 CancellationToken cancellationToken)
         {
@@ -678,7 +994,10 @@ namespace WTFnetApp
                 PhaseMiniMinimumSpreadMs,
                 activationRequestedUtc);
 
-            startupLogger?.LogEvent(candidate, "MAIN_SCORING_WINDOW_STARTED");
+            string measurementStartReason = string.IsNullOrWhiteSpace(warmupResult.MeasurementStartReason)
+                ? "loss-flat-confirmed"
+                : warmupResult.MeasurementStartReason;
+            startupLogger?.LogEvent(candidate, "MAIN_SCORING_WINDOW_STARTED | reason=" + measurementStartReason);
             postStableMeasurementStartUtc = DateTime.UtcNow;
 
             List<TimeSpan> measuredSlices = BuildMainWindowSlices(postStableMeasuredDuration);
@@ -778,6 +1097,26 @@ namespace WTFnetApp
             aggregateRuntime.StabilizationReason = "measurement-window-authoritative";
             aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, "measurement-window-authoritative");
             ApplyStartupAdjustedLossRate(aggregateRuntime, adjustedLossWeightedSum, adjustedLossDurationSum);
+            aggregateRuntime.MeasurementStartReason = measurementStartReason;
+            aggregateRuntime.MeasurementStartLossRate = warmupResult.StartLossRate;
+            aggregateRuntime.MeasurementEndLossRate = aggregateRuntime.AvgLossRate;
+            aggregateRuntime.LossSlopePerSec = warmupResult.LossSlopePerSec;
+            aggregateRuntime.StartupLossRecoveryState = warmupResult.RecoveryState;
+            aggregateRuntime.FlatLossConfirmCount = warmupResult.FlatLossConfirmCount;
+            aggregateRuntime.FlatLossConfirmRequired = warmupResult.FlatLossConfirmRequired;
+            aggregateRuntime.LearnedExpectedLossRate = learnedExpectedLossRate;
+            aggregateRuntime.ExpectedLossDeltaAtStart = warmupResult.ExpectedLossDeltaAtStart;
+
+            if (aggregateRuntime.MeasurementStartLossRate >= 0 &&
+                aggregateRuntime.MeasurementEndLossRate >= 0)
+            {
+                double recoveredLoss = aggregateRuntime.MeasurementStartLossRate - aggregateRuntime.MeasurementEndLossRate;
+                if (recoveredLoss >= 0.04 && aggregateRuntime.LossSlopePerSec <= -0.002)
+                {
+                    aggregateRuntime.Notes = appendNote(aggregateRuntime.Notes, "settling-window-loss-recovered");
+                    startupLogger?.LogEvent(candidate, "SETTLING_WINDOW | lossRecovered=" + recoveredLoss.ToString("0.000"));
+                }
+            }
 
             startupLogger?.LogEvent(candidate, "MEASUREMENT_FINISHED");
 
@@ -1140,7 +1479,16 @@ namespace WTFnetApp
                 MeasuredServerPublicIp = source.MeasuredServerPublicIp,
                 MeasuredServerIdentifier = source.MeasuredServerIdentifier,
                 HasAuthoritativeIdentity = source.HasAuthoritativeIdentity,
-                RestoredServerTarget = source.RestoredServerTarget
+                RestoredServerTarget = source.RestoredServerTarget,
+                LossSlopePerSec = source.LossSlopePerSec,
+                StartupLossRecoveryState = source.StartupLossRecoveryState,
+                FlatLossConfirmCount = source.FlatLossConfirmCount,
+                FlatLossConfirmRequired = source.FlatLossConfirmRequired,
+                LearnedExpectedLossRate = source.LearnedExpectedLossRate,
+                ExpectedLossDeltaAtStart = source.ExpectedLossDeltaAtStart,
+                MeasurementStartLossRate = source.MeasurementStartLossRate,
+                MeasurementEndLossRate = source.MeasurementEndLossRate,
+                MeasurementStartReason = source.MeasurementStartReason
             };
         }
     }

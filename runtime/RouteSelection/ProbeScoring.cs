@@ -71,6 +71,15 @@ namespace WTFnetApp
 
     public sealed class ProbeCandidateRuntimeData
     {
+        public enum LossRecoveryState
+        {
+            Unknown = 0,
+            FallingFast = 1,
+            Falling = 2,
+            Flat = 3,
+            Worsening = 4
+        }
+
         public ProbeCandidateDefinition Candidate { get; set; }
 
         public string TimeBucketKey { get; set; }
@@ -149,6 +158,15 @@ namespace WTFnetApp
         public string MeasuredServerIdentifier { get; set; }
         public bool HasAuthoritativeIdentity { get; set; }
         public string RestoredServerTarget { get; set; }
+        public double LossSlopePerSec { get; set; } = double.NaN;
+        public LossRecoveryState StartupLossRecoveryState { get; set; } = LossRecoveryState.Unknown;
+        public int FlatLossConfirmCount { get; set; }
+        public int FlatLossConfirmRequired { get; set; }
+        public double LearnedExpectedLossRate { get; set; } = -1;
+        public double ExpectedLossDeltaAtStart { get; set; } = double.NaN;
+        public double MeasurementStartLossRate { get; set; } = -1;
+        public double MeasurementEndLossRate { get; set; } = -1;
+        public string MeasurementStartReason { get; set; }
     }
 
     public sealed class ProbeScoreResult
@@ -1784,6 +1802,19 @@ namespace WTFnetApp
                 noteConfidence *= 0.90;
             if (notes.IndexOf("unstable", StringComparison.OrdinalIgnoreCase) >= 0)
                 noteConfidence *= 0.88;
+            if (notes.IndexOf("settling-window-loss-recovered", StringComparison.OrdinalIgnoreCase) >= 0)
+                noteConfidence *= 0.93;
+
+            string measurementStartReason = runtime.MeasurementStartReason ?? string.Empty;
+            if (measurementStartReason.StartsWith("timeout-forced", StringComparison.OrdinalIgnoreCase))
+                noteConfidence *= 0.95;
+
+            bool badTimeoutState =
+                measurementStartReason.Equals("timeout-forced-falling", StringComparison.OrdinalIgnoreCase) ||
+                measurementStartReason.Equals("timeout-forced-falling-fast", StringComparison.OrdinalIgnoreCase) ||
+                measurementStartReason.Equals("timeout-forced-worsening", StringComparison.OrdinalIgnoreCase);
+            if (badTimeoutState)
+                noteConfidence *= 0.92;
 
             double fastPingLatency = Safe(runtime.AvgPingMs);
             double crossSignalConfidence = 1.0;

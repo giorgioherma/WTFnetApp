@@ -835,7 +835,18 @@ namespace WTFnetApp
                 MeasuredServerPublicIp = identity.MeasuredServerPublicIp,
                 MeasuredServerIdentifier = identity.MeasuredServerIdentifier,
                 HasAuthoritativeIdentity = identity.HasAuthoritativeIdentity,
-                RestoredServerTarget = second.RestoredServerTarget ?? first.RestoredServerTarget
+                RestoredServerTarget = second.RestoredServerTarget ?? first.RestoredServerTarget,
+                LossSlopePerSec = PreferKnown(second.LossSlopePerSec, first.LossSlopePerSec),
+                StartupLossRecoveryState = second.StartupLossRecoveryState != ProbeCandidateRuntimeData.LossRecoveryState.Unknown
+                    ? second.StartupLossRecoveryState
+                    : first.StartupLossRecoveryState,
+                FlatLossConfirmCount = Math.Max(first.FlatLossConfirmCount, second.FlatLossConfirmCount),
+                FlatLossConfirmRequired = Math.Max(first.FlatLossConfirmRequired, second.FlatLossConfirmRequired),
+                LearnedExpectedLossRate = MaxKnown(first.LearnedExpectedLossRate, second.LearnedExpectedLossRate),
+                ExpectedLossDeltaAtStart = PreferKnown(second.ExpectedLossDeltaAtStart, first.ExpectedLossDeltaAtStart),
+                MeasurementStartLossRate = PreferNonNegative(second.MeasurementStartLossRate, first.MeasurementStartLossRate),
+                MeasurementEndLossRate = PreferNonNegative(second.MeasurementEndLossRate, first.MeasurementEndLossRate),
+                MeasurementStartReason = second.MeasurementStartReason ?? first.MeasurementStartReason
             };
         }
 
@@ -919,6 +930,24 @@ namespace WTFnetApp
             if (a < 0) return b;
             if (b < 0) return a;
             return Math.Max(a, b);
+        }
+
+        private static double PreferKnown(double preferred, double fallback)
+        {
+            if (!double.IsNaN(preferred) && !double.IsInfinity(preferred))
+                return preferred;
+            if (!double.IsNaN(fallback) && !double.IsInfinity(fallback))
+                return fallback;
+            return double.NaN;
+        }
+
+        private static double PreferNonNegative(double preferred, double fallback)
+        {
+            if (preferred >= 0)
+                return preferred;
+            if (fallback >= 0)
+                return fallback;
+            return -1;
         }
 
         public static double MinKnown(double a, double b)
