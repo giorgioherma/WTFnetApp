@@ -227,9 +227,12 @@ namespace WTFnetApp
                 }
 
                 await BeginTransitionGraceAsync("candidate-activate:" + candidate.RouteKey, cancellationToken);
+                LearnedProbeStateProfile warmupLearnedProfile = learningStore.GetProfile(candidate.RouteKey, timeBucket);
+                double learnedExpectedLossRate = ResolveLearnedExpectedLossRate(warmupLearnedProfile);
                 StartupSpeedifyTunnelProbe.SpeedifyProbeLifecycleResult lifecycle = await routedProbe.RunLifecycleAsync(
                     candidate,
                     activationRequestedUtc,
+                    learnedExpectedLossRate,
                     timeBucket,
                     cancellationToken);
 
@@ -279,6 +282,18 @@ namespace WTFnetApp
                 runtime.Notes = AppendNote(
                     runtime.Notes,
                     lifecycle.WarmupMiniTrusted ? "startup-mini-trusted" : "startup-mini-untrusted");
+                runtime.MeasurementStartReason = lifecycle.MeasurementStartReason ?? runtime.MeasurementStartReason;
+                runtime.MeasurementStartLossRate = lifecycle.StartLossRate >= 0 ? lifecycle.StartLossRate : runtime.MeasurementStartLossRate;
+                runtime.LossSlopePerSec = !double.IsNaN(lifecycle.LossSlopePerSec) ? lifecycle.LossSlopePerSec : runtime.LossSlopePerSec;
+                runtime.StartupLossRecoveryState = lifecycle.RecoveryState != ProbeCandidateRuntimeData.LossRecoveryState.Unknown
+                    ? lifecycle.RecoveryState
+                    : runtime.StartupLossRecoveryState;
+                runtime.FlatLossConfirmCount = Math.Max(runtime.FlatLossConfirmCount, lifecycle.FlatLossConfirmCount);
+                runtime.FlatLossConfirmRequired = Math.Max(runtime.FlatLossConfirmRequired, lifecycle.FlatLossConfirmRequired);
+                runtime.LearnedExpectedLossRate = learnedExpectedLossRate;
+                runtime.ExpectedLossDeltaAtStart = !double.IsNaN(lifecycle.ExpectedLossDeltaAtStart)
+                    ? lifecycle.ExpectedLossDeltaAtStart
+                    : runtime.ExpectedLossDeltaAtStart;
 
                 ProbeScoreResult score = ProbeScoring.ScoreCandidate(StartupScoreRuntimeSanitizer.BuildScoreRuntimeWithoutSpeedify(runtime));
                 LogLossRiskIfNeeded(candidate, runtime, score);
@@ -437,6 +452,27 @@ namespace WTFnetApp
         private void Log(string message)
         {
             log?.Invoke(message);
+        }
+
+        private static double ResolveLearnedExpectedLossRate(LearnedProbeStateProfile profile)
+        {
+            if (profile?.AvgLossRate == null)
+                return -1;
+
+            bool trusted = profile.IsTrustedLearning;
+            bool hasGood = profile.AvgLossRate.HasGoodBand;
+            if (!trusted || !hasGood)
+                return -1;
+
+            double min = profile.AvgLossRate.GoodMin;
+            double max = profile.AvgLossRate.GoodMax;
+            if (min < 0 && max < 0)
+                return -1;
+            if (min < 0)
+                return max;
+            if (max < 0)
+                return min;
+            return (min + max) * 0.5;
         }
 
         private void LogLossRiskIfNeeded(

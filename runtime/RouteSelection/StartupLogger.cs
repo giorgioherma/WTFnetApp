@@ -200,6 +200,13 @@ namespace WTFnetApp
                 " | finalAvg=" + FormatNumber(runtime?.AvgPingMs ?? -1) +
                 " | finalJit=" + FormatNumber(runtime?.AvgJitterMs ?? -1) +
                 " | finalSpk=" + FormatNumber(runtime?.SpikeDensityPerMinute ?? -1) +
+                " | startLossRate=" + FormatPercent(runtime?.MeasurementStartLossRate ?? -1) +
+                " | endLossRate=" + FormatPercent(runtime?.MeasurementEndLossRate ?? -1) +
+                " | lossSlopePerSec=" + FormatSlope(runtime?.LossSlopePerSec ?? double.NaN) +
+                " | lossRecoveryStateAtStart=" + (runtime?.StartupLossRecoveryState.ToString() ?? "Unknown") +
+                " | measurementStartReason=" + (string.IsNullOrWhiteSpace(runtime?.MeasurementStartReason) ? "--" : runtime.MeasurementStartReason) +
+                " | learnedExpectedLossRate=" + FormatPercent(runtime?.LearnedExpectedLossRate ?? -1) +
+                " | expectedLossDeltaAtStart=" + FormatSignedPercent(runtime?.ExpectedLossDeltaAtStart ?? double.NaN) +
                 " | composite=" + FormatNumber(score?.StartupSelectionScore ?? -1) +
                 " | overall=" + FormatNumber(score?.OverallStabilityScore ?? -1) +
                 " | warning=" + (score != null ? ProbeScoring.GetWarningLabel(score) : "--") +
@@ -209,6 +216,22 @@ namespace WTFnetApp
                 " | measuredRouteTarget=" + (runtime?.MeasuredRouteTarget ?? "-") +
                 " | restoredTarget=" + (runtime?.RestoredServerTarget ?? "-") +
                 " | outcome=" + (string.IsNullOrWhiteSpace(outcome) ? "kept-not-winner" : outcome));
+        }
+
+        private static string FormatSlope(double slopePerSec)
+        {
+            if (double.IsNaN(slopePerSec) || double.IsInfinity(slopePerSec))
+                return "--";
+            return slopePerSec.ToString("0.000") + "/s";
+        }
+
+        private static string FormatSignedPercent(double value)
+        {
+            if (double.IsNaN(value) || double.IsInfinity(value))
+                return "--";
+            if (value < 0)
+                return "-" + (Math.Abs(value) * 100.0).ToString("0.0") + "%";
+            return "+" + (value * 100.0).ToString("0.0") + "%";
         }
 
         public void RegisterCandidateEvaluation(
