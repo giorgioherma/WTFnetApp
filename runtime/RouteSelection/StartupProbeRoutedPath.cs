@@ -246,11 +246,13 @@ namespace WTFnetApp
             if (miniSnap.AvailableConnectionCount >= 0)
                 return miniSnap.AvailableConnectionCount;
 
+            if (miniSnap.UsableLinkCount >= 0)
+                return miniSnap.UsableLinkCount;
+
             return Math.Max(0, miniSnap.ActiveConnectionCount);
         }
-    }
 
-    internal sealed class StartupSpeedifyWarmup
+        internal sealed class StartupSpeedifyWarmup
     {
         private readonly StartupProbeTimingConfig timing;
         private readonly Func<FastPingState> getFastPingState;
