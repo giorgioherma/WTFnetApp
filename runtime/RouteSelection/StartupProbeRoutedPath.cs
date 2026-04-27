@@ -258,10 +258,10 @@ namespace WTFnetApp
         private readonly Func<MiniSpeedifyMiniSnap> getMiniSpeedifyMiniSnap;
         private readonly CandidateUsableEvaluator isCandidateUsableForMeasurement;
         private readonly StartupLogger startupLogger;
-        private const int StartupRequiredConsecutiveUsableReadings = 3;
         private static readonly TimeSpan StartupTunnelHardBuffer = TimeSpan.FromSeconds(4);
         private const int WarmupMiniMinimumFreshSamples = 3;
         private const double WarmupMiniMinimumSpreadMs = 1200.0;
+        private const int WarmupFlattenedStreakRequired = 3;
 
         public StartupSpeedifyWarmup(
             StartupProbeTimingConfig timing,
@@ -306,6 +306,7 @@ namespace WTFnetApp
             DateTime gateCheck2Utc = gateStartUtc + check2;
             DateTime gateForceUtc = gateStartUtc + forceStart;
             DateTime nextWarmupLogUtc = warmupStartUtc;
+            WarmupQualityTracker qualityTracker = new WarmupQualityTracker();
 
             TimeSpan pollInterval = timing.SpeedifyTelemetryCheckInterval > TimeSpan.Zero
                 ? timing.SpeedifyTelemetryCheckInterval
@@ -319,6 +320,8 @@ namespace WTFnetApp
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
+                FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindowSnapshot = getShortWindowSnapshot?.Invoke();
+                qualityTracker.Observe(shortWindowSnapshot);
                 MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap?.Invoke();
                 bool acceptedMini = miniBuffer.TryAdd(miniSnap);
                 if (!acceptedMini)
@@ -326,8 +329,10 @@ namespace WTFnetApp
 
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
-                    ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot();
-                    startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, reasonNow == "usable" ? "-" : reasonNow, miniSnap, logMini: true);
+                    ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot(shortWindowSnapshot);
+                    string warmupReason = reasonNow == "usable" ? "-" : reasonNow;
+                    warmupReason = AppendTag(warmupReason, qualityTracker.BuildLogNote());
+                    startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, warmupReason, miniSnap, logMini: true);
 
                     nextWarmupLogUtc = DateTime.UtcNow + TimeSpan.FromSeconds(1);
                 }
@@ -337,29 +342,30 @@ namespace WTFnetApp
 
             bool check1Done = false;
             bool check2Done = false;
-            int consecutiveUsableReadings = 0;
-            int bestConsecutiveUsableReadings = 0;
 
             while (DateTime.UtcNow < gateForceUtc)
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
                 bool usableNow = isCandidateUsableForMeasurement(candidate, out string reasonNow);
-                consecutiveUsableReadings = usableNow ? consecutiveUsableReadings + 1 : 0;
+                FastPingSignalAnalyzer.FastPingAggregateSnapshot shortWindowSnapshot = getShortWindowSnapshot?.Invoke();
+                qualityTracker.Observe(shortWindowSnapshot);
                 MiniSpeedifyMiniSnap miniSnap = getMiniSpeedifyMiniSnap?.Invoke();
                 bool acceptedMini = miniBuffer.TryAdd(miniSnap);
                 if (!acceptedMini)
                     miniSnap = null;
 
-                if (consecutiveUsableReadings > bestConsecutiveUsableReadings)
-                    bestConsecutiveUsableReadings = consecutiveUsableReadings;
-
                 DateTime nowUtc = DateTime.UtcNow;
                 bool hardBufferComplete = (nowUtc - warmupStartUtc) >= StartupTunnelHardBuffer;
-                bool stableNow =
+                bool hasFastPingSignal = HasFastPingSignal(shortWindowSnapshot);
+                bool readinessGateSatisfied =
                     hardBufferComplete &&
-                    usableNow &&
-                    consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings;
+                    shortWindowSnapshot != null &&
+                    (usableNow || hasFastPingSignal) &&
+                    qualityTracker.FlattenedStreak >= WarmupFlattenedStreakRequired;
+                bool stableNow = readinessGateSatisfied;
+                string stableReason = BuildStableReason(shortWindowSnapshot);
+                string stableTags = BuildStableTags(qualityTracker);
 
                 if (!check1Done && nowUtc >= gateCheck1Utc)
                 {
@@ -373,10 +379,10 @@ namespace WTFnetApp
 
                         return new StartupSpeedifyWarmupResult(
                             true,
-                            reasonNow,
+                            stableReason,
                             Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                             miniBuffer.IsSufficientForStartupTrust,
-                            warmupTag);
+                            AppendTag(warmupTag, stableTags));
                     }
                 }
 
@@ -392,21 +398,22 @@ namespace WTFnetApp
 
                         return new StartupSpeedifyWarmupResult(
                             true,
-                            reasonNow,
+                            stableReason,
                             Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                             miniBuffer.IsSufficientForStartupTrust,
-                            warmupTag);
+                            AppendTag(warmupTag, stableTags));
                     }
                 }
 
                 if (DateTime.UtcNow >= nextWarmupLogUtc)
                 {
-                    ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot();
+                    ProbeCandidateRuntimeData warmupSnapshot = BuildWarmupFastPingSnapshot(shortWindowSnapshot);
                     string warmupReason = reasonNow == "usable"
-                        ? (consecutiveUsableReadings >= StartupRequiredConsecutiveUsableReadings
-                            ? "-"
-                            : "usable-streak-" + consecutiveUsableReadings + "/" + StartupRequiredConsecutiveUsableReadings)
+                        ? (qualityTracker.FlattenedStreak >= WarmupFlattenedStreakRequired
+                            ? (BuildStableReason(shortWindowSnapshot) + " | ready")
+                            : "waiting-quality-flat-" + qualityTracker.FlattenedStreak + "/" + WarmupFlattenedStreakRequired)
                         : reasonNow;
+                    warmupReason = AppendTag(warmupReason, qualityTracker.BuildLogNote());
 
                     startupLogger?.LogStartupPhase(candidate, "warmup", warmupSnapshot, warmupReason, miniSnap, logMini: true);
 
@@ -416,14 +423,17 @@ namespace WTFnetApp
                 await Task.Delay(pollInterval, cancellationToken);
             }
 
+            FastPingSignalAnalyzer.FastPingAggregateSnapshot finalSnapshot = getShortWindowSnapshot?.Invoke();
             bool finalUsable = isCandidateUsableForMeasurement(candidate, out string finalReason);
-
-            if (finalUsable && bestConsecutiveUsableReadings < StartupRequiredConsecutiveUsableReadings)
+            bool hasFinalFastPingSignal = HasFastPingSignal(finalSnapshot);
+            bool forceUsable = finalUsable || hasFinalFastPingSignal;
+            if (forceUsable)
             {
-                finalUsable = false;
-                finalReason = "insufficient-consecutive-usable-" +
-                              bestConsecutiveUsableReadings + "/" +
-                              StartupRequiredConsecutiveUsableReadings;
+                finalReason = qualityTracker.WildStreak > 0
+                    ? "force-start-wild-quality"
+                    : qualityTracker.ImprovingStreak > 0
+                        ? "force-start-unsettled-quality"
+                        : "force-start-poor-quality";
             }
 
             string finalTag =
@@ -439,13 +449,50 @@ namespace WTFnetApp
                 finalTag = AppendTag(finalTag, "mini-no-meaningful-signal");
             if (miniBuffer.HasCongestionEvidence)
                 finalTag = AppendTag(finalTag, "mini-congestion-observed");
+            if (forceUsable)
+                finalTag = AppendTag(finalTag, finalReason);
+            finalTag = AppendTag(finalTag, qualityTracker.BuildForceStartTag());
 
             return new StartupSpeedifyWarmupResult(
-                finalUsable,
+                forceUsable,
                 finalReason,
                 Math.Max(0.0, (DateTime.UtcNow - warmupStartUtc).TotalMilliseconds),
                 warmupMiniTrusted,
                 finalTag);
+        }
+
+        private static bool HasFastPingSignal(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
+        {
+            return snapshot != null &&
+                   (snapshot.IsValid ||
+                    snapshot.AvgPingMs >= 0 ||
+                    snapshot.P95PingMs >= 0 ||
+                    snapshot.AvgLossRate >= 0 ||
+                    snapshot.AvgJitterMs >= 0 ||
+                    snapshot.SpikeDensityPerMinute >= 0);
+        }
+
+        private static string BuildStableReason(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
+        {
+            bool goodQuality =
+                snapshot != null &&
+                snapshot.AvgLossRate >= 0 &&
+                snapshot.AvgLossRate <= 0.03 &&
+                (snapshot.AvgJitterMs < 0 || snapshot.AvgJitterMs <= 15.0);
+
+            return goodQuality
+                ? "activated-stable-good-quality"
+                : "activated-stable-bad-quality";
+        }
+
+        private static string BuildStableTags(WarmupQualityTracker tracker)
+        {
+            string tags = string.Empty;
+            if (tracker.LossFlattened)
+                tags = AppendTag(tags, "loss-flattened");
+            if (tracker.JitterFlattened)
+                tags = AppendTag(tags, "jitter-flattened");
+            return tags;
         }
 
         private static string AppendTag(string existing, string tag)
@@ -462,11 +509,8 @@ namespace WTFnetApp
             return existing + " | " + tag;
         }
 
-        private ProbeCandidateRuntimeData BuildWarmupFastPingSnapshot()
+        private ProbeCandidateRuntimeData BuildWarmupFastPingSnapshot(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot = null)
         {
-            FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot = getShortWindowSnapshot != null
-                ? getShortWindowSnapshot()
-                : null;
             FastPingState state = getFastPingState != null
                 ? getFastPingState()
                 : null;
@@ -487,6 +531,98 @@ namespace WTFnetApp
 
             runtime.AvgConfidence = state?.Confidence ?? -1;
             return runtime;
+        }
+
+        private sealed class WarmupQualityTracker
+        {
+            private const double FlattenLossDeltaThreshold = 0.03;
+            private const double FlattenJitterDeltaThresholdMs = 5.0;
+            private const double ImprovingLossDeltaThreshold = 0.04;
+            private const double WildLossDeltaThreshold = 0.12;
+            private const double WildJitterDeltaThresholdMs = 20.0;
+
+            private double previousLoss = -1;
+            private double previousJitter = -1;
+
+            public int FlattenedStreak { get; private set; }
+            public int ImprovingStreak { get; private set; }
+            public int WildStreak { get; private set; }
+            public bool LossFlattened { get; private set; }
+            public bool JitterFlattened { get; private set; }
+            public double LossDelta { get; private set; } = double.NaN;
+            public double JitterDelta { get; private set; } = double.NaN;
+
+            public void Observe(FastPingSignalAnalyzer.FastPingAggregateSnapshot snapshot)
+            {
+                double currentLoss = snapshot?.AvgLossRate ?? -1;
+                double currentJitter = snapshot?.AvgJitterMs ?? -1;
+
+                bool hasPreviousLoss = previousLoss >= 0;
+                bool hasCurrentLoss = currentLoss >= 0;
+                bool hasPreviousJitter = previousJitter >= 0;
+                bool hasCurrentJitter = currentJitter >= 0;
+
+                LossDelta = hasPreviousLoss && hasCurrentLoss
+                    ? Math.Abs(currentLoss - previousLoss)
+                    : double.NaN;
+                JitterDelta = hasPreviousJitter && hasCurrentJitter
+                    ? Math.Abs(currentJitter - previousJitter)
+                    : double.NaN;
+
+                bool lossStronglyImproving =
+                    hasPreviousLoss &&
+                    hasCurrentLoss &&
+                    (previousLoss - currentLoss) >= ImprovingLossDeltaThreshold;
+
+                LossFlattened =
+                    hasPreviousLoss &&
+                    hasCurrentLoss &&
+                    Math.Abs(currentLoss - previousLoss) <= FlattenLossDeltaThreshold;
+
+                JitterFlattened =
+                    hasPreviousJitter &&
+                    hasCurrentJitter &&
+                    Math.Abs(currentJitter - previousJitter) <= FlattenJitterDeltaThresholdMs;
+
+                bool flattened = (LossFlattened || JitterFlattened) && !lossStronglyImproving;
+                bool wild =
+                    (hasPreviousLoss && hasCurrentLoss && Math.Abs(currentLoss - previousLoss) >= WildLossDeltaThreshold) ||
+                    (hasPreviousJitter && hasCurrentJitter && Math.Abs(currentJitter - previousJitter) >= WildJitterDeltaThresholdMs);
+
+                FlattenedStreak = flattened ? FlattenedStreak + 1 : 0;
+                ImprovingStreak = lossStronglyImproving ? ImprovingStreak + 1 : 0;
+                WildStreak = wild ? WildStreak + 1 : 0;
+
+                if (hasCurrentLoss)
+                    previousLoss = currentLoss;
+                if (hasCurrentJitter)
+                    previousJitter = currentJitter;
+            }
+
+            public string BuildLogNote()
+            {
+                return "quality-delta(loss=" + FormatDelta(LossDelta) +
+                       ",jitter=" + FormatDelta(JitterDelta) +
+                       ") | flat=" + FlattenedStreak +
+                       " | improving=" + ImprovingStreak +
+                       " | wild=" + WildStreak;
+            }
+
+            public string BuildForceStartTag()
+            {
+                if (WildStreak > 0)
+                    return "wild-quality";
+                if (ImprovingStreak > 0)
+                    return "unsettled-quality";
+                return "poor-quality";
+            }
+
+            private static string FormatDelta(double value)
+            {
+                if (double.IsNaN(value) || double.IsInfinity(value))
+                    return "--";
+                return value.ToString("0.###");
+            }
         }
     }
 
