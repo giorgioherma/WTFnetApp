@@ -27,6 +27,7 @@ namespace WTFnetApp
 
             trayMenu.Items.Add("Toggle Overlay", null, (s, e) => core.ToggleOverlay());
             trayMenu.Items.Add("Ping Servers Now", null, async (s, e) => await RunManualPingScan());
+            trayMenu.Items.Add("Settings...", null, OpenSettings);
             trayMenu.Items.Add(new ToolStripSeparator());
             trayMenu.Items.Add("Exit", null, Exit);
 
@@ -63,6 +64,14 @@ namespace WTFnetApp
             trayIcon.Dispose();
 
             Application.Exit();
+        }
+
+        void OpenSettings(object sender, EventArgs e)
+        {
+            using (var dialog = new SpeedifySettingsForm())
+            {
+                dialog.ShowDialog();
+            }
         }
     }
 }

@@ -60,9 +60,11 @@ namespace WTFnetApp
         // SPEEDIFY PATHS
         // =========================
 
-        private const string SpeedifyCliPath = @"C:\Program Files (x86)\Speedify\speedify_cli.exe";
         private const string SpeedifyExePath = @"C:\Program Files (x86)\Speedify\Speedify.exe";
+        private const string SpeedifyExePath64 = @"C:\Program Files\Speedify\Speedify.exe";
         private const string LearningStoreFileName = "route-learning-store.json";
+        private string resolvedSpeedifyCliPath;
+        private bool hasLoggedSpeedifyCliExecutionPathError;
 
         // =========================
         // FIXED FAIR PROBE TARGETS
@@ -459,12 +461,6 @@ namespace WTFnetApp
                 return;
             }
 
-            if (!IsSpeedifyInstalled())
-            {
-                Logger.Log("startup", "startup route evaluation skipped: Speedify not installed");
-                return;
-            }
-
             Logger.Log("startup", "starting startup route evaluation");
 
             startupEvaluationRunning = true;
@@ -528,31 +524,37 @@ namespace WTFnetApp
             };
         }
 
-        private bool IsSpeedifyInstalled()
-        {
-            try
-            {
-                return System.IO.File.Exists(SpeedifyCliPath) || System.IO.File.Exists(SpeedifyExePath);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
         private async Task RunStartupRouteEvaluationAsync()
         {
             Logger.Log("startup", "route evaluation requested");
-
-            await EnsureSpeedifyProcessRunningAsync();
-            await EnsureSpeedifyTelemetryAvailableAsync();
-
-            List<ProbeCandidateDefinition> candidates = BuildStartupCandidates();
-            if (candidates.Count == 0)
+            if (!TryGetConfiguredSpeedifyCliPath(out string configuredCliPath, out string cliReason))
             {
-                Logger.Log("startup", "no startup candidates available");
+                if (string.Equals(cliReason, "speedify-cli-path-invalid", StringComparison.OrdinalIgnoreCase))
+                {
+                    Logger.Log("startup-probe",
+                        "startup-probe | raw-only mode | reason=speedify-cli-path-invalid | path=" + (configuredCliPath ?? "-"));
+                    lastStartupProbeResult = await RunRawOnlyAsync("speedify-cli-path-invalid", false);
+                    return;
+                }
+
+                Logger.Log("startup-probe", "startup-probe | raw-only mode | reason=speedify-cli-path-not-configured");
+                lastStartupProbeResult = await RunRawOnlyAsync("speedify-cli-path-not-configured", false);
                 return;
             }
+
+            Logger.Log("startup-probe",
+                "startup-probe | speedify cli configured | path=" + configuredCliPath + " | route contest enabled");
+
+            List<ProbeCandidateDefinition> candidates = BuildStartupCandidates();
+
+            if (candidates.Count == 0)
+            {
+                Logger.Log("startup-probe", "startup-probe | raw-only mode | reason=no-speedify-candidates");
+                lastStartupProbeResult = await RunRawOnlyAsync("no-speedify-candidates", true);
+                return;
+            }
+
+            await EnsureSpeedifyProcessRunningAsync();
 
             using (Logger.BeginStartupProbeLogScope())
             {
@@ -618,6 +620,55 @@ namespace WTFnetApp
             }
 
             return list;
+        }
+
+        private async Task<StartupProbeResult> RunRawOnlyAsync(string reason, bool canDisableSpeedify)
+        {
+            if (canDisableSpeedify)
+                await DisableSpeedifyAsync();
+
+            ProbeCandidateDefinition rawCandidate = new ProbeCandidateDefinition
+            {
+                RouteKey = "raw",
+                DisplayName = "No Speedify",
+                ConnectTarget = string.Empty,
+                Kind = ProbeCandidateKind.Raw
+            };
+
+            ProbeCandidateRuntimeData runtime = new ProbeCandidateRuntimeData
+            {
+                Candidate = rawCandidate,
+                IsValid = true,
+                MeasurementStarted = false,
+                MeasurementCompleted = false,
+                Notes = "startup-raw-only:" + reason
+            };
+
+            ProbeScoreResult rawScore = new ProbeScoreResult
+            {
+                Candidate = rawCandidate,
+                Runtime = runtime,
+                IsWinner = true,
+                IsShortlisted = true,
+                SummaryText = "startup raw-only mode: " + reason
+            };
+
+            return new StartupProbeResult
+            {
+                Baseline = rawScore,
+                Winner = rawScore,
+                FinalRestoreSucceeded = true,
+                SummaryText = "startup-probe | raw-only mode | reason=" + reason,
+                AllResults = new List<ProbeScoreResult> { rawScore },
+                Shortlist = new List<ProbeScoreResult> { rawScore },
+                WinnerConfidence = new ProbeWinnerConfidenceResult
+                {
+                    Kind = ProbeWinnerConfidenceKind.HighConfidence,
+                    ConfidenceScore = 1.0,
+                    Reason = reason,
+                    GapToRunnerUpScore = 0
+                }
+            };
         }
 
         private void ApplyLearningFromStartupProbe(StartupProbeResult result)
@@ -779,6 +830,51 @@ namespace WTFnetApp
             public string Reason { get; set; }
         }
 
+        private bool TryGetConfiguredSpeedifyCliPath(out string path, out string reason)
+        {
+            path = null;
+            reason = "speedify-cli-path-not-configured";
+
+            string configuredPath = null;
+            try
+            {
+                configuredPath = Properties.Settings.Default.SpeedifyCliPath;
+            }
+            catch
+            {
+                configuredPath = null;
+            }
+
+            if (string.IsNullOrWhiteSpace(configuredPath))
+            {
+                resolvedSpeedifyCliPath = null;
+                return false;
+            }
+
+            configuredPath = configuredPath.Trim();
+            path = configuredPath;
+
+            bool exists;
+            try
+            {
+                exists = System.IO.File.Exists(configuredPath);
+            }
+            catch
+            {
+                exists = false;
+            }
+
+            if (!exists)
+            {
+                reason = "speedify-cli-path-invalid";
+                return false;
+            }
+
+            resolvedSpeedifyCliPath = configuredPath;
+            hasLoggedSpeedifyCliExecutionPathError = false;
+            return true;
+        }
+
         private async Task EnsureSpeedifyProcessRunningAsync()
         {
             if (IsSpeedifyProcessRunning())
@@ -787,7 +883,8 @@ namespace WTFnetApp
                 return;
             }
 
-            if (!System.IO.File.Exists(SpeedifyExePath))
+            string speedifyExePath = ResolveSpeedifyExePath();
+            if (string.IsNullOrWhiteSpace(speedifyExePath))
             {
                 Logger.Log("startup", "Speedify executable not found");
                 return;
@@ -799,7 +896,7 @@ namespace WTFnetApp
             {
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
                 {
-                    FileName = SpeedifyExePath,
+                    FileName = speedifyExePath,
                     UseShellExecute = true
                 });
             }
@@ -841,6 +938,30 @@ namespace WTFnetApp
             {
                 return false;
             }
+        }
+
+        private static string ResolveSpeedifyExePath()
+        {
+            string[] candidates =
+            {
+                SpeedifyExePath,
+                SpeedifyExePath64
+            };
+
+            foreach (string path in candidates)
+            {
+                try
+                {
+                    if (System.IO.File.Exists(path))
+                        return path;
+                }
+                catch
+                {
+                    // ignored
+                }
+            }
+
+            return null;
         }
 
         private async Task EnsureSpeedifyTelemetryAvailableAsync()
@@ -896,7 +1017,7 @@ namespace WTFnetApp
         {
             Logger.Log("startup", "disable speedify requested");
 
-            if (!System.IO.File.Exists(SpeedifyCliPath))
+            if (!TryGetConfiguredSpeedifyCliPath(out string _, out string _))
             {
                 Logger.Log("startup", "Speedify CLI not found -> cannot disable speedify");
                 return false;
@@ -963,7 +1084,7 @@ namespace WTFnetApp
                 return false;
             }
 
-            if (!System.IO.File.Exists(SpeedifyCliPath))
+            if (!TryGetConfiguredSpeedifyCliPath(out string cliPath, out string _))
             {
                 Logger.Log("startup", "Speedify CLI not found -> cannot connect target");
                 return false;
@@ -1456,9 +1577,15 @@ namespace WTFnetApp
         {
             const int CliTimeoutMs = 8000;
 
-            if (!System.IO.File.Exists(SpeedifyCliPath))
+            if (!TryGetConfiguredSpeedifyCliPath(out string cliPath, out string reason))
             {
-                Logger.Log("startup", "Speedify CLI missing | path=" + SpeedifyCliPath);
+                if (!hasLoggedSpeedifyCliExecutionPathError)
+                {
+                    hasLoggedSpeedifyCliExecutionPathError = true;
+                    string pathValue = string.IsNullOrWhiteSpace(cliPath) ? "-" : cliPath;
+                    Logger.Log("startup", "Speedify CLI unavailable at execution time | reason=" + reason + " | path=" + pathValue);
+                }
+
                 return new SpeedifyCliResult { ExitCode = -1, Stdout = null, Stderr = null };
             }
 
@@ -1468,7 +1595,7 @@ namespace WTFnetApp
                 {
                     process.StartInfo = new System.Diagnostics.ProcessStartInfo
                     {
-                        FileName = SpeedifyCliPath,
+                        FileName = cliPath,
                         Arguments = arguments,
                         UseShellExecute = false,
                         CreateNoWindow = true,
