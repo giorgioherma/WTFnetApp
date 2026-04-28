@@ -60,6 +60,8 @@ namespace WTFnetApp
         // SPEEDIFY PATHS
         // =========================
 
+        private const string SpeedifyCliPath = @"C:\Program Files (x86)\Speedify\speedify_cli.exe";
+        private const string SpeedifyCliPath64 = @"C:\Program Files\Speedify\speedify_cli.exe";
         private const string SpeedifyExePath = @"C:\Program Files (x86)\Speedify\Speedify.exe";
         private const string SpeedifyExePath64 = @"C:\Program Files\Speedify\Speedify.exe";
         private const string LearningStoreFileName = "route-learning-store.json";
