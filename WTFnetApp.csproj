@@ -77,127 +77,70 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="legacy\NetworkMetricsEngine.cs" />
-    <Compile Include="runtime\Data\WtfFastPingData\NetworkMetricsCalculator.cs" />
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkQualityEvaluator.cs" />
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkSignalResolver.cs" />
-    <Compile Include="runtime\Data\WtfFastPingData\FastPingSignalAnalyzer.cs" />
-    <None Include="legacy\DataSet.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\MiniSpeedefyMinisnap.cs" />
-    <Compile Include="runtime\RouteSelection\ProbeScoring.cs" />
-    <Compile Include="runtime\RouteSelection\ServerProbeLearningStore.cs" />
-    <Compile Include="runtime\RouteSelection\SpeedifyServerRegionCatalog.cs" />
-    <Compile Include="runtime\RouteSelection\StartupLogger.cs" />
-    <Compile Include="runtime\RouteSelection\StartupProbeCoordinator.cs" />
-    <Compile Include="runtime\RouteSelection\StartupProbeFinalization.cs" />
-    <Compile Include="runtime\RouteSelection\StartupProbeRoutedPath.cs" />
-    <Compile Include="runtime\RouteSelection\StartupRawProbe.cs" />
-    <Compile Include="runtime\derGrosseGeneralstab.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Logger.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Data\SpeedifyTelemetryData\MetricsSnapshot.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyActivatedServerIdentity.cs" />
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\FastPingTelemetrySnapshot.cs" />
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\SpeedifyTelemetrySnapshot.cs" />
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\StartupDecisionSnapshot.cs" />
-    <Compile Include="runtime\Data\WTFnetDataGOSPEL\UnifiedNetworkState.cs" />
-    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyStructuredState.cs" />
-    <None Include="lab\StartupServerTest.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <None Include="legacy\PredictionEngine.cs" />
-    <None Include="lab\LagPattern.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <Compile Include="lab\ConfidenceEstimator.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <None Include="lab\AdaptiveThresholdController.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="legacy\LagLearningEngine.cs" />
-    <None Include="legacy\LagPressureController.cs" />
-    <None Include="lab\PlayerLagDetector.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="lab\AggressionController.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="lab\LearningGate.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="lab\FailureDetector.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="lab\ServerQualityEstimator.cs" />
-    <None Include="lab\SlowLearningManager.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="lab\DecisionEngine.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="legacy\TOOLSpeedefyStreamLogger.cs" />
-    <None Include="lab\SpeedifyController.cs">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
-    <None Include="legacy\NetworkAnalysisFrame.cs" />
-    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyMetricsParser.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyTelemetryReader.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <None Include="lab\VPNServerList.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </None>
-    <Compile Include="lab\Tray.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\UIOverlay.cs">
-      <SubType>Form</SubType>
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Data\WtfFastPingData\WtfFastPing.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <None Include="legacy\Form1.cs" />
-    <Compile Include="legacy\Form1.Designer.cs">
-      <DependentUpon>Form1.cs</DependentUpon>
-    </Compile>
-    <Compile Include="runtime\NatKeepAlive.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="runtime\Program.cs">
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
-    </Compile>
-    <Compile Include="Properties\AssemblyInfo.cs" />
-    <EmbeddedResource Include="Properties\Resources.resx">
-      <Generator>ResXFileCodeGenerator</Generator>
-      <LastGenOutput>Resources.Designer.cs</LastGenOutput>
-      <SubType>Designer</SubType>
-    </EmbeddedResource>
-    <Compile Include="Properties\Resources.Designer.cs">
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Resources.resx</DependentUpon>
-    </Compile>
-    <None Include="packages.config" />
-    <None Include="Properties\Settings.settings">
-      <Generator>SettingsSingleFileGenerator</Generator>
-      <LastGenOutput>Settings.Designer.cs</LastGenOutput>
-    </None>
-    <Compile Include="Properties\Settings.Designer.cs">
-      <AutoGen>True</AutoGen>
-      <DependentUpon>Settings.settings</DependentUpon>
-      <DesignTimeSharedInput>True</DesignTimeSharedInput>
-    </Compile>
-  </ItemGroup>
+  <Compile Include="runtime\Data\WtfFastPingData\NetworkMetricsCalculator.cs" />
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkQualityEvaluator.cs" />
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\NetworkSignalResolver.cs" />
+  <Compile Include="runtime\Data\WtfFastPingData\FastPingSignalAnalyzer.cs" />
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\MiniSpeedefyMinisnap.cs" />
+
+  <Compile Include="runtime\RouteSelection\ProbeScoring.cs" />
+  <Compile Include="runtime\RouteSelection\ServerProbeLearningStore.cs" />
+  <Compile Include="runtime\RouteSelection\SpeedifyServerRegionCatalog.cs" />
+  <Compile Include="runtime\RouteSelection\StartupLogger.cs" />
+  <Compile Include="runtime\RouteSelection\StartupProbeCoordinator.cs" />
+  <Compile Include="runtime\RouteSelection\StartupProbeFinalization.cs" />
+  <Compile Include="runtime\RouteSelection\StartupProbeRoutedPath.cs" />
+  <Compile Include="runtime\RouteSelection\StartupRawProbe.cs" />
+
+  <Compile Include="runtime\derGrosseGeneralstab.cs" />
+  <Compile Include="runtime\Logger.cs" />
+  <Compile Include="runtime\Tray.cs" />
+
+  <Compile Include="runtime\Data\SpeedifyTelemetryData\MetricsSnapshot.cs" />
+  <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyActivatedServerIdentity.cs" />
+  <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyStructuredState.cs" />
+  <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyMetricsParser.cs" />
+  <Compile Include="runtime\Data\SpeedifyTelemetryData\SpeedifyTelemetryReader.cs" />
+
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\FastPingTelemetrySnapshot.cs" />
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\SpeedifyTelemetrySnapshot.cs" />
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\Snapshots\StartupDecisionSnapshot.cs" />
+  <Compile Include="runtime\Data\WTFnetDataGOSPEL\UnifiedNetworkState.cs" />
+
+  <Compile Include="runtime\UIOverlay.cs">
+    <SubType>Form</SubType>
+  </Compile>
+
+  <Compile Include="runtime\Data\WtfFastPingData\WtfFastPing.cs" />
+  <Compile Include="runtime\NatKeepAlive.cs" />
+  <Compile Include="runtime\Program.cs" />
+
+  <Compile Include="Properties\AssemblyInfo.cs" />
+
+  <EmbeddedResource Include="Properties\Resources.resx">
+    <Generator>ResXFileCodeGenerator</Generator>
+    <LastGenOutput>Resources.Designer.cs</LastGenOutput>
+    <SubType>Designer</SubType>
+  </EmbeddedResource>
+
+  <Compile Include="Properties\Resources.Designer.cs">
+    <AutoGen>True</AutoGen>
+    <DependentUpon>Resources.resx</DependentUpon>
+  </Compile>
+
+  <None Include="packages.config" />
+
+  <None Include="Properties\Settings.settings">
+    <Generator>SettingsSingleFileGenerator</Generator>
+    <LastGenOutput>Settings.Designer.cs</LastGenOutput>
+  </None>
+
+  <Compile Include="Properties\Settings.Designer.cs">
+    <AutoGen>True</AutoGen>
+    <DependentUpon>Settings.settings</DependentUpon>
+    <DesignTimeSharedInput>True</DesignTimeSharedInput>
+  </Compile>
+</ItemGroup>
   <ItemGroup>
     <None Include="runtime\App.config" />
   </ItemGroup>
