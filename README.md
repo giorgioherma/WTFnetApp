@@ -1,31 +1,54 @@
 # WTFnetApp
 
-**WTFnetApp** is a lightweight Windows utility designed to improve gaming stability on **unstable LTE / 5G networks**.
+**WTFnetApp (Wide-area Traffic Forensics net App)** is a real-time network analysis and route optimization tool designed to improve **gaming stability on unstable LTE / 5G connections**.
 
-The application monitors network quality in real time and can automatically control **Speedify bonding modes** to reduce lag spikes during gameplay.
+Instead of chasing the lowest ping, the application focuses on what actually matters for gameplay:
 
-Even without Speedify enabled, the tool continues to provide **network diagnostics, NAT stabilization, and a real-time ping overlay**.
+> **stability, consistency, and spike resistance**
 
 ---
 
 # Why this tool exists
 
-Mobile networks often suffer from:
+Mobile networks are fundamentally unstable compared to wired connections.
 
-- latency spikes
-- jitter
-- packet loss
-- unstable routing
-- aggressive NAT timeouts
+Typical issues include:
 
-These issues frequently cause:
+- latency spikes  
+- jitter (inconsistent delay)  
+- packet loss  
+- route instability  
+- aggressive NAT timeouts  
 
-- rubber-banding
-- sudden lag spikes
-- lobby disconnects
-- dropped sessions
+These lead to real in-game problems:
 
-WTFnetApp attempts to **detect and mitigate these problems automatically**.
+- rubber-banding  
+- sudden lag spikes  
+- hit registration issues  
+- lobby disconnects  
+- dropped sessions  
+
+**WTFnetApp exists to detect and actively manage these conditions in real time.**
+
+---
+
+# Core Concept
+
+Most tools measure **average latency**.
+
+WTFnetApp instead evaluates:
+
+> "How stable is this connection over time?"
+
+The system continuously analyzes:
+
+- spike behavior  
+- jitter consistency  
+- packet loss patterns  
+- recovery time after instability  
+- confidence in measurements  
+
+and makes decisions based on **stability-first scoring**, not raw ping.
 
 ---
 
@@ -33,169 +56,124 @@ WTFnetApp attempts to **detect and mitigate these problems automatically**.
 
 ## Real-time network monitoring
 
-The application continuously measures:
+Continuous active probing using external targets:
 
-- latency
-- jitter
-- packet loss
-- spike detection
-- traffic conditions
+- 1.1.1.1  
+- 8.8.8.8  
 
-Ping targets used:
+Measured metrics:
 
-- 8.8.8.8
-- 1.1.1.1
-- 9.9.9.9
+- latency (instant + smoothed)  
+- jitter  
+- packet loss  
+- spike detection  
+- stale / degraded conditions  
+- confidence score  
 
 ---
 
-## Smart Speedify mode control
+## Advanced signal analysis
 
-When Speedify is enabled, the application can automatically switch between:
+The system aggregates short and long windows of data to detect:
 
-### Speed Mode
-Normal bonding mode with minimal overhead and lower mobile data usage.
+- burst packet loss vs isolated loss  
+- spike density and severity  
+- tail latency (p95 / p99 behavior)  
+- degradation trends (improving / worsening)  
 
-### Redundant Mode
-Duplicate packets are transmitted across connections to protect against:
+This allows accurate classification of:
 
-- packet loss
-- LTE spikes
-- unstable routing
+> Playable vs unstable vs broken connections
 
-The system activates redundant mode only when instability is detected.
+---
+
+## Smart route selection (startup probe)
+
+At application startup, WTFnetApp performs a controlled evaluation:
+
+1. Measures **raw (no VPN)** connection  
+2. Tests multiple **Speedify routes**  
+3. Stabilizes each candidate  
+4. Compares using stability scoring  
+
+Then selects the best route based on:
+
+- stability score  
+- confidence  
+- loss / spike behavior  
+- recovery characteristics  
+
+This ensures the chosen route is **actually playable**, not just fast.
+
+---
+
+## Speedify integration (optional)
+
+When Speedify is installed, WTFnetApp can:
+
+- activate specific server routes  
+- evaluate tunnel quality vs raw connection  
+- interpret Speedify telemetry (latency, jitter, congestion)  
+- detect bonding benefits  
+
+Important:
+
+> Speedify data is treated as **supporting context**, not ground truth.
+
+FastPing measurements always remain authoritative.
 
 ---
 
 ## Works without Speedify
 
-Speedify is **not required** for the application to function.
+Speedify is **not required**.
 
-When Speedify is disabled, WTFnetApp still provides:
+Without it, WTFnetApp still provides:
 
-- network monitoring
-- ping overlay
-- NAT keep-alive
-- network logging
-- LTE quality analysis
+- full network diagnostics  
+- real-time monitoring  
+- overlay display  
+- NAT stabilization  
+- route quality analysis  
 
-This allows the tool to be used purely as a **diagnostic and monitoring utility**.
+This makes it usable as a standalone **network analysis tool**.
 
 ---
 
-## Gaming ping overlay
+## Gaming overlay
 
-A small overlay displays real-time ping while gaming.
+A lightweight on-screen overlay displays:
 
-Color indicators:
+- live latency  
+- jitter  
+- connection quality  
 
-- Green  < 50 ms
-- Orange < 90 ms
-- Red    > 90 ms
+Color-coded for instant feedback:
 
-This allows latency spikes to be seen immediately during gameplay.
+- 🟢 Stable  
+- 🟠 Degrading  
+- 🔴 Unstable  
 
 ---
 
 ## NAT keep-alive
 
-Some mobile providers aggressively close UDP NAT mappings.
+Mobile providers frequently drop UDP mappings.
 
-The application periodically sends small UDP packets to keep the connection alive and prevent:
+WTFnetApp maintains NAT state using periodic packets to prevent:
 
-- sudden disconnects
-- lobby drops
-- session resets
-
----
-
-## LTE / 5G network quality analysis
-
-The built-in LTE diagnostic system estimates connection stability and provides a simplified quality indicator.
-
-Quality states:
-
-- LOCKED
-- STABLE
-- PLAYABLE
-- WEAK
-- BAD
+- session drops  
+- lobby disconnects  
+- sudden connection resets  
 
 ---
 
-# Requirements
+## Learning system
 
-Operating system:
+The application builds a local learning profile:
 
-- Windows 10
-- Windows 11
+- remembers historically good routes  
+- adapts to time-of-day patterns  
+- biases startup selection toward proven stable paths  
 
-Runtime:
-
-- .NET Framework 4.8
-
-Optional software:
-
-- Speedify
-
-Expected Speedify CLI path:
-
-C:\Program Files (x86)\Speedify\speedify_cli.exe
-
----
-
-# Project Structure
-
-Main components:
-
-- Form1.cs              Core monitoring and decision logic
-- PingOverlay.cs        On-screen ping overlay
-- LteProTool.cs         LTE network quality analysis
-- LteDashboardForm.cs   LTE diagnostic dashboard
-- Program.cs            Application entry point
-
----
-
-# Logging
-
-Network metrics and system decisions are written to log files for diagnostics.
-
-Typical log categories include:
-
-- metrics
-- decisions
-- speedify
-- nat
-- errors
-- trace
-
----
-
-# Project Status
-
-Experimental project.
-
-Primarily designed for **gaming on unstable mobile networks**.
-
----
-
-# Disclaimer
-
-This project is an independent tool and is **not affiliated with Speedify or any network provider**.
-
----
-
-# License
-
-This project is licensed under the **MIT License**.
-
-You are free to:
-
-- use
-- modify
-- distribute
-- include the code in other projects
-
-as long as the original copyright notice is included.
-
-See the **LICENSE** file for full details.
+Stored locally:
