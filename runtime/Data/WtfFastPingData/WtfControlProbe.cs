@@ -173,14 +173,17 @@ namespace WTFnetApp
                 ? -1
                 : successes[(int)Math.Ceiling((successes.Length - 1) * 0.95)];
 
-            bool controlReady = control.Length >= 8;
-            bool fastReady = fast != null && fast.IsValid &&
-                             fastState != null && !fastState.IsStale;
+            // When a probe times out, its 1.5-second timeout naturally slows sampling.
+            // A five-sample minimum avoids treating an actual outage as "no data".
+            bool controlReady = control.Length >= 5;
+            bool fastReady = fast != null && fast.SampleCount >= 5 && fastState != null;
             bool controlAlert = controlReady && (elevated >= 2 || maxConsecutiveMisses >= 3);
             bool fastAlert = fastReady &&
-                             (fast.SpikeCount >= 3 ||
-                              (fast.P95PingMs >= elevatedThreshold &&
-                               fast.P95PingMs > fast.AvgPingMs + 25));
+                             (fastState.IsStale ||
+                              (fast.IsValid &&
+                               (fast.SpikeCount >= 3 ||
+                                (fast.P95PingMs >= elevatedThreshold &&
+                                 fast.P95PingMs > fast.AvgPingMs + 25))));
 
             string comparison = !controlReady || !fastReady ? "insufficient" :
                 controlAlert && fastAlert ? "both" :
