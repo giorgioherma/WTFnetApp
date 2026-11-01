@@ -20,6 +20,7 @@ namespace WTFnetApp
         private SpeedifyTelemetryReader speedifyReader;
 
         private readonly WtfFastPing fastPing = new WtfFastPing();
+        private WtfControlProbe controlProbe;
         private readonly FastPingSignalAnalyzer fastPingSignalAnalyzer = new FastPingSignalAnalyzer();
         private readonly NetworkSignalResolver networkSignalResolver;
         private readonly ServerProbeLearningStore probeLearningStore = new ServerProbeLearningStore();
@@ -149,6 +150,15 @@ namespace WTFnetApp
             Logger.Log("fastping", "probe mode -> externalonly | forced fixed targets for fair comparison");
 
             fastPing.Start();
+
+            // Observational stream only: independent ICMP cadence and CSV diagnostics.
+            // Do not feed its results into FastPing UI or route-selection decisions yet.
+            controlProbe = new WtfControlProbe(
+                FixedPrimaryProbeTarget,
+                FixedSecondaryProbeTarget,
+                () => fastPing.GetState(),
+                () => fastPingSignalAnalyzer.Last10sSnapshot);
+            controlProbe.Start();
         }
 
         private void InitializeTelemetry()
@@ -2114,6 +2124,16 @@ namespace WTFnetApp
 
         public async Task StopAsync()
         {
+            try
+            {
+                if (controlProbe != null)
+                    await controlProbe.StopAsync();
+            }
+            catch (Exception ex)
+            {
+                Logger.Log("engine", "control probe stop error: " + ex.Message);
+            }
+
             try
             {
                 fastPing.StateUpdated -= OnFastPingStateUpdated;
