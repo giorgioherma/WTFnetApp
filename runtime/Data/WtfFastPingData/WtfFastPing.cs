@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Diagnostics;
+using System.Globalization;
 using System.Net.NetworkInformation;
 using System.Threading.Tasks;
 
@@ -374,15 +376,23 @@ namespace WTFnetApp
                 target.LastProbeUtc = DateTime.UtcNow;
             }
 
+            // Capture completion before acquiring the state lock: lock contention
+            // must not be mistaken for time spent awaiting an ICMP response.
+            DateTime requestStartUtc = DateTime.UtcNow;
+            long requestStartTicks = Stopwatch.GetTimestamp();
             try
             {
                 PingReply reply = await ping.SendPingAsync(host, timeoutMs, Payload);
+                long requestEndTicks = Stopwatch.GetTimestamp();
+                DateTime requestEndUtc = DateTime.UtcNow;
+                string timing = FormatProbeTiming(requestStartUtc, requestEndUtc,
+                    requestStartTicks, requestEndTicks, timeoutMs, false);
 
                 lock (sync)
                 {
                     if (reply.Status == IPStatus.Success)
                     {
-                        Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host);
+                        Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host + timing);
                         RegisterSuccess_NoLock(target, reply.RoundtripTime);
                         RecordEvaluationSample_NoLock(
                             target.Name,
@@ -397,7 +407,7 @@ namespace WTFnetApp
                     {
                         bool isTimeout = reply.Status == IPStatus.TimedOut;
 
-                        Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host);
+                        Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host + timing);
                         RegisterMiss_NoLock(target);
                         RecordEvaluationSample_NoLock(
                             target.Name,
@@ -414,9 +424,13 @@ namespace WTFnetApp
             }
             catch (Exception ex)
             {
+                long requestEndTicks = Stopwatch.GetTimestamp();
+                DateTime requestEndUtc = DateTime.UtcNow;
+                string timing = FormatProbeTiming(requestStartUtc, requestEndUtc,
+                    requestStartTicks, requestEndTicks, timeoutMs, false);
                 lock (sync)
                 {
-                    Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host);
+                    Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host + timing);
                     RegisterMiss_NoLock(target);
                     RecordEvaluationSample_NoLock(
                         target.Name,
@@ -430,6 +444,20 @@ namespace WTFnetApp
                 }
             }
             await MaybeRunEvaluationBurstAsync(target, ping);
+        }
+
+        // The original raw-log prefix remains unchanged for existing parsers.
+        // Stopwatch elapsed time is monotonic; UTC fields align with the control CSV.
+        private static string FormatProbeTiming(
+            DateTime startedUtc, DateTime completedUtc,
+            long startedTicks, long completedTicks, int configuredTimeoutMs, bool burst)
+        {
+            double elapsedMs = (completedTicks - startedTicks) * 1000.0 / Stopwatch.Frequency;
+            return " | start_utc=" + startedUtc.ToString("o", CultureInfo.InvariantCulture) +
+                   " | end_utc=" + completedUtc.ToString("o", CultureInfo.InvariantCulture) +
+                   " | elapsed_ms=" + elapsedMs.ToString("0.000", CultureInfo.InvariantCulture) +
+                   " | timeout_ms=" + configuredTimeoutMs.ToString(CultureInfo.InvariantCulture) +
+                   " | burst=" + (burst ? "1" : "0");
         }
 
         private async Task MaybeRunEvaluationBurstAsync(ProbeTargetState target, Ping ping)
@@ -466,23 +494,31 @@ namespace WTFnetApp
 
             for (int i = 0; i < EvaluationBurstExtraProbes; i++)
             {
+                int timeoutMs = 0;
+                DateTime requestStartUtc = DateTime.MinValue;
+                long requestStartTicks = 0;
                 try
                 {
                     await Task.Delay(EvaluationBurstProbeDelayMs);
 
-                    int timeoutMs;
                     lock (sync)
                     {
                         timeoutMs = ComputeProbeTimeout_NoLock();
                     }
 
+                    requestStartUtc = DateTime.UtcNow;
+                    requestStartTicks = Stopwatch.GetTimestamp();
                     PingReply reply = await ping.SendPingAsync(host, timeoutMs, Payload);
+                    long requestEndTicks = Stopwatch.GetTimestamp();
+                    DateTime requestEndUtc = DateTime.UtcNow;
+                    string timing = FormatProbeTiming(requestStartUtc, requestEndUtc,
+                        requestStartTicks, requestEndTicks, timeoutMs, true);
 
                     lock (sync)
                     {
                         if (reply.Status == IPStatus.Success)
                         {
-                            Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host + " [burst]");
+                            Logger.LogFastPingRaw(reply.RoundtripTime + "ms | " + host + " [burst]" + timing);
                             RegisterSuccess_NoLock(target, reply.RoundtripTime);
                             RecordEvaluationSample_NoLock(
                                 target.Name,
@@ -497,7 +533,7 @@ namespace WTFnetApp
                         {
                             bool isTimeout = reply.Status == IPStatus.TimedOut;
 
-                            Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host);
+                            Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host + timing);
                             RegisterMiss_NoLock(target);
                             RecordEvaluationSample_NoLock(
                                 target.Name,
@@ -514,9 +550,13 @@ namespace WTFnetApp
                 }
                 catch (Exception ex)
                 {
+                    // An exception before SendPingAsync is not a completed probe.
+                    string timing = requestStartTicks == 0 ? " | request_not_started=1" :
+                        FormatProbeTiming(requestStartUtc, DateTime.UtcNow,
+                            requestStartTicks, Stopwatch.GetTimestamp(), timeoutMs, true);
                     lock (sync)
                     {
-                        Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host + " [burst]");
+                        Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host + " [burst]" + timing);
                         RegisterMiss_NoLock(target);
                         RecordEvaluationSample_NoLock(
                             target.Name,
