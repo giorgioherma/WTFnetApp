@@ -28,6 +28,40 @@ ordinary cadence.
 - The fast engine, overlay colors, NAT keepalive and route-selection scoring
   are **unchanged**. No automatic route switch occurs from the new control.
 
+## FastPing per-request timing (diagnostic-only)
+
+The existing `wtfnet_fastping_raw.txt` keeps its original leading format:
+`HH:mm:ss.fff 32ms | 1.1.1.1` or
+`HH:mm:ss.fff FAIL(TimedOut) | 1.1.1.1`.
+Each completed request now appends:
+
+- `start_utc` and `end_utc`: ISO-8601 timestamps around the awaited
+  `SendPingAsync` call, captured **before** the FastPing state lock.
+- `elapsed_ms`: the actual duration of the awaited request measured with
+  monotonic `Stopwatch` timestamps; this is not the received RTT.
+- `timeout_ms`: the adaptive timeout supplied to `SendPingAsync`.
+- `burst`: `0` for normal scheduling, `1` for startup route-evaluation
+  burst requests. Exceptions before a burst sends a request are marked
+  `request_not_started=1` instead of fabricating a duration.
+
+Example (illustrative, not an actual capture):
+
+```text
+03:48:55.987 FAIL(TimedOut) | 1.1.1.1 | start_utc=2026-11-01T02:48:55.9800000Z | end_utc=2026-11-01T02:48:55.9870000Z | elapsed_ms=7.000 | timeout_ms=700 | burst=0
+```
+
+With `wtfnet_control_probe.csv`, use control `utc` (completion) and
+`elapsed_ms` (elapsed from start) to approximate its request interval.
+A successful control response whose request overlaps a fast timeout
+shows that **at least one independent ICMP exchange succeeded** while the
+FastPing request was outstanding; it does *not* establish game UDP loss
+or prove that both ICMP destinations behaved identically.
+
+The first goal is to determine whether `TimedOut` responses actually
+wait for their configured deadlines. Do not interpret a raw timeout
+percentage as application packet loss. No health scoring, UI, polling
+cadence, timeout formula or route selection is changed by this instrumentation.
+
 ## Data interpretation and testing
 
 1. Check that stable connections produce `clear` after startup warmup
