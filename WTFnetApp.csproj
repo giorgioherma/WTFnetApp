@@ -112,6 +112,7 @@
   </Compile>
 
   <Compile Include="runtime\Data\WtfFastPingData\WtfFastPing.cs" />
+  <Compile Include="runtime\Data\WtfFastPingData\WtfControlProbe.cs" />
   <Compile Include="runtime\NatKeepAlive.cs" />
   <Compile Include="runtime\Program.cs" />
 
