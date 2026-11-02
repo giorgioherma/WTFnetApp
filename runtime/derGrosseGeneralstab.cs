@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -151,13 +152,14 @@ namespace WTFnetApp
 
             fastPing.Start();
 
-            // Observational stream only: independent ICMP cadence and CSV diagnostics.
-            // Do not feed its results into FastPing UI or route-selection decisions yet.
+            // Independent control outcomes are the live source of ICMP loss.
+            // FastPing itself retains sole ownership of rapid latency and jitter.
             controlProbe = new WtfControlProbe(
                 FixedPrimaryProbeTarget,
                 FixedSecondaryProbeTarget,
                 () => fastPing.GetState(),
                 () => fastPingSignalAnalyzer.Last10sSnapshot);
+            controlProbe.ProbeCompleted += OnControlProbeCompleted;
             controlProbe.Start();
         }
 
@@ -187,6 +189,17 @@ namespace WTFnetApp
         // =========================
         // INPUT PATHS
         // =========================
+
+        private void OnControlProbeCompleted(string host, IPStatus? status, long rtt)
+        {
+            if (status == IPStatus.TimedOut)
+                Logger.Log("control", "ICMP timeout observed | target=" + host +
+                    " | source=control | not game UDP loss");
+
+            // This publishes a new FastPingState synchronously when the result is
+            // Success or TimedOut. Exceptions remain diagnostic-only.
+            fastPing.ApplyControlProbeResult(host, status);
+        }
 
         private void OnFastPingStateUpdated(FastPingState fastPingState)
         {
@@ -2127,7 +2140,10 @@ namespace WTFnetApp
             try
             {
                 if (controlProbe != null)
+                {
                     await controlProbe.StopAsync();
+                    controlProbe.ProbeCompleted -= OnControlProbeCompleted;
+                }
             }
             catch (Exception ex)
             {
