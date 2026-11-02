@@ -55,6 +55,8 @@ namespace WTFnetApp
         private double tunnelLatencyMs = -1;
 
         private FastPingState state = new FastPingState();
+        private DateTime lastControlTimeoutUtc = DateTime.MinValue;
+        private int controlTimeoutCount;
 
         private DateTime evaluationModeSinceUtc = DateTime.MinValue;
         private DateTime lastPrimaryProbeUtc = DateTime.MinValue;
@@ -254,6 +256,51 @@ namespace WTFnetApp
             }
         }
 
+        // FastPing owns latency and jitter. ControlProbe alone supplies live
+        // success/timeout outcomes for loss accounting and health scoring.
+        public void ApplyControlProbeResult(string host, IPStatus? status)
+        {
+            if (string.IsNullOrWhiteSpace(host) || !status.HasValue)
+                return;
+
+            FastPingState snapshot;
+            lock (sync)
+            {
+                ProbeTargetState target =
+                    string.Equals(primary.Host, host, StringComparison.OrdinalIgnoreCase) ? primary :
+                    string.Equals(secondary.Host, host, StringComparison.OrdinalIgnoreCase) ? secondary : null;
+
+                if (target == null)
+                    return;
+
+                if (status.Value == IPStatus.Success)
+                {
+                    target.ConsecutiveMisses = 0;
+                    PushOutcome_NoLock(target, true);
+                }
+                else if (status.Value == IPStatus.TimedOut)
+                {
+                    RegisterControlMiss_NoLock(target);
+                    lastControlTimeoutUtc = DateTime.UtcNow;
+                    controlTimeoutCount++;
+                }
+                else
+                {
+                    // Non-timeout status and exceptions are separate diagnostics.
+                    return;
+                }
+
+                target.LossRate = ComputeLossRate_NoLock(target);
+                UpdateBadQualityRate_NoLock(target);
+                target.Confidence = ComputeConfidence_NoLock(target);
+                RecomputeState_NoLock();
+                snapshot = state.Clone();
+            }
+
+            // Publish on sample completion, without waiting for the 250 ms tick.
+            StateUpdated?.Invoke(snapshot);
+        }
+
         private async Task RunProbeLoop()
         {
             while (running)
@@ -408,7 +455,7 @@ namespace WTFnetApp
                         bool isTimeout = reply.Status == IPStatus.TimedOut;
 
                         Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host + timing);
-                        RegisterMiss_NoLock(target);
+                        // Fast ICMP failures remain raw diagnostics; control owns loss scoring.
                         RecordEvaluationSample_NoLock(
                             target.Name,
                             host,
@@ -431,7 +478,7 @@ namespace WTFnetApp
                 lock (sync)
                 {
                     Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host + timing);
-                    RegisterMiss_NoLock(target);
+                    // Fast ICMP failures remain raw diagnostics; control owns loss scoring.
                     RecordEvaluationSample_NoLock(
                         target.Name,
                         host,
@@ -534,7 +581,7 @@ namespace WTFnetApp
                             bool isTimeout = reply.Status == IPStatus.TimedOut;
 
                             Logger.LogFastPingRaw("FAIL(" + reply.Status + ") | " + host + timing);
-                            RegisterMiss_NoLock(target);
+                            // Fast ICMP failures remain raw diagnostics; control owns loss scoring.
                             RecordEvaluationSample_NoLock(
                                 target.Name,
                                 host,
@@ -557,7 +604,7 @@ namespace WTFnetApp
                     lock (sync)
                     {
                         Logger.LogFastPingRaw("EXC(" + ex.GetType().Name + ": " + ex.Message + ") | " + host + " [burst]" + timing);
-                        RegisterMiss_NoLock(target);
+                        // Fast ICMP failures remain raw diagnostics; control owns loss scoring.
                         RecordEvaluationSample_NoLock(
                             target.Name,
                             host,
@@ -810,11 +857,9 @@ namespace WTFnetApp
             DateTime now = DateTime.UtcNow;
 
             target.LastSuccessUtc = now;
-            target.ConsecutiveMisses = 0;
-            target.MissBackoffUntilUtc = DateTime.MinValue;
             target.LastSampleMs = sample;
 
-            PushOutcome_NoLock(target, true);
+            // Fast success updates latency, not control-owned loss outcomes.
             PushSuccessRtt_NoLock(target, sample);
 
             target.InstantPingMs = ComputeInstant_NoLock(target);
@@ -844,26 +889,12 @@ namespace WTFnetApp
             target.Confidence = ComputeConfidence_NoLock(target);
         }
 
-        private void RegisterMiss_NoLock(ProbeTargetState target)
+        private void RegisterControlMiss_NoLock(ProbeTargetState target)
         {
             target.ConsecutiveMisses++;
             PushOutcome_NoLock(target, false);
-
-            int backoffMs = 0;
-
-            if (target.ConsecutiveMisses >= 6)
-                backoffMs = evaluationMode ? 2000 : 1300;
-            else if (target.ConsecutiveMisses == 5)
-                backoffMs = evaluationMode ? 1450 : 950;
-            else if (target.ConsecutiveMisses == 4)
-                backoffMs = evaluationMode ? 1000 : 650;
-
-            if (backoffMs > 0)
-                target.MissBackoffUntilUtc = DateTime.UtcNow.AddMilliseconds(backoffMs);
-
-            target.LossRate = ComputeLossRate_NoLock(target);
-            UpdateBadQualityRate_NoLock(target);
-            target.Confidence = ComputeConfidence_NoLock(target);
+            // Never back off FastPing because a control request timed out.
+            // FastPing staleness still recognizes missing latency responses.
         }
 
         private void UpdateJitter_NoLock(ProbeTargetState target, double sample)
@@ -1123,6 +1154,8 @@ namespace WTFnetApp
             FastPingState next = new FastPingState();
 
             next.IsEvaluationMode = evaluationMode;
+            next.LastControlTimeoutUtc = lastControlTimeoutUtc;
+            next.ControlTimeoutCount = controlTimeoutCount;
 
             next.PrimaryTarget = primary.Host;
             next.SecondaryTarget = secondary.Host;
@@ -1749,6 +1782,9 @@ namespace WTFnetApp
         public bool IsStale;
         public bool OffBaseline;
         public bool IsEvaluationMode;
+
+        public DateTime LastControlTimeoutUtc;
+        public int ControlTimeoutCount;
 
         public FastPingHealthState HealthState;
 
