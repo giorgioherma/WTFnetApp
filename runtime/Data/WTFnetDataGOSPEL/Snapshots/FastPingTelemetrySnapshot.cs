@@ -26,6 +26,10 @@ namespace WTFnetApp
         public bool SecondaryFresh;
         public bool IsEvaluationMode;
 
+        // Independent control-ping events, never inferred from FastPing failures.
+        public DateTime LastControlTimeoutUtc = DateTime.MinValue;
+        public int ControlTimeoutCount;
+
         public double PrimaryInstantMs = -1;
         public double PrimaryStableMs = -1;
         public double PrimaryFloorMs = -1;
