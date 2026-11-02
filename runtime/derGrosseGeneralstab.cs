@@ -208,8 +208,13 @@ namespace WTFnetApp
                 if (fastPingState == null)
                     return;
 
-                fastPingSignalAnalyzer.Update(fastPingState);
-                PublishNetworkState(lastSnapshot, fastPingState);
+                // Control completions and the 250 ms FastPing publisher can
+                // fire on different threads. Serialize analyzer and resolver work.
+                lock (publishSync)
+                {
+                    fastPingSignalAnalyzer.Update(fastPingState);
+                    PublishNetworkState(lastSnapshot, fastPingState);
+                }
             }
             catch (Exception ex)
             {
@@ -238,8 +243,11 @@ namespace WTFnetApp
 
                 FastPingState fastPingState = fastPing.GetState();
 
-                fastPingSignalAnalyzer.Update(fastPingState);
-                PublishNetworkState(snapshot, fastPingState);
+                lock (publishSync)
+                {
+                    fastPingSignalAnalyzer.Update(fastPingState);
+                    PublishNetworkState(snapshot, fastPingState);
+                }
             }
             catch (Exception ex)
             {
