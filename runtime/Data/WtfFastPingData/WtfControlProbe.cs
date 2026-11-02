@@ -9,12 +9,12 @@ using System.Threading.Tasks;
 namespace WTFnetApp
 {
     /// <summary>
-    /// Slow, independent ICMP control stream. It is deliberately observational:
-    /// it does not change FastPing health, overlay state, or route selection.
+    /// Independent ICMP control stream. Successful replies and timeouts feed live
+    /// loss accounting, while the raw CSV remains available for diagnostics.
     /// </summary>
     internal sealed class WtfControlProbe
     {
-        private const int IntervalMs = 1000; // one probe overall per second; targets alternate
+        private const int IntervalMs = 600; // start-to-start minimum; targets alternate
         private const int TimeoutMs = 1500;
         private const int InitialOffsetMs = 500;
         private const int ComparisonIntervalSeconds = 5;
@@ -37,6 +37,10 @@ namespace WTFnetApp
         private Task probeTask;
         private DateTime lastComparisonUtc = DateTime.MinValue;
 
+        // Completed probe outcomes are published immediately, independently of CSV snapshots.
+        // Null status denotes an exception and is never counted as an ICMP timeout.
+        public event Action<string, IPStatus?, long> ProbeCompleted;
+
         public WtfControlProbe(
             string primaryHost,
             string secondaryHost,
@@ -56,7 +60,7 @@ namespace WTFnetApp
 
             running = true;
             probeTask = RunAsync();
-            Logger.Log("control", "independent control probe started | interval=1000ms | timeout=1500ms | alternating targets");
+            Logger.Log("control", "independent control probe started | interval=600ms | timeout=1500ms | alternating targets");
         }
 
         public async Task StopAsync()
@@ -89,10 +93,12 @@ namespace WTFnetApp
                 Ping ping = primary ? primaryPing : secondaryPing;
                 string outcome = "EXCEPTION";
                 long rtt = -1;
+                IPStatus? responseStatus = null;
 
                 try
                 {
                     PingReply reply = await ping.SendPingAsync(host, TimeoutMs, Payload);
+                    responseStatus = reply.Status;
                     outcome = reply.Status.ToString();
                     if (reply.Status == IPStatus.Success)
                         rtt = reply.RoundtripTime;
@@ -111,6 +117,20 @@ namespace WTFnetApp
                     Outcome = outcome,
                     RttMs = rtt
                 };
+
+                // Notify health/display before any diagnostic file I/O.
+                // A subscriber failure must not stop the independent probe loop.
+                if (running)
+                {
+                    try
+                    {
+                        ProbeCompleted?.Invoke(host, responseStatus, rtt);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log("control", "sample subscriber error: " + ex.GetType().Name);
+                    }
+                }
 
                 recent.Enqueue(sample);
                 while (recent.Count > 0 &&
@@ -131,6 +151,8 @@ namespace WTFnetApp
                     WriteComparison(completedUtc);
                 }
 
+                // Completion-aware cadence: never overlap probes or enqueue missed ticks.
+                // Requests exceeding the interval are followed by the next probe immediately.
                 int remainingMs = IntervalMs - (int)(DateTime.UtcNow - startedUtc).TotalMilliseconds;
                 if (running && remainingMs > 0)
                     await Task.Delay(remainingMs);

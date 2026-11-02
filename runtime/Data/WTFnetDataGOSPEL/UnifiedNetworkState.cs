@@ -260,6 +260,17 @@ namespace WTFnetApp
             DisplayPingColorKey = GetPingColorKey(ping);
             DisplayJitterText = FormatJitterText(JitterMs);
             DisplayJitterColorKey = GetJitterColorKey(JitterMs);
+
+            // Show each observed control timeout promptly without calling it
+            // UDP packet loss or replacing FastPing's latency readout.
+            if (FastPingTelemetry != null &&
+                FastPingTelemetry.LastControlTimeoutUtc != DateTime.MinValue &&
+                (DateTime.UtcNow - FastPingTelemetry.LastControlTimeoutUtc).TotalMilliseconds <= 2500)
+            {
+                DisplayJitterText += " | ICMP TO";
+                if (DisplayJitterColorKey == "green" || DisplayJitterColorKey == "gray")
+                    DisplayJitterColorKey = "yellow";
+            }
             DisplayTunnelState = BuildTunnelState();
             DisplayNatText = GetNatText(natState);
             DisplayNatColorKey = GetNatColorKey(natState);
@@ -410,6 +421,8 @@ namespace WTFnetApp
                 PrimaryFresh = src.PrimaryFresh,
                 SecondaryFresh = src.SecondaryFresh,
                 IsEvaluationMode = src.IsEvaluationMode,
+                LastControlTimeoutUtc = src.LastControlTimeoutUtc,
+                ControlTimeoutCount = src.ControlTimeoutCount,
                 PrimaryInstantMs = src.PrimaryInstantMs,
                 PrimaryStableMs = src.PrimaryStableMs,
                 PrimaryFloorMs = src.PrimaryFloorMs,

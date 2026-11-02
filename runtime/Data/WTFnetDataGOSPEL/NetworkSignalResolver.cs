@@ -624,6 +624,8 @@ namespace WTFnetApp
             telemetry.PrimaryFresh = fastPing.PrimaryFresh;
             telemetry.SecondaryFresh = fastPing.SecondaryFresh;
             telemetry.IsEvaluationMode = fastPing.IsEvaluationMode;
+            telemetry.LastControlTimeoutUtc = fastPing.LastControlTimeoutUtc;
+            telemetry.ControlTimeoutCount = fastPing.ControlTimeoutCount;
             telemetry.PrimaryInstantMs = fastPing.PrimaryInstantMs;
             telemetry.PrimaryStableMs = fastPing.PrimaryStableMs;
             telemetry.PrimaryFloorMs = fastPing.PrimaryFloorMs;

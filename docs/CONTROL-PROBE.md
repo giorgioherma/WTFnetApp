@@ -1,91 +1,73 @@
-# Independent control probe (initial observational pass)
+# FastPing and independent control probe
 
-## Why
+## Responsibilities
 
-The existing FastPing engine runs a deliberately aggressive schedule (nominal
-350 ms loop cadence and roughly 700 ms per target). Isolated ICMP timeouts
-at that rate are not proof of game packet loss, and the existing UI already
-weights/filters them. This control stream adds a separate, slower measurement
-to help distinguish fast-probe artifacts from problems observable at an
-ordinary cadence.
+- **FastPing** remains the rapid latency source: nominal 350 ms loop cadence,
+  adaptive 700–1800 ms timeout, successful RTTs, stable ping, jitter, spikes,
+  baseline, and latency staleness. Raw FastPing `TimedOut` and exception
+  statuses stay in `wtfnet_fastping_raw.txt` but **do not contribute** to live
+  ICMP loss, consecutive-miss counts or confidence penalties.
+- **ControlProbe** supplies live observed ICMP timeout outcomes. It uses a
+  completion-aware **600 ms start-to-start minimum**, alternates 1.1.1.1 and
+  8.8.8.8, keeps its **1500 ms timeout**, and uses separate Ping instances.
+  If a request takes longer than 600 ms, the next starts on completion.
+  Requests are never queued or overlapped.
+- **Health** consumes FastPing latency/jitter/staleness alongside ControlProbe
+  successes and `TimedOut` statuses. The existing weighted loss, confidence,
+  bad-quality and health rules remain in use; only the **source of the ICMP
+  outcome history** changes. Other control statuses and exceptions are
+  diagnostic only.
+- **Display** retains the normal FastPing RTT and jitter fields. A completed
+  control timeout triggers a synchronous update of the normal publish pipeline,
+  plus a short (2.5-second) `ICMP TO` marker next to jitter. A single missed
+  control ICMP reply is **not proof** of game UDP packet loss.
 
-## Implementation
+FastPing staleness is deliberately independent: if it stops returning
+successful RTTs, its stale detection can still alert even with no control
+timeout. Control timeouts do not trigger FastPing probe backoff. The control
+event is published before the CSV write and is delivered at completion, not
+at a fixed wall-clock tick. The overlay itself draws on its 250 ms timer.
 
-- New `WtfControlProbe`, separate from `WtfFastPing`: one ICMP probe per
-  second *overall*, alternating 1.1.1.1 and 8.8.8.8.
-- Independent `Ping` objects, 1500 ms timeout and 500 ms startup offset.
-  A timeout can extend the actual interval beyond 1 second; the log records
-  the measured elapsed time. There is never more than one outstanding
-  control request.
-- `wtfnet_control_probe.csv`: UTC, target, status, RTT and elapsed time for
-  each control attempt. `TimedOut` is a probe outcome, **not** a claim about
-  Rocket League's UDP loss.
-- `wtfnet_probe_comparison.csv`: every ~5 seconds, compare a rolling
-  10-second control window with the existing 10-second fast snapshot.
-  Comparison values are `both`, `fast-only`, `control-only`, `clear`,
-  and `insufficient`. This is a **provisional diagnostic classifier**, not
-  validated evidence of true game-server loss.
-- The fast engine, overlay colors, NAT keepalive and route-selection scoring
-  are **unchanged**. No automatic route switch occurs from the new control.
+## Diagnostic files
 
-## FastPing per-request timing (diagnostic-only)
+- `wtfnet_control_probe.csv`: UTC completion time, target, outcome,
+  successful RTT, and elapsed time for every control request.
+- `wtfnet_probe_comparison.csv`: ~5-second samples comparing a rolling
+  10-second control window with FastPing. The `fast_weighted_miss` legacy
+  column now reflects the **control-sourced loss state exported via FastPing**;
+  do not interpret it as FastPing raw failure rate. The `both`, `fast-only`,
+  `control-only`, `clear`, and `insufficient` labels are provisional
+  comparisons, not validated game-loss classifications.
+- `wtfnet_fastping_raw.txt` retains the original line prefix, including
+  `FAIL(TimedOut)`, plus `start_utc`, `end_utc`, `elapsed_ms`,
+  `timeout_ms` and `burst` for each attempted request.
 
-The existing `wtfnet_fastping_raw.txt` keeps its original leading format:
-`HH:mm:ss.fff 32ms | 1.1.1.1` or
-`HH:mm:ss.fff FAIL(TimedOut) | 1.1.1.1`.
-Each completed request now appends:
+`IPStatus.TimedOut` is an ICMP probe outcome, not a measurement of UDP game
+packet loss. A failed request returning well before its configured timeout
+must not be equated with a dropped game packet.
 
-- `start_utc` and `end_utc`: ISO-8601 timestamps around the awaited
-  `SendPingAsync` call, captured **before** the FastPing state lock.
-- `elapsed_ms`: the actual duration of the awaited request measured with
-  monotonic `Stopwatch` timestamps; this is not the received RTT.
-- `timeout_ms`: the adaptive timeout supplied to `SendPingAsync`.
-- `burst`: `0` for normal scheduling, `1` for startup route-evaluation
-  burst requests. Exceptions before a burst sends a request are marked
-  `request_not_started=1` instead of fabricating a duration.
+## Validation checklist
 
-Example (illustrative, not an actual capture):
-
-```text
-03:48:55.987 FAIL(TimedOut) | 1.1.1.1 | start_utc=2026-11-01T02:48:55.9800000Z | end_utc=2026-11-01T02:48:55.9870000Z | elapsed_ms=7.000 | timeout_ms=700 | burst=0
-```
-
-With `wtfnet_control_probe.csv`, use control `utc` (completion) and
-`elapsed_ms` (elapsed from start) to approximate its request interval.
-A successful control response whose request overlaps a fast timeout
-shows that **at least one independent ICMP exchange succeeded** while the
-FastPing request was outstanding; it does *not* establish game UDP loss
-or prove that both ICMP destinations behaved identically.
-
-The first goal is to determine whether `TimedOut` responses actually
-wait for their configured deadlines. Do not interpret a raw timeout
-percentage as application packet loss. No health scoring, UI, polling
-cadence, timeout formula or route selection is changed by this instrumentation.
-
-## Data interpretation and testing
-
-1. Check that stable connections produce `clear` after startup warmup
-   and that isolated fast misses do not lead to persistent `both`.
-2. Reproduce an actual network latency spike and verify overlapping fast
-   and control elevated RTTs in the CSV files.
-3. Compare physical raw routing and Speedify routing in separate windows;
-   allow at least 10 seconds after changing routes before interpreting
-   overlapping windows.
-4. Verify clean shutdown, no overlapping control sends and acceptable CPU/
-   network overhead.
-5. Check that a few isolated ICMP timeouts are **not** reported as proven
-   Rocket League packet loss. The control stream is corroborating evidence,
-   not a ground-truth UDP measurement.
-
-No control measurements are fed into existing UI thresholds until gameplay
-A/B validation justifies it. The per-window thresholds in
-`WtfControlProbe.WriteComparison` are starting heuristics and should be
-tuned against recordings rather than treated as final truth.
+1. On a stable link, both streams produce normal RTT data and the overlay
+   continues showing low-latency FastPing readings without an ICMP marker.
+2. A premature FastPing `TimedOut` is present in raw diagnostics, but does
+   not increment live loss rate or trigger a control timeout indicator.
+3. One ControlProbe `TimedOut` is immediately logged and triggers the short
+   `ICMP TO` display marker, while normal FastPing latency measurements
+   continue. Subsequent control successes reduce weighted loss.
+4. During a sustained outage, both FastPing staleness and control loss
+   reflect unresponsiveness. No control probe requests overlap.
+5. Verify startup route evaluation, CSV logging and clean shutdown.
+   Control failures do not directly switch routes.
 
 ## Integration
 
-`DerGrosseGeneralstab.InitializeFastPing` starts the control independently
-after the fast engine. `StopAsync` stops the control before the fast engine.
-The only project registration is a new `Compile Include` in
-`WTFnetApp.csproj`. No edits to `runtime/Logger.cs` or to deployment
-exports are required.
+`DerGrosseGeneralstab.InitializeFastPing` subscribes to
+`WtfControlProbe.ProbeCompleted` and passes each completed status to
+`WtfFastPing.ApplyControlProbeResult`. Each control success or timeout
+recomputes the existing state and publishes it immediately via
+`StateUpdated`. The control loop remains independent, and shutdown stops
+control before disposing FastPing.
+
+This implementation changes no `runtime/Logger.cs`, NAT keepalive,
+Speedify CLI command, or FastPing polling and timeout constants.
