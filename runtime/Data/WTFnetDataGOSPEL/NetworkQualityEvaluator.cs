@@ -29,7 +29,12 @@ namespace WTFnetApp
                 return;
             }
 
-            double effectiveLoss = EffectiveLoss(state.LossRate);
+            // Preserve pre-control FastPing UI reactivity. The fast miss rate
+            // indicates probe hitches, NOT proven game/network packet loss.
+            // UnifiedNetworkState.LossRate belongs to ControlProbe only.
+            double fastRawFailureRate = state.FastPingTelemetry != null
+                ? state.FastPingTelemetry.LossRate : 0;
+            double effectiveLoss = EffectiveLoss(fastRawFailureRate);
 
             // only truly awful loss should go straight critical
             if (effectiveLoss >= CriticalLoss)
