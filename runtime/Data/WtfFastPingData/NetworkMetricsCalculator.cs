@@ -43,11 +43,16 @@ namespace WTFnetApp
                 fastPing.InstantPingMs);
 
             state.Confidence = fastPing.Confidence;
-            state.LossRate = fastPing.LossRate;
+            // Unified logs and downstream interpretation use control ICMP outcomes.
+            // FastPing raw misses still drive rapid UI warnings via telemetry.
+            state.LossRate = fastPing.ControlLossRate;
             state.BadQualityRate = fastPing.BadQualityRate;
 
             state.SpikeDetected = fastPing.SpikeDetected;
-            state.IsStale = fastPing.IsStale;
+            // A functioning control probe determines gray/stale. Before its first
+            // sample, fall back to FastPing so startup has sensible behavior.
+            state.IsStale = fastPing.ControlHasResults
+                ? fastPing.ControlIsStale : fastPing.IsStale;
 
             state.PrimaryLatencySource = "fastping";
             state.PrimaryJitterSource = "fastping";
