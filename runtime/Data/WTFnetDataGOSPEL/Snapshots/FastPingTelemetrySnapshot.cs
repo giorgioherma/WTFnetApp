@@ -29,6 +29,10 @@ namespace WTFnetApp
         // Independent control-ping events, never inferred from FastPing failures.
         public DateTime LastControlTimeoutUtc = DateTime.MinValue;
         public int ControlTimeoutCount;
+        public bool ControlHasResults;
+        public DateTime ControlLastSuccessUtc = DateTime.MinValue;
+        public double ControlLossRate = -1;
+        public bool ControlIsStale;
 
         public double PrimaryInstantMs = -1;
         public double PrimaryStableMs = -1;
