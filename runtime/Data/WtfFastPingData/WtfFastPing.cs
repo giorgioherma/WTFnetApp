@@ -59,6 +59,7 @@ namespace WTFnetApp
         private int controlTimeoutCount;
         private DateTime firstControlResultUtc = DateTime.MinValue;
         private DateTime lastControlSuccessUtc = DateTime.MinValue;
+        private double lastControlRttMs = -1;
         private readonly byte[] controlOutcomes = new byte[16];
         private int controlOutcomeIndex;
         private int controlOutcomeCount;
@@ -264,7 +265,7 @@ namespace WTFnetApp
         // Control results are independent diagnostics. They must never overwrite
         // the FastPing miss streaks or weighted failure history used by the UI.
         // Control success freshness determines gray/stale status downstream.
-        public void ApplyControlProbeResult(string host, IPStatus? status)
+        public void ApplyControlProbeResult(string host, IPStatus? status, long rttMs)
         {
             if (string.IsNullOrWhiteSpace(host))
                 return;
@@ -281,9 +282,11 @@ namespace WTFnetApp
                 if (firstControlResultUtc == DateTime.MinValue)
                     firstControlResultUtc = now;
 
-                if (status == IPStatus.Success)
+                if (status == IPStatus.Success && rttMs >= 0)
                 {
                     lastControlSuccessUtc = now;
+                    // PingReply.RoundtripTime is an integer and may round to 0.
+                    lastControlRttMs = Math.Max(1, rttMs);
                     RecordControlOutcome_NoLock(true);
                 }
                 else if (status == IPStatus.TimedOut)
@@ -1198,6 +1201,7 @@ namespace WTFnetApp
             next.ControlTimeoutCount = controlTimeoutCount;
             next.ControlHasResults = firstControlResultUtc != DateTime.MinValue;
             next.ControlLastSuccessUtc = lastControlSuccessUtc;
+            next.ControlRttMs = lastControlRttMs;
             next.ControlLossRate = ComputeControlLoss_NoLock();
             DateTime controlFreshnessStart = lastControlSuccessUtc != DateTime.MinValue
                 ? lastControlSuccessUtc : firstControlResultUtc;
@@ -1834,6 +1838,7 @@ namespace WTFnetApp
         public int ControlTimeoutCount;
         public bool ControlHasResults;
         public DateTime ControlLastSuccessUtc;
+        public double ControlRttMs = -1;
         public double ControlLossRate = -1;
         public bool ControlIsStale;
 

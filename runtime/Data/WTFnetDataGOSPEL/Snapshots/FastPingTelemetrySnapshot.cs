@@ -31,6 +31,7 @@ namespace WTFnetApp
         public int ControlTimeoutCount;
         public bool ControlHasResults;
         public DateTime ControlLastSuccessUtc = DateTime.MinValue;
+        public double ControlRttMs = -1;
         public double ControlLossRate = -1;
         public bool ControlIsStale;
 

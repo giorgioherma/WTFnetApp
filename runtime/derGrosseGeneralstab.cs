@@ -196,9 +196,10 @@ namespace WTFnetApp
                 Logger.Log("control", "ICMP timeout observed | target=" + host +
                     " | source=control | not game UDP loss");
 
-            // This publishes a new FastPingState synchronously when the result is
-            // Success or TimedOut. Exceptions remain diagnostic-only.
-            fastPing.ApplyControlProbeResult(host, status);
+            // Keep the normal probe's successful RTT for the overlay number.
+            // FastPing's regular publish tick carries it without touching the
+            // sensitive FastPing failure history or creating extra UI ticks.
+            fastPing.ApplyControlProbeResult(host, status, rtt);
         }
 
         private void OnFastPingStateUpdated(FastPingState fastPingState)
