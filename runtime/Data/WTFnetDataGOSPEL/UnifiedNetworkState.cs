@@ -415,6 +415,7 @@ namespace WTFnetApp
                 ControlTimeoutCount = src.ControlTimeoutCount,
                 ControlHasResults = src.ControlHasResults,
                 ControlLastSuccessUtc = src.ControlLastSuccessUtc,
+                ControlRttMs = src.ControlRttMs,
                 ControlLossRate = src.ControlLossRate,
                 ControlIsStale = src.ControlIsStale,
                 PrimaryInstantMs = src.PrimaryInstantMs,

@@ -1,16 +1,18 @@
-# FastPing UI + independent control probe
+# Control-probe RTT display + FastPing rapid warning
 
 ## Intent: preserve the proven display
 
-**FastPing is the responsive UI signal. ControlProbe is the independent
-ICMP-loss diagnostic and gray/stale signal.** Do not substitute control misses
-for FastPing's existing hitch/debounce calculation.
+**The overlay's RTT number comes from ControlProbe; its responsive red warning
+comes from FastPing.** ControlProbe also owns ICMP-loss diagnostics and gray/stale.
+Do not substitute control misses for FastPing's existing hitch/debounce calculation.
 
 ### FastPing (unchanged original red-warning behavior)
 
 - Normal latency probing continues with its 350 ms loop delay and adaptive
-  700–1800 ms timeout. Successful replies update latency, jitter, baseline,
-  spike and frame-to-frame measurements exactly as before.
+  700–1800 ms timeout. Successful replies update the *FastPing internal*
+  latency, jitter, baseline, spike and frame-to-frame measurements as before.
+  These readings classify connection health but no longer supply the overlay
+  numeric RTT once ControlProbe has a successful reply.
 - FastPing raw `TimedOut` results and exceptions again feed its **original**
   weighted failure history, confidence, consecutive-miss counts and backoff.
   This is an intentionally sensitive **hitch/unresponsiveness warning**, **not
@@ -26,6 +28,10 @@ for FastPing's existing hitch/debounce calculation.
 - Keeps a completion-aware 600 ms minimum start-to-start interval, alternates
   two fixed targets, uses its own `Ping` instances, 8-byte payload and
   1500 ms timeout. There are no concurrent requests or queued missed ticks.
+- Its latest successful RTT supplies the overlay's numeric ping value. A timeout
+  retains the last valid control RTT; existing control freshness eventually
+  makes the overlay gray. Until the first valid control reply, the overlay
+  temporarily uses FastPing's RTT rather than displaying an empty value.
 - Each completion is logged in `wtfnet_control_probe.csv`. Only `Success`
   and `TimedOut` contribute to a **separate rolling 16-control-sample weighted
   observed ICMP timeout rate**. Exceptions and other statuses are diagnostic,
@@ -37,9 +43,10 @@ for FastPing's existing hitch/debounce calculation.
   once a control result has been received. It uses the existing stale
   threshold (normal 3200 ms, route evaluation 6500 ms). At startup, before
   any control result, the previous FastPing stale flag is used as fallback.
-- Control success or timeout updates only separate diagnostics and freshness
-  under the FastPing state lock. It **never** increments or resets FastPing's
-  miss streak, modifies its weighted outcomes, or forces additional UI ticks.
+- Control success or timeout updates only separate diagnostics, latest valid
+  control RTT and freshness under the FastPing state lock. It **never**
+  increments or resets FastPing's miss streak, modifies its weighted outcomes,
+  or forces additional UI ticks.
   The normal FastPing 250 ms publisher reflects control freshness promptly.
 - The `ICMP TO` text previously appended to the jitter line was removed to
   restore the original overlay layout. Individual control timeouts remain in
@@ -70,16 +77,17 @@ Neither ping stream measures the game's real UDP packet-loss percentage.
 
 ## Regression validation
 
-1. On a stable link, FastPing drives normal green ping and jitter, and
-   ControlProbe returns successful responses.
+1. On a stable link, ControlProbe's last successful RTT supplies the numeric
+   overlay ping; FastPing determines the green warning state and jitter.
 2. Inject/reproduce several consecutive fast failures while control remains
-   successful: the original **red hitch warning must still trigger**; unified
-   control `LossRate` should remain approximately zero.
+   successful: the original **red hitch warning must still trigger** while
+   the number continues to use ControlProbe's RTT; unified control
+   `LossRate` should remain approximately zero.
 3. Single isolated fast premature `TimedOut` must not be declared game loss
    or automatically trigger an outage; the old weighted UI debounce remains.
-4. Force control failures while FastPing still returns success: the
-   control ICMP rate rises and the UI turns **gray** only once the last
-   control success exceeds the stale threshold.
+4. Force control failures while FastPing still returns success: the RTT
+   number holds its last valid control reply, the control ICMP rate rises and
+   the UI turns **gray** once the last control success exceeds the stale threshold.
 5. On control recovery, the gray flag clears; FastPing continues to own red
    warnings. Check the 250 ms display refresh and that no `ICMP TO`
    string appears in the jitter text.
@@ -89,11 +97,12 @@ Neither ping stream measures the game's real UDP packet-loss percentage.
 ## Integration
 
 `DerGrosseGeneralstab` subscribes to `WtfControlProbe.ProbeCompleted` and
-passes results to `WtfFastPing.ApplyControlProbeResult`. That only stores
-independent control observations; normal FastPing `StateUpdated` publishes
-both raw hitch state and the control summary. The existing metrics calculator
-exports ControlProbe loss and staleness to the unified state, while the
-existing FastPing telemetry feeds the UI-specific red health calculation.
+passes results to `WtfFastPing.ApplyControlProbeResult`. That stores
+independent control observations plus the latest successful RTT; normal
+FastPing `StateUpdated` publishes both raw hitch state and control summary.
+The metrics calculator uses ControlProbe RTT for the *displayed* ping after
+first success and exports control loss/staleness separately, while FastPing
+telemetry continues to drive the original red-warning health calculation.
 
 No modifications to `runtime/Logger.cs`, NAT keepalive, Speedify CLI, or
 FastPing constants are required.

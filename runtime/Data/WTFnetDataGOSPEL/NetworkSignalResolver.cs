@@ -71,10 +71,10 @@ namespace WTFnetApp
                 NetworkMetricsCalculator.ResolveFromFastPing(state, fastPing, fastPingSnapshot);
                 NetworkQualityEvaluator.ClassifyFastPing(state);
 
-                state.HealthReason = "FastPing latency/hitch signal; control ICMP for loss/staleness";
+                state.HealthReason = "FastPing latency/hitch warning; control ICMP RTT/loss/staleness";
                 state.Notes = speedifyUsable
-                    ? "FastPing drives latency/hitch display; ControlProbe supplies ICMP loss/stale; Speedify context attached."
-                    : "FastPing drives latency/hitch display; ControlProbe supplies ICMP loss/stale.";
+                    ? "ControlProbe displays RTT and supplies ICMP loss/stale; FastPing drives red hitch warnings; Speedify context attached."
+                    : "ControlProbe displays RTT and supplies ICMP loss/stale; FastPing drives red hitch warnings.";
 
                 if (speedifyUsable)
                     ApplySpeedifyContextOnly(state, snapshot, fastPing);
@@ -628,6 +628,7 @@ namespace WTFnetApp
             telemetry.ControlTimeoutCount = fastPing.ControlTimeoutCount;
             telemetry.ControlHasResults = fastPing.ControlHasResults;
             telemetry.ControlLastSuccessUtc = fastPing.ControlLastSuccessUtc;
+            telemetry.ControlRttMs = fastPing.ControlRttMs;
             telemetry.ControlLossRate = fastPing.ControlLossRate;
             telemetry.ControlIsStale = fastPing.ControlIsStale;
             telemetry.PrimaryInstantMs = fastPing.PrimaryInstantMs;

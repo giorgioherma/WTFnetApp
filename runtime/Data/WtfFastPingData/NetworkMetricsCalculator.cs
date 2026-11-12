@@ -37,10 +37,17 @@ namespace WTFnetApp
                 state.QueueDraining = false;
             }
 
-            state.DisplayedPingMs = ChoosePositive(
-                fastPing.DisplayedPingMs,
-                fastPing.StablePingMs,
-                fastPing.InstantPingMs);
+            // The overlay's numeric RTT comes from the independent normal ICMP
+            // control probe. FastPing remains the latency/hitch classifier and
+            // controls warning colors; its RTT is only a startup fallback until
+            // the first valid control reply. On timeout, hold the last control RTT
+            // while the existing control freshness policy handles gray/stale.
+            state.DisplayedPingMs = fastPing.ControlRttMs > 0
+                ? fastPing.ControlRttMs
+                : ChoosePositive(
+                    fastPing.DisplayedPingMs,
+                    fastPing.StablePingMs,
+                    fastPing.InstantPingMs);
 
             state.Confidence = fastPing.Confidence;
             // Unified logs and downstream interpretation use control ICMP outcomes.
